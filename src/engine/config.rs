@@ -36,8 +36,6 @@ pub enum ValidationRule {
         child: String,
         parent: String,
         severity: Severity,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        require_parent_status: Option<String>,
     },
     #[serde(rename = "relation-existence")]
     RelationExistence {
@@ -1299,14 +1297,12 @@ pub fn default_rules() -> Vec<ValidationRule> {
             child: "story".to_string(),
             parent: "rfc".to_string(),
             severity: Severity::Warning,
-            require_parent_status: None,
         },
         ValidationRule::ParentChild {
             name: "iterations-need-stories".to_string(),
             child: "iteration".to_string(),
             parent: "story".to_string(),
             severity: Severity::Error,
-            require_parent_status: None,
         },
         ValidationRule::RelationExistence {
             name: "adrs-need-relations".to_string(),
@@ -3686,70 +3682,6 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
         let from_a = lc.targets_from("a");
         assert_eq!(from_a, vec!["b", "c"]);
         assert!(!from_a.contains(&"a"));
-    }
-
-    // AC5 (data): a parent-child rule with `require_parent_status` parses and the
-    // field is readable.
-    #[test]
-    fn parent_child_rule_parses_require_parent_status() {
-        let toml_str = r#"
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-accepted-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "error"
-require_parent_status = "accepted"
-"#;
-        let config = Config::parse(toml_str).unwrap();
-        match &config.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
-            other => panic!("unexpected rule: {other:?}"),
-        }
-    }
-
-    // AC5 (data): a parent-child rule WITHOUT the key parses with the field None.
-    #[test]
-    fn parent_child_rule_without_require_parent_status_is_none() {
-        let toml_str = r#"
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-"#;
-        let config = Config::parse(toml_str).unwrap();
-        match &config.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert!(require_parent_status.is_none()),
-            other => panic!("unexpected rule: {other:?}"),
-        }
     }
 
     // AC1: a [[types.attributes]] block deserializes into TypeDef.attributes,

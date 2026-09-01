@@ -579,14 +579,7 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
     // body keys are no longer valid and must be cleared before the new variant is
     // written. `name`/`severity` are common to both variants.
     if shape_changed {
-        for key in [
-            "child",
-            "parent",
-            "link",
-            "type",
-            "require",
-            "require_parent_status",
-        ] {
+        for key in ["child", "parent", "link", "type", "require"] {
             entry.remove(key);
         }
     }
@@ -596,18 +589,12 @@ fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
             child,
             parent,
             severity,
-            require_parent_status,
         } => {
             set_str(entry, "name", name);
             set_str(entry, "shape", "parent-child");
             set_str(entry, "child", child);
             set_str(entry, "parent", parent);
             set_str(entry, "severity", severity_str(severity));
-            set_opt_str(
-                entry,
-                "require_parent_status",
-                require_parent_status.as_deref(),
-            );
         }
         ValidationRule::RelationExistence {
             name,
@@ -1090,71 +1077,6 @@ child = "story"
 parent = "rfc"
 severity = "error"
 "#;
-
-    // AC5 (writer): a parent-child rule with `require_parent_status` round-trips.
-    #[test]
-    fn require_parent_status_round_trips() {
-        let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
-            c.rules[0] = ValidationRule::ParentChild {
-                name: "story-has-rfc".to_string(),
-                child: "story".to_string(),
-                parent: "rfc".to_string(),
-                severity: Severity::Error,
-                require_parent_status: Some("accepted".to_string()),
-            };
-            c
-        };
-
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-        assert!(out.contains(r#"require_parent_status = "accepted""#));
-        let reparsed = Config::parse(&out).unwrap();
-        match &reparsed.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
-            other => panic!("unexpected rule: {other:?}"),
-        }
-    }
-
-    // AC5 (writer): a shape change (parent-child -> relation-existence) drops the
-    // require_parent_status key.
-    #[test]
-    fn shape_change_drops_require_parent_status() {
-        const SRC_WITH_REQ: &str = r#"[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "story-has-rfc"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "error"
-require_parent_status = "accepted"
-"#;
-        let buffer = {
-            let mut c = Config::parse(SRC_WITH_REQ).unwrap();
-            c.rules[0] = ValidationRule::RelationExistence {
-                name: "story-has-rfc".to_string(),
-                doc_type: "story".to_string(),
-                require: "implements".to_string(),
-                severity: Severity::Error,
-            };
-            c
-        };
-
-        let out = write_config_in_place(SRC_WITH_REQ, &buffer).unwrap();
-        assert!(!out.contains("require_parent_status"));
-        Config::parse(&out).unwrap();
-    }
 
     #[test]
     fn shape_change_clears_stale_variant_keys() {

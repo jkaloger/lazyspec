@@ -208,8 +208,8 @@ pub fn blank_config() -> Config {
 
 /// Design a whole type DAG from nothing, interactively: author (prompted, not
 /// persisted), naming pattern, a types loop (at least one type required), then --
-/// once two or more types exist -- a parent-child rules loop with severity and an
-/// optional parent-status gate. Renders a DAG summary and asks to write; a `no`
+/// once two or more types exist -- a parent-child rules loop with severity.
+/// Renders a DAG summary and asks to write; a `no`
 /// discards the session and starts over. Pure -- no disk IO -- so it is fully
 /// driveable by a `ScriptedPrompter`. The returned `Config` owes nothing to
 /// `starter_config()`'s types or rules and validates clean via `write_project`.
@@ -261,8 +261,8 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
 
 /// A human-readable summary of the designed DAG: every type with its plural,
 /// directory, prefix, store, and effective lifecycle (states and edges); every
-/// parent-child rule with its child, parent, severity, and gate status; and the
-/// relation vocabulary. Rendered before the final write confirmation.
+/// parent-child rule with its child, parent, and severity; and the relation
+/// vocabulary. Rendered before the final write confirmation.
 fn render_dag_summary(config: &Config) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -297,21 +297,16 @@ fn render_dag_summary(config: &Config) -> String {
             child,
             parent,
             severity,
-            require_parent_status,
         } = rule
         {
             any_rule = true;
-            let gate = match require_parent_status {
-                Some(status) => dim(&format!(", gate: parent status = {status}")),
-                None => String::new(),
-            };
             let severity = match severity {
                 crate::engine::config::Severity::Error => "error",
                 crate::engine::config::Severity::Warning => "warning",
             };
             let _ = writeln!(
                 out,
-                "  {}: {} (severity: {}{gate})",
+                "  {}: {} (severity: {})",
                 bold(name),
                 dim(&format!("{child} -> {parent}")),
                 dim(severity),
@@ -624,7 +619,6 @@ mod tests {
             "n",      // add an attribute? no
             "n",      // set a parent type? no
             "n",      // design custom lifecycle? no
-            "n",      // gate a parent-child rule? no
             "n",      // add another type? no
             "y",      // write this config? yes
         ]
@@ -709,7 +703,7 @@ mod tests {
 
     // A full from-scratch happy-path script: rfc (custom lifecycle draft ->
     // accepted), story (inherited lifecycle, parent rfc), and a story -> rfc
-    // parent-child rule with severity=error gated on parent status `accepted`.
+    // parent-child rule with severity=error.
     fn full_scratch_answers() -> Vec<String> {
         [
             "",               // author
@@ -747,8 +741,6 @@ mod tests {
             "story",          // child
             "rfc",            // parent
             "error",          // severity
-            "y",              // gate on a parent status? yes
-            "accepted",       // required parent status
             "n",              // add another rule? no
             "y",              // write this config? yes
         ]
@@ -757,11 +749,11 @@ mod tests {
         .collect()
     }
 
-    // AC1: a custom-lifecycle edge and a rule gate that each name an undefined
-    // state re-prompt (reusing the type collector) rather than aborting; only
-    // defined states/statuses are accepted.
+    // AC1: a custom-lifecycle edge that names an undefined state re-prompts
+    // (reusing the type collector) rather than aborting; only defined states are
+    // accepted.
     #[test]
-    fn scratch_lifecycle_and_gate_reject_unknown_states() {
+    fn scratch_lifecycle_edge_rejects_unknown_states() {
         let answers = [
             "",
             "",  // author, naming
@@ -799,9 +791,6 @@ mod tests {
             "beta",
             "alpha", // child, parent
             "",      // severity -> warning
-            "y",     // gate on a parent status
-            "bogus", // not in alpha's lifecycle -> re-ask
-            "done",  // valid
             "n",     // add another rule? no
             "y",     // write
         ]
@@ -817,19 +806,6 @@ mod tests {
         assert_eq!(alpha.lifecycle.edges.len(), 1, "bad edge was not kept");
         assert_eq!(alpha.lifecycle.edges[0].from, "draft");
         assert_eq!(alpha.lifecycle.edges[0].to, "done");
-
-        let rule = config
-            .rules
-            .iter()
-            .find_map(|r| match r {
-                ValidationRule::ParentChild {
-                    require_parent_status,
-                    ..
-                } => require_parent_status.clone(),
-                _ => None,
-            })
-            .expect("a gated parent-child rule exists");
-        assert_eq!(rule, "done", "only a defined parent status is accepted");
     }
 
     // AC2: a parent-child rule draws child and parent from the defined types
@@ -853,7 +829,6 @@ mod tests {
             "beta",  // child
             "alpha", // parent
             "error", // severity
-            "n",     // no gate
             "n",     // add another rule? no
             "y",     // write
         ]
@@ -882,8 +857,8 @@ mod tests {
         assert_eq!(rule.2, Severity::Error, "chosen severity recorded");
     }
 
-    // AC3: the DAG summary names every type, its lifecycle, every rule and gate,
-    // and the relation vocabulary. (The write confirmation is exercised by the
+    // AC3: the DAG summary names every type, its lifecycle, every rule, and the
+    // relation vocabulary. (The write confirmation is exercised by the
     // decline test below and by every happy-path script ending in `write? yes`.)
     #[test]
     fn scratch_summary_lists_dag() {
@@ -904,10 +879,6 @@ mod tests {
         assert!(
             summary.contains("story -> rfc"),
             "rule endpoints: {summary}"
-        );
-        assert!(
-            summary.contains("parent status = accepted"),
-            "gate: {summary}"
         );
         assert!(summary.contains("implements"), "relation vocab: {summary}");
     }
@@ -938,8 +909,8 @@ mod tests {
         for needle in [
             "rfc",
             "draft -> accepted",
+            "stories-need-rfcs",
             "story -> rfc",
-            "parent status = accepted",
             "implements",
         ] {
             assert!(

@@ -1536,7 +1536,6 @@ impl App {
                     child: String::new(),
                     parent: String::new(),
                     severity: severity.clone(),
-                    require_parent_status: None,
                 }
             }
         };
@@ -2726,7 +2725,6 @@ impl App {
                         child: String::new(),
                         parent: String::new(),
                         severity: Severity::Error,
-                        require_parent_status: None,
                     });
                 self.settings_entry = self.settings_buffer.rules.len() - 1;
             }
@@ -6181,7 +6179,6 @@ mod tests {
             child: "story".to_string(),
             parent: "rfc".to_string(),
             severity: Severity::Error,
-            require_parent_status: None,
         }];
         let mut app = settings_app(config, 3, 4); // Validation Rules, severity (ParentChild)
         app.settings_drill = Some(0);
@@ -6212,7 +6209,6 @@ mod tests {
             child: "story".to_string(),
             parent: "rfc".to_string(),
             severity: Severity::Warning,
-            require_parent_status: None,
         }];
         let mut app = settings_app(config, 3, 1); // Validation Rules, shape
         app.settings_drill = Some(0);

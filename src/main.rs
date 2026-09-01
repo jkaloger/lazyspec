@@ -764,17 +764,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Some(ConfigCommand::AddGate { name, status }) => {
-                    let pb =
-                        lazyspec::cli::spinner::op_spinner(format!("gating rule {name}"), json);
-                    match lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status) {
-                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "gate added"),
-                        Err(e) => {
-                            lazyspec::cli::spinner::finish_err(pb, "add-gate failed");
-                            return Err(e);
-                        }
-                    }
-                }
             }
         }
         Some(Commands::Provenance { command }) => {

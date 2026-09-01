@@ -143,7 +143,6 @@ severity = "warning"
             child: "epic".to_string(),
             parent: "theme".to_string(),
             severity: Severity::Warning,
-            require_parent_status: None,
         }
     );
 }

@@ -316,7 +316,6 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | `config schema`                                                                                   | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `config add-type <name> <plural> <dir> <prefix>`                                                  | Append a new document type to `.lazyspec.toml` (bare, on a TTY, runs the interactive wizard)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `config set-lifecycle <type> [--state X] [--edge from:to]`                                        | Replace a type's lifecycle states and edges                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `config add-gate <rule> --status X`                                                               | Set the `require_parent_status` gate on a parent-child rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `provenance add <id> <citation>`                                                                  | Append a citation to a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `provenance remove <id> <citation>`                                                               | Remove an exact-match citation from a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `provenance list [id]`                                                                            | List citations for a document, or for all documents grouped by id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -504,12 +503,9 @@ lazyspec config add-type bug bugs docs/bugs BUG \
 lazyspec config set-lifecycle iteration \
   --state draft --state in-progress --state done \
   --edge draft:in-progress --edge in-progress:done --edge "*:rejected"
-
-# Gate child creation on a parent status (parent-child rules only)
-lazyspec config add-gate stories-need-rfcs --status accepted
 ```
 
-`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle (it is a set, not a merge) and rejects an unknown type; `add-gate` rejects an unknown rule and refuses a `relation-existence` rule (the gate applies only to `parent-child` rules). The mutators require an already-valid config; run `lazyspec fix --config` first to migrate a legacy one.
+`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle (it is a set, not a merge) and rejects an unknown type. The mutators require an already-valid config; run `lazyspec fix --config` first to migrate a legacy one.
 
 `config schema` needs no active project and runs from any directory (every other `config` subcommand requires a `.lazyspec.toml`). Save it as a machine-readable reference for a human or agent editing the config:
 
@@ -634,8 +630,6 @@ Validation rules define structural constraints between document types. Two shape
 - `parent-child`: the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
 - `relation-existence`: documents of a given type must have at least one relationship.
 
-A `parent-child` rule may also carry `require_parent_status`: when set, `create` of the child type is refused unless at least one parent document of the rule's `parent` type has reached that status. The required status must be a valid state of the parent type's lifecycle. Rules without `require_parent_status` impose no creation gate.
-
 ```toml
 [[rules]]
 shape = "parent-child"
@@ -643,7 +637,6 @@ name = "stories-need-rfcs"
 child = "story"
 parent = "rfc"
 severity = "warning"
-require_parent_status = "accepted"  # optional: a story cannot be created until an rfc is accepted
 
 [[rules]]
 shape = "relation-existence"

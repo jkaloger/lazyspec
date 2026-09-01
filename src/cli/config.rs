@@ -86,14 +86,6 @@ pub enum ConfigCommand {
         #[arg(long = "edge")]
         edges: Vec<String>,
     },
-    /// Set the require_parent_status gate on a parent-child rule
-    AddGate {
-        /// Rule name to gate
-        name: String,
-        /// Parent status required before a child may be created
-        #[arg(long)]
-        status: String,
-    },
 }
 
 /// `Config::edges` is skipped when empty so the TOML writer never emits a bare
@@ -270,7 +262,6 @@ pub struct CollectedType {
     pub attributes: Vec<String>,
     pub parent_type: Option<String>,
     pub lifecycle: Option<(Vec<String>, Vec<String>)>,
-    pub gate: Option<(String, String)>,
     pub github_issue_tag: Option<String>,
     pub github_issue_type: Option<String>,
     pub clickup_list_id: Option<String>,
@@ -451,50 +442,6 @@ pub fn collect_type_interactive(
         None
     };
 
-    // Gate: attach `require_parent_status` to an existing parent-child rule. Only
-    // a status the parent type's effective lifecycle carries is accepted.
-    let parent_child_rules: Vec<(String, String)> = config
-        .rules
-        .iter()
-        .filter_map(|r| match r {
-            ValidationRule::ParentChild { name, parent, .. } => {
-                Some((name.clone(), parent.clone()))
-            }
-            ValidationRule::RelationExistence { .. } => None,
-        })
-        .collect();
-    let gate = if !parent_child_rules.is_empty()
-        && prompter.confirm("Gate a parent-child rule", false)?
-    {
-        let rule_names: Vec<&str> = parent_child_rules.iter().map(|(n, _)| n.as_str()).collect();
-        let rule = loop {
-            let choice = prompter.select("Rule", &rule_names, rule_names[0])?;
-            if rule_names.contains(&choice.as_str()) {
-                break choice;
-            }
-            println!("\"{choice}\" is not a parent-child rule; choose one of the listed names");
-        };
-        let parent_name = &parent_child_rules
-            .iter()
-            .find(|(n, _)| *n == rule)
-            .expect("selected rule came from this list")
-            .1;
-        let states = config
-            .type_by_name(parent_name)
-            .map(|t| t.effective_lifecycle().states.clone())
-            .unwrap_or_default();
-        let status = loop {
-            let answer = prompter.ask("Required parent status", None)?;
-            if states.contains(&answer) {
-                break answer;
-            }
-            println!("\"{answer}\" is not a lifecycle state of \"{parent_name}\"; choose another");
-        };
-        Some((rule, status))
-    } else {
-        None
-    };
-
     Ok(CollectedType {
         name,
         plural,
@@ -508,7 +455,6 @@ pub fn collect_type_interactive(
         attributes,
         parent_type,
         lifecycle: custom_lifecycle,
-        gate,
         github_issue_tag,
         github_issue_type,
         clickup_list_id,
@@ -544,9 +490,8 @@ fn parent_child_rule_name(config: &Config, child: &str, parent: &str) -> String 
 /// Prompt for a single parent-child rule against `config` (an in-memory view of
 /// the project as designed so far). Child and parent are each chosen from the
 /// defined type names -- an unknown answer re-asks rather than aborting. Severity
-/// defaults to `warning`. An optional gate re-asks until the chosen status names
-/// a state in the parent type's effective lifecycle. Pure: no disk IO, fully
-/// driveable by a `ScriptedPrompter`.
+/// defaults to `warning`. Pure: no disk IO, fully driveable by a
+/// `ScriptedPrompter`.
 pub fn collect_parent_child_rule(
     config: &Config,
     prompter: &mut dyn Prompter,
@@ -575,33 +520,16 @@ pub fn collect_parent_child_rule(
     let severity =
         parse_severity(&prompter.select("Severity", &["warning", "error"], "warning")?)?;
 
-    let require_parent_status = if prompter.confirm("Gate on a parent status", false)? {
-        let states = config
-            .type_by_name(&parent)
-            .map(|t| t.effective_lifecycle().states.clone())
-            .unwrap_or_default();
-        Some(loop {
-            let answer = prompter.ask("Required parent status", None)?;
-            if states.contains(&answer) {
-                break answer;
-            }
-            println!("\"{answer}\" is not a lifecycle state of \"{parent}\"; choose another");
-        })
-    } else {
-        None
-    };
-
     Ok(ValidationRule::ParentChild {
         name,
         child,
         parent,
         severity,
-        require_parent_status,
     })
 }
 
 /// Push a collected type onto an in-memory `Config` and apply its optional
-/// lifecycle and gate, without any disk IO. Used by the `init` wizard, which
+/// lifecycle, without any disk IO. Used by the `init` wizard, which
 /// serializes the whole `Config` at the end rather than editing a file in place.
 pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> Result<()> {
     if config.type_by_name(&collected.name).is_some() {
@@ -647,26 +575,14 @@ pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> R
         };
     }
 
-    if let Some((rule, status)) = &collected.gate {
-        match config.rules.iter_mut().find(|r| rule_name(r) == rule) {
-            Some(ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            }) => {
-                *require_parent_status = Some(status.clone());
-            }
-            _ => bail!("unknown parent-child rule \"{}\"", rule),
-        }
-    }
-
     Ok(())
 }
 
 /// Prompt for a type's fields on a TTY and drive the same writers the flag path
 /// uses. After the core fields it optionally collects attributes and a parent
-/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
-/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
-/// pre-validates prompt-side and re-asks on failure rather than aborting.
+/// type (fed to `run_add_type`) and a custom lifecycle (`run_set_lifecycle`).
+/// Every optional section pre-validates prompt-side and re-asks on failure
+/// rather than aborting.
 pub fn run_add_type_interactive(
     root: &Path,
     fs: &dyn FileSystem,
@@ -689,7 +605,6 @@ pub fn run_add_type_interactive(
         attributes,
         parent_type,
         lifecycle: custom_lifecycle,
-        gate,
         github_issue_tag,
         github_issue_type,
         clickup_list_id,
@@ -720,9 +635,6 @@ pub fn run_add_type_interactive(
     if let Some((states, edges)) = custom_lifecycle {
         run_set_lifecycle(root, fs, &name, &states, &edges)?;
     }
-    if let Some((rule, status)) = gate {
-        run_add_gate(root, fs, &rule, &status)?;
-    }
     Ok(())
 }
 
@@ -747,33 +659,6 @@ pub fn run_set_lifecycle(
         bail!("unknown type \"{}\"", name);
     };
     type_def.lifecycle = lifecycle;
-
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
-}
-
-pub fn run_add_gate(root: &Path, fs: &dyn FileSystem, name: &str, status: &str) -> Result<()> {
-    let path = root.join(".lazyspec.toml");
-    let src = fs.read_to_string(&path)?;
-    let mut config = Config::parse(&src)?;
-
-    let rule = config.rules.iter_mut().find(|r| rule_name(r) == name);
-    match rule {
-        None => bail!("unknown rule \"{}\"", name),
-        Some(ValidationRule::RelationExistence { .. }) => {
-            bail!(
-                "rule \"{}\" is a relation-existence rule; gates apply only to parent-child rules",
-                name
-            )
-        }
-        Some(ValidationRule::ParentChild {
-            require_parent_status,
-            ..
-        }) => {
-            *require_parent_status = Some(status.to_string());
-        }
-    }
 
     let out = write_config_in_place(&src, &config)?;
     fs.write(&path, &out)?;
@@ -946,7 +831,7 @@ lifecycle = { states = ["draft", "done"], edges = [{ from = "draft", to = "done"
 name = "implements"
 inverse = "implemented-by"
 
-# the gateable rule
+# the parent-child rule
 [[rules]]
 name = "stories-need-rfcs"
 shape = "parent-child"
@@ -1058,36 +943,16 @@ traversal = "chain"
         assert_eq!(rfc["lifecycle"]["edges"][0]["to"], "review");
     }
 
-    // AC2: relationships and rules arrays serialize out, and a parent-child rule
-    // can carry require_parent_status. Guards against a future #[serde(skip)].
+    // AC2: relationships and rules arrays serialize out. Guards against a future
+    // #[serde(skip)].
     #[test]
-    fn show_json_emits_relationships_rules_and_gate() {
+    fn show_json_emits_relationships_and_rules() {
         let json = show(SRC);
         assert!(json["relationships"].is_array());
         assert!(json["rules"].is_array());
-
-        let gated = r#"[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-require_parent_status = "accepted"
-"#;
-        let json = show(gated);
         assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "accepted"
+            rule_named(&json, "stories-need-rfcs")["shape"],
+            "parent-child"
         );
     }
 
@@ -1537,39 +1402,6 @@ require_parent_status = "accepted"
         assert!(err.to_string().contains("unknown type"));
     }
 
-    // AC5: add-gate sets require_parent_status on a parent-child rule and rejects
-    // unknown rules and relation-existence targets.
-    #[test]
-    fn add_gate_sets_require_parent_status() {
-        let (_dir, path, fs) = fixture(SRC);
-        run_add_gate(path.parent().unwrap(), &fs, "stories-need-rfcs", "accepted").unwrap();
-        let json = show(&std::fs::read_to_string(&path).unwrap());
-        assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "accepted"
-        );
-    }
-
-    #[test]
-    fn add_gate_rejects_unknown_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let err = run_add_gate(path.parent().unwrap(), &fs, "nope", "accepted").unwrap_err();
-        assert!(err.to_string().contains("unknown rule"));
-    }
-
-    #[test]
-    fn add_gate_rejects_relation_existence_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let err = run_add_gate(
-            path.parent().unwrap(),
-            &fs,
-            "adrs-need-relations",
-            "accepted",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("relation-existence"));
-    }
-
     // AC6: each mutator preserves comments and the section order of untouched
     // blocks, changes only its intended block, and emits a reparseable config.
     #[test]
@@ -1600,7 +1432,7 @@ require_parent_status = "accepted"
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# filename template"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the gateable rule"));
+        assert!(after.contains("# the parent-child rule"));
         // The new block is appended to the [[types]] array (after the last type,
         // before [[relationships]]); the relationship comment still follows it.
         let spike_at = after.find(r#"name = "spike""#).unwrap();
@@ -1608,7 +1440,7 @@ require_parent_status = "accepted"
         assert!(spike_at < rels_at, "new type sits inside the types array");
         // Untouched blocks keep their order: types -> relationships -> rules.
         assert!(after.find("# document types follow").unwrap() < rels_at);
-        assert!(rels_at < after.find("# the gateable rule").unwrap());
+        assert!(rels_at < after.find("# the parent-child rule").unwrap());
         Config::parse(&after).unwrap();
     }
 
@@ -1626,29 +1458,13 @@ require_parent_status = "accepted"
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the gateable rule"));
+        assert!(after.contains("# the parent-child rule"));
         // The other type's lifecycle is untouched.
         assert!(after
             .contains(r#"states = ["draft", "done"], edges = [{ from = "draft", to = "done" }]"#));
         let json = show(&after);
         // story keeps its original lifecycle.
         assert_eq!(type_named(&json, "story")["lifecycle"]["states"][1], "done");
-        Config::parse(&after).unwrap();
-    }
-
-    #[test]
-    fn add_gate_preserves_comments_and_only_changes_one_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let before = std::fs::read_to_string(&path).unwrap();
-        run_add_gate(path.parent().unwrap(), &fs, "stories-need-rfcs", "accepted").unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.contains("# lazyspec configuration"));
-        assert!(after.contains("# the gateable rule"));
-        // Exactly one line was added (the require_parent_status key).
-        assert_eq!(after.lines().count(), before.lines().count() + 1);
-        assert!(after.contains(r#"require_parent_status = "accepted""#));
-        // The relation-existence rule is untouched.
-        assert!(after.contains(r#"require = "any-relation""#));
         Config::parse(&after).unwrap();
     }
 
@@ -2000,7 +1816,7 @@ require_parent_status = "accepted"
         let (_dir, path, fs) = fixture(SRC);
         let mut prompter = scripted(&[
             "widget", "widgets", "", "", "", "", "", "", "", // core fields
-            "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+            "n", "n", "n", // attributes / parent / lifecycle declined
         ]);
         run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
 
@@ -2024,7 +1840,7 @@ require_parent_status = "accepted"
             "y",     // set a parent type
             "bogus", // not a defined type -> re-ask
             "rfc",   // valid existing type
-            "n", "n", // lifecycle / gate declined
+            "n",     // lifecycle declined
         ]);
         run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
 
@@ -2040,41 +1856,9 @@ require_parent_status = "accepted"
         );
     }
 
-    // STORY-226 AC4: gating a parent-child rule with a status the parent's
-    // lifecycle lacks is rejected and re-asked; the valid status is written.
-    #[test]
-    fn interactive_add_type_gate_reprompts_unknown_status() {
-        let (_dir, path, fs) = fixture(SRC);
-        let mut prompter = scripted(&[
-            "widget",
-            "widgets",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "", // core fields
-            "n",
-            "n",
-            "n",                 // attributes / parent / lifecycle declined
-            "y",                 // gate a parent-child rule
-            "stories-need-rfcs", // the only parent-child rule (parent = rfc)
-            "shipped",           // rfc lifecycle lacks `shipped` -> re-ask
-            "review",            // rfc lifecycle has `review`
-        ]);
-        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
-
-        let json = show(&std::fs::read_to_string(&path).unwrap());
-        assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "review"
-        );
-    }
-
     // STORY-226 AC5: the full interactive flow produces a byte-identical config to
-    // the equivalent add-type(+attrs+parent) -> set-lifecycle -> add-gate flag
-    // chain, and the result reparses cleanly.
+    // the equivalent add-type(+attrs+parent) -> set-lifecycle flag chain, and the
+    // result reparses cleanly.
     #[test]
     fn interactive_full_flow_matches_flag_chain() {
         let (_dir_a, path_a, fs_a) = fixture(SRC);
@@ -2097,9 +1881,6 @@ require_parent_status = "accepted"
             "draft,done",
             "draft:done",
             "", // custom lifecycle
-            "y",
-            "stories-need-rfcs",
-            "review", // gate
         ]);
         run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
         let interactive_out = std::fs::read_to_string(&path_a).unwrap();
@@ -2135,7 +1916,6 @@ require_parent_status = "accepted"
             &["draft:done".to_string()],
         )
         .unwrap();
-        run_add_gate(root_b, &fs_b, "stories-need-rfcs", "review").unwrap();
         let flag_out = std::fs::read_to_string(&path_b).unwrap();
 
         assert_eq!(interactive_out, flag_out);

@@ -583,7 +583,6 @@ mod tests {
             child: child.to_string(),
             parent: parent.to_string(),
             severity: crate::engine::config::Severity::Warning,
-            require_parent_status: None,
         }
     }
 

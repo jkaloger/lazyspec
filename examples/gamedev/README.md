@@ -114,7 +114,6 @@ Until a pillar is `accepted`, nothing can be built. That is deliberate -- commit
 
 ## Caveats
 
-- `require_parent_status = "accepted"` gating a delta on its `pillars` singleton is configured but not runtime-verified in this example. Smoke-test it before relying on the block.
 - `iterations-implement-work` uses relation-existence, which checks that _any_ relation exists -- normally the `implements` link. An iteration carrying only a `blocks` link would technically satisfy it; in practice iterations always implement their parent.
 - Art, audio, and level _production_ aren't modeled here -- only agent-buildable code work. Track asset production wherever you make it.
 - Release phases (prototype / vertical slice / alpha / beta / gold) are intentionally unmodeled. If you want a home for exit criteria, add a `milestone` type and a `targets` relation.
