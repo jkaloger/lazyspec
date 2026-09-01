@@ -96,6 +96,37 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
+    // The edge migration rewrites rather than appends, so a run can change the
+    // file while adding nothing. Reporting only the additions would let such a
+    // run print "nothing to add" over a rewrite. ITERATION-378 is what turns
+    // these facts into the warning the plan owes the reader before it applies.
+    for name in &result.edges_written {
+        if dry_run {
+            out.push_str(&format!("Would write edge {}\n", name));
+        } else {
+            out.push_str(&format!("Wrote edge {}\n", name));
+        }
+    }
+
+    for name in &result.rules_removed {
+        if dry_run {
+            out.push_str(&format!("Would remove rule {}\n", name));
+        } else {
+            out.push_str(&format!("Removed rule {}\n", name));
+        }
+    }
+
+    for name in &result.traversal_removed {
+        if dry_run {
+            out.push_str(&format!(
+                "Would remove traversal from relationship {}\n",
+                name
+            ));
+        } else {
+            out.push_str(&format!("Removed traversal from relationship {}\n", name));
+        }
+    }
+
     if out.is_empty() {
         out.push_str("Config already up to date; nothing to add\n");
     }

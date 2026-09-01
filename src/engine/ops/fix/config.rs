@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use anyhow::bail;
-use serde::Serialize;
 
 use crate::engine::config::{
     default_lifecycle, default_rules, starter_relationships, Config, EdgeDef, RelSelector,
@@ -11,19 +10,6 @@ use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
 
 use super::ConfigFixResult;
-
-/// Wrapper used solely to serialize the missing `[[relationships]]` blocks as an
-/// array-of-tables, so the emitted text matches what the strict load path reads.
-#[derive(Serialize)]
-struct RelationshipsDoc {
-    relationships: Vec<RelationshipDef>,
-}
-
-/// Wrapper used solely to serialize the missing `[[rules]]` blocks.
-#[derive(Serialize)]
-struct RulesDoc {
-    rules: Vec<ValidationRule>,
-}
 
 fn rule_name(rule: &ValidationRule) -> &str {
     match rule {
@@ -41,11 +27,13 @@ fn rule_name(rule: &ValidationRule) -> &str {
 /// never one collapsed `via = "*"` row: per ADR-035 a wildcard `via` row
 /// carrying a `traversal` suppresses the global marker of *every* relationship,
 /// including the ones it did not translate.
-// Nothing calls this yet — ITERATION-377 wires it into `collect_config_fixes`
-// once the writer that emits the rows exists.
-#[allow(dead_code)]
 fn translate_to_edges(config: &Config) -> anyhow::Result<Vec<EdgeDef>> {
-    let mut edges: Vec<EdgeDef> = config.rules.iter().map(edge_from_rule).collect();
+    let chain = chain_relationships(config);
+    let mut edges: Vec<EdgeDef> = config
+        .rules
+        .iter()
+        .flat_map(|rule| edges_from_rule(rule, &chain))
+        .collect();
 
     for relationship in &config.relationships {
         let Some(traversal) = relationship.traversal else {
@@ -73,41 +61,73 @@ fn translate_to_edges(config: &Config) -> anyhow::Result<Vec<EdgeDef>> {
     Ok(edges)
 }
 
-/// One `[[rules]]` block as an edge row. `via` is the wildcard on both shapes:
-/// today's rules are satisfied by any relationship, so naming one would tighten
-/// what validates and turn valid documents into findings (ADR-032 §Decision).
-fn edge_from_rule(rule: &ValidationRule) -> EdgeDef {
+/// The relationships this config marks as chain, in declared order. They are
+/// what a `parent-child` rule is satisfied through today — `validation.rs`
+/// reads exactly this set off `Store::chain_relationships` — so they are what
+/// its translation has to name.
+fn chain_relationships(config: &Config) -> Vec<&str> {
+    config
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.traversal == Some(Traversal::Chain))
+        .map(|relationship| relationship.name.as_str())
+        .collect()
+}
+
+/// One `[[rules]]` block as edge rows.
+///
+/// A `parent-child` rule becomes one row per chain-marked relationship, each
+/// naming that relationship in `via` (ADR-032 §Decision, as amended). Naming it
+/// is the preservation rather than a tightening: the rule is satisfied today
+/// only through a chain-marked relationship, so `via = "*"` would accept links
+/// the rule rejects. It is also the only shape that loads — a wildcard `via`
+/// carrying `traversal = "chain"` overlaps the row translated from a `related`
+/// marker on all three positions, and that pair is refused at load.
+///
+/// A `relation-existence` rule demands a relationship without naming one, so
+/// its wildcards are the shape RFC-067 gives it rather than an imprecision.
+fn edges_from_rule(rule: &ValidationRule, chain: &[&str]) -> Vec<EdgeDef> {
     match rule {
         ValidationRule::ParentChild {
             name,
             child,
             parent,
             severity,
-            // `require_parent_status` is dropped, not translated: ADR-033
-            // abandons status-conditioned gating rather than relocating it onto
-            // the edge table, so it has no destination field.
-            ..
-        } => EdgeDef {
-            name: name.clone(),
-            from: TypeSelector::Types(vec![child.clone()]),
-            to: TypeSelector::Types(vec![parent.clone()]),
-            via: RelSelector::Any,
-            required: Some(severity.clone()),
-            traversal: Some(Traversal::Chain),
-        },
+        } => chain
+            .iter()
+            .map(|via| EdgeDef {
+                name: parent_child_edge_name(name, chain, via),
+                from: TypeSelector::Types(vec![child.clone()]),
+                to: TypeSelector::Types(vec![parent.clone()]),
+                via: RelSelector::Named((*via).to_string()),
+                required: Some(severity.clone()),
+                traversal: Some(Traversal::Chain),
+            })
+            .collect(),
         ValidationRule::RelationExistence {
             name,
             doc_type,
             severity,
             ..
-        } => EdgeDef {
+        } => vec![EdgeDef {
             name: name.clone(),
             from: TypeSelector::Types(vec![doc_type.clone()]),
             to: TypeSelector::Any,
             via: RelSelector::Any,
             required: Some(severity.clone()),
             traversal: None,
-        },
+        }],
+    }
+}
+
+/// `via` holds one relationship name and never a set, so a rule translated
+/// against two chain relationships becomes two rows, and two rows may not share
+/// a name. A rule that becomes exactly one row keeps its own name, so the
+/// ordinary config's findings go on naming what they named before.
+fn parent_child_edge_name(rule: &str, chain: &[&str], via: &str) -> String {
+    match chain {
+        [_] => rule.to_string(),
+        _ => format!("{rule}-via-{via}"),
     }
 }
 
@@ -120,13 +140,57 @@ fn traversal_edge_name(relationship: &str) -> String {
     format!("{relationship}-traversal")
 }
 
-/// Plan (and optionally apply) the config migration: append the standard
-/// relationships/rules that the existing `.lazyspec.toml` is missing.
+/// The standard constraints to seed into a config that declares none of its own.
 ///
-/// Append-only by design: the existing file is preserved byte-for-byte and only
-/// the missing `[[relationships]]` / `[[rules]]` blocks are appended. This keeps
-/// every user section (`[github]`, comments, ordering) intact
-/// and is idempotent — when nothing is missing the file is left untouched.
+/// Seeded only into a config that has said nothing about its DAG — neither
+/// `[[edges]]` nor `[[rules]]`. A config carrying `[[edges]]` has stated it on
+/// the edge table's terms, and adding the legacy set back is what the rewrite
+/// exists to undo. A config carrying `[[rules]]` has stated it too, and its
+/// rules may already say what a standard one says under another name: seeded
+/// through the translation, that pair becomes two equally specific rows
+/// demanding one edge at different severities, which fails to load.
+///
+/// A standard rule naming a type the config does not declare is skipped for the
+/// same reason — an edge row's type names are checked at load while a
+/// `[[rules]]` block's are not, so seeding one would write a config that no
+/// longer loads. Such a rule matches no document anyway.
+fn standard_rules_to_seed(config: &Config) -> Vec<ValidationRule> {
+    if !config.edges.is_empty() || !config.rules.is_empty() {
+        return Vec::new();
+    }
+    let declared = |name: &str| config.documents.types.iter().any(|t| t.name == name);
+    default_rules()
+        .into_iter()
+        .filter(|rule| rule_types(rule).into_iter().all(declared))
+        .collect()
+}
+
+/// The document types a rule names, which are the type names its translated
+/// edge row will carry.
+fn rule_types(rule: &ValidationRule) -> Vec<&str> {
+    match rule {
+        ValidationRule::ParentChild { child, parent, .. } => vec![child, parent],
+        ValidationRule::RelationExistence { doc_type, .. } => vec![doc_type],
+    }
+}
+
+/// Plan (and optionally apply) the repairs an existing `.lazyspec.toml` needs.
+///
+/// Two kinds of repair, and they are not the same shape. Adding the standard
+/// `[[relationships]]` and the default lifecycles is append-only: nothing the
+/// file already says is taken away, so `[github]`, comments and ordering
+/// survive. The RFC-067 edge migration is a translating REWRITE (ADR-032) — the
+/// source `[[rules]]` blocks and `[[relationships]].traversal` keys have to go,
+/// or the config declares its DAG twice. A comment attached to a block the
+/// migration translates does not survive it. Nothing else about the file
+/// changes, but that much is lost.
+///
+/// The two meet on the standard rule set, and the rewrite wins: `default_rules`
+/// is seeded through the translation, so the standard constraints land as
+/// `[[edges]]` rather than as `[[rules]]` this run would write and the next
+/// would delete. That also makes one run enough — a second finds nothing
+/// missing and nothing left to translate, and does not write at all. See
+/// [`standard_rules_to_seed`] for which configs are seeded at all.
 pub fn collect_config_fixes(
     root: &Path,
     dry_run: bool,
@@ -148,11 +212,7 @@ pub fn collect_config_fixes(
         .filter(|r| !existing_rel_names.contains(&r.name.as_str()))
         .collect();
 
-    let existing_rule_names: Vec<&str> = config.rules.iter().map(rule_name).collect();
-    let missing_rules: Vec<ValidationRule> = default_rules()
-        .into_iter()
-        .filter(|r| !existing_rule_names.contains(&rule_name(r)))
-        .collect();
+    let missing_rules = standard_rules_to_seed(&config);
 
     let relationships_added: Vec<String> = missing_relationships
         .iter()
@@ -171,25 +231,49 @@ pub fn collect_config_fixes(
         .map(|t| t.name.clone())
         .collect();
 
-    let nothing_missing =
-        missing_relationships.is_empty() && missing_rules.is_empty() && lifecycles_added.is_empty();
+    // What the rewrite takes away is read off the SOURCE: the seeded rules and
+    // the appended relationships' markers were never in the file, so nothing of
+    // theirs is being removed from it.
+    let rules_removed: Vec<String> = config
+        .rules
+        .iter()
+        .map(|r| rule_name(r).to_string())
+        .collect();
+    let traversal_removed: Vec<String> = config
+        .relationships
+        .iter()
+        .filter(|r| r.traversal.is_some())
+        .map(|r| r.name.clone())
+        .collect();
 
-    let written = if dry_run || nothing_missing {
+    // The buffer the whole repair is planned against: the source plus every
+    // block the append fixes supply, so the seeded rules translate in this run.
+    let mut buffer = config.clone();
+    buffer.relationships.extend(missing_relationships.clone());
+    buffer.rules.extend(missing_rules.clone());
+    let translated = translate_to_edges(&buffer)?;
+    let edges_written: Vec<String> = translated.iter().map(|e| e.name.clone()).collect();
+
+    let nothing_to_do = missing_relationships.is_empty()
+        && missing_rules.is_empty()
+        && lifecycles_added.is_empty()
+        && rules_removed.is_empty()
+        && traversal_removed.is_empty();
+
+    let written = if dry_run || nothing_to_do {
         false
     } else {
-        let appended = append_blocks(&existing, &missing_relationships, &missing_rules)?;
-        let migrated = if lifecycles_added.is_empty() {
-            appended
-        } else {
-            let mut buffer = Config::parse_lenient(&appended)?;
-            for type_def in &mut buffer.documents.types {
-                if type_def.lifecycle.states.is_empty() {
-                    type_def.lifecycle = default_lifecycle();
-                }
+        buffer.rules.clear();
+        for relationship in &mut buffer.relationships {
+            relationship.traversal = None;
+        }
+        buffer.edges.extend(translated);
+        for type_def in &mut buffer.documents.types {
+            if type_def.lifecycle.states.is_empty() {
+                type_def.lifecycle = default_lifecycle();
             }
-            write_config_in_place(&appended, &buffer)?
-        };
-        fs.write(&path, &migrated)?;
+        }
+        fs.write(&path, &write_config_in_place(&existing, &buffer)?)?;
         true
     };
 
@@ -197,45 +281,20 @@ pub fn collect_config_fixes(
         relationships_added,
         rules_added,
         lifecycles_added,
+        edges_written,
+        rules_removed,
+        traversal_removed,
         written,
     })
-}
-
-/// Append the missing blocks to the existing config text, separated by a blank
-/// line, leaving the original content untouched.
-fn append_blocks(
-    existing: &str,
-    relationships: &[RelationshipDef],
-    rules: &[ValidationRule],
-) -> anyhow::Result<String> {
-    let mut out = existing.to_string();
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-
-    if !relationships.is_empty() {
-        let block = toml::to_string(&RelationshipsDoc {
-            relationships: relationships.to_vec(),
-        })?;
-        out.push('\n');
-        out.push_str(&block);
-    }
-
-    if !rules.is_empty() {
-        let block = toml::to_string(&RulesDoc {
-            rules: rules.to_vec(),
-        })?;
-        out.push('\n');
-        out.push_str(&block);
-    }
-
-    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{EdgeDef, RelSelector, Severity, Traversal, TypeSelector};
+    use crate::engine::config::{
+        DocumentConfig, EdgeDef, RelSelector, Severity, StoreBackend, Traversal, TypeDef,
+        TypeSelector,
+    };
 
     fn parent_child_rule(
         name: &str,
@@ -248,7 +307,6 @@ mod tests {
             child: child.to_string(),
             parent: parent.to_string(),
             severity,
-            require_parent_status: None,
         }
     }
 
@@ -296,26 +354,29 @@ mod tests {
                 "story",
                 Severity::Error,
             )],
-            vec![],
+            vec![marked_relationship("implements", Traversal::Chain)],
         );
 
         let edges = translate_to_edges(&config).expect("translation succeeds");
 
         assert_eq!(
-            edges,
-            vec![EdgeDef {
+            edges[0],
+            EdgeDef {
                 name: "iteration-implements-story".to_string(),
                 from: TypeSelector::Types(vec!["iteration".to_string()]),
                 to: TypeSelector::Types(vec!["story".to_string()]),
-                via: RelSelector::Any,
+                via: RelSelector::Named("implements".to_string()),
                 required: Some(Severity::Error),
                 traversal: Some(Traversal::Chain),
-            }]
+            }
         );
     }
 
+    /// ADR-032 as amended: the rule is satisfied today only through a
+    /// chain-marked relationship, so naming that relationship preserves what
+    /// validates and `via = "*"` would widen it to any relationship at all.
     #[test]
-    fn translated_parent_child_edge_accepts_any_relationship_rather_than_implements() {
+    fn translated_parent_child_edge_names_the_chain_relationship_rather_than_the_wildcard() {
         let config = config_with(
             vec![parent_child_rule(
                 "story-parent",
@@ -323,13 +384,112 @@ mod tests {
                 "rfc",
                 Severity::Warning,
             )],
-            vec![],
+            vec![
+                marked_relationship("implements", Traversal::Chain),
+                unmarked_relationship("blocks"),
+            ],
         );
 
         let edges = translate_to_edges(&config).expect("translation succeeds");
 
-        assert_eq!(edges[0].via, RelSelector::Any);
+        assert_eq!(edges[0].via, RelSelector::Named("implements".to_string()));
         assert_eq!(edges[0].required, Some(Severity::Warning));
+    }
+
+    /// `via` holds one name, so a second chain relationship is a second row —
+    /// and the two must not collide on `name`.
+    #[test]
+    fn a_parent_child_rule_becomes_one_row_per_chain_relationship() {
+        let config = config_with(
+            vec![parent_child_rule(
+                "story-parent",
+                "story",
+                "rfc",
+                Severity::Warning,
+            )],
+            vec![
+                marked_relationship("implements", Traversal::Chain),
+                marked_relationship("targets", Traversal::Chain),
+            ],
+        );
+
+        let edges = translate_to_edges(&config).expect("translation succeeds");
+
+        let rows: Vec<(&str, &RelSelector)> = edges
+            .iter()
+            .filter(|edge| edge.name.starts_with("story-parent"))
+            .map(|edge| (edge.name.as_str(), &edge.via))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "story-parent-via-implements",
+                    &RelSelector::Named("implements".to_string())
+                ),
+                (
+                    "story-parent-via-targets",
+                    &RelSelector::Named("targets".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// A rule the config gives no chain relationship to is satisfiable by
+    /// nothing today, so it names no edge.
+    #[test]
+    fn a_parent_child_rule_with_no_chain_relationship_becomes_no_row() {
+        let config = config_with(
+            vec![parent_child_rule(
+                "story-parent",
+                "story",
+                "rfc",
+                Severity::Warning,
+            )],
+            vec![marked_relationship("related-to", Traversal::Related)],
+        );
+
+        let edges = translate_to_edges(&config).expect("translation succeeds");
+
+        let names: Vec<&str> = edges.iter().map(|edge| edge.name.as_str()).collect();
+        assert_eq!(names, vec!["related-to-traversal"]);
+    }
+
+    /// The shape the whole migration turns on: a chain rule row and the row
+    /// translated from a `related` marker must not read as a traversal
+    /// contradiction. Under `via = "*"` they did, and no default config loaded.
+    #[test]
+    fn a_chain_rule_row_and_a_related_marker_row_load_together() {
+        let config = Config {
+            rules: vec![parent_child_rule(
+                "stories-need-rfcs",
+                "story",
+                "rfc",
+                Severity::Warning,
+            )],
+            relationships: vec![
+                marked_relationship("implements", Traversal::Chain),
+                marked_relationship("related-to", Traversal::Related),
+            ],
+            documents: DocumentConfig {
+                types: vec![
+                    TypeDef::test_fixture("story", StoreBackend::Filesystem),
+                    TypeDef::test_fixture("rfc", StoreBackend::Filesystem),
+                ],
+                ..Config::default().documents
+            },
+            ..Config::default()
+        };
+        let mut migrated = config.clone();
+        migrated.edges = translate_to_edges(&config).expect("translation succeeds");
+        migrated.rules.clear();
+        for relationship in &mut migrated.relationships {
+            relationship.traversal = None;
+        }
+
+        let text = migrated.to_toml().expect("serializes");
+
+        Config::parse(&text).expect("the migrated config strict-loads");
     }
 
     #[test]
@@ -452,33 +612,6 @@ mod tests {
         let edges = translate_to_edges(&config).expect("translation succeeds");
 
         assert_eq!(edges, vec![]);
-    }
-
-    /// ADR-033 abandons status-conditioned gating outright rather than moving it
-    /// onto the edge table, so the rule's `require_parent_status` has nowhere to
-    /// go and the edge is the one the same rule without it produces.
-    #[test]
-    fn require_parent_status_is_dropped_rather_than_translated() {
-        let gated = ValidationRule::ParentChild {
-            name: "iteration-implements-story".to_string(),
-            child: "iteration".to_string(),
-            parent: "story".to_string(),
-            severity: Severity::Error,
-            require_parent_status: Some("accepted".to_string()),
-        };
-        let ungated = parent_child_rule(
-            "iteration-implements-story",
-            "iteration",
-            "story",
-            Severity::Error,
-        );
-
-        let from_gated =
-            translate_to_edges(&config_with(vec![gated], vec![])).expect("translation succeeds");
-        let from_ungated =
-            translate_to_edges(&config_with(vec![ungated], vec![])).expect("translation succeeds");
-
-        assert_eq!(from_gated, from_ungated);
     }
 
     #[test]

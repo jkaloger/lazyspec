@@ -58,13 +58,23 @@ pub struct FieldFixResult {
     pub written: bool,
 }
 
-/// Outcome of `fix --config`: which standard relationships/rules were missing
-/// (and thus added) and whether the file was written.
+/// Outcome of `fix --config`: what the run adds, what the RFC-067 edge
+/// migration takes away, and whether the file was written.
+///
+/// The two halves never name the same thing. `*_added` is what the file was
+/// missing; `*_removed` is what the translating rewrite deletes from it, read
+/// off the source alone (ADR-032). `edges_written` names the `[[edges]]` rows
+/// the translation produces, which include the standard constraints seeded
+/// through it — those appear in `rules_added` too, because the constraint is
+/// what was missing and the row is how it is now spelled.
 #[derive(Debug, Serialize)]
 pub struct ConfigFixResult {
     pub relationships_added: Vec<String>,
     pub rules_added: Vec<String>,
     pub lifecycles_added: Vec<String>,
+    pub edges_written: Vec<String>,
+    pub rules_removed: Vec<String>,
+    pub traversal_removed: Vec<String>,
     pub written: bool,
 }
 
