@@ -1,10 +1,10 @@
-//! Context depth choice: `context.ancestors` is the FULL `implements` chain
-//! (sourced from [`resolve_chain`]'s `nodes`); `context.related` is the
-//! directly-adjacent `related-to` ring only, so `resolve_chain` is called with
-//! depth `1`. Descendant (`forward`) docs are deliberately omitted.
+//! Context depth choice: `context.ancestors` is the FULL chain lineage (sourced
+//! from [`resolve_chain`]'s `nodes`); `context.related` is the directly-adjacent
+//! related-role ring only, so `resolve_chain` is called with depth `1`.
+//! Descendant (`forward`) docs are deliberately omitted.
 
 use crate::engine::config::{Config, ValidationRule};
-use crate::engine::context::resolve_chain;
+use crate::engine::context::{merge_declared_related, resolve_chain};
 use crate::engine::document::{split_frontmatter, DocMeta};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
@@ -210,19 +210,27 @@ fn child_types_for(store: &Store, config: &Config, doc: &DocMeta) -> Vec<String>
 /// Assemble the minijinja render context for `doc`:
 /// - `document`: the selected doc's fields (id/title/type/body/status/path).
 /// - `child_types`: child type names from `ParentChild` rules and chain edges.
-/// - `context.ancestors`: the `implements` chain, nearest-parent-first, target
+/// - `context.ancestors`: the chain lineage, nearest-parent-first, target
 ///   excluded (full ancestry, from [`resolve_chain`]'s `nodes`).
-/// - `context.related`: directly-adjacent `related-to` docs (depth `1`).
+/// - `context.related`: the directly-adjacent related-role neighbourhood
+///   (depth `1`), plus the target's own declared non-chain relations.
 ///
 /// Descendant (`forward`) docs are deliberately omitted. Lineage entries
 /// expose the same `document.*` shape as the top-level `document`.
+///
+/// [`merge_declared_related`] is called for the same reason every other surface
+/// calls it: the walk alone drops a relation whose type carries no traversal role
+/// at all (BUG-013), and a prompt is a renderer of the neighbourhood like the
+/// others -- a template that carries "the documents this one links to" into an
+/// agent's constraints cannot silently omit the ones the config gave no role.
 pub fn build_render_context(
     store: &Store,
     config: &Config,
     doc: &DocMeta,
     fs: &dyn FileSystem,
 ) -> Result<Value> {
-    let resolved = resolve_chain(store, &doc.id, 1)?;
+    let mut resolved = resolve_chain(store, &doc.id, 1)?;
+    merge_declared_related(store, &mut resolved);
 
     // `nodes` is root-first and includes the target last. Drop the target and
     // reverse so the immediate parent comes first.
@@ -747,6 +755,37 @@ mod tests {
         assert!(
             shape_out.contains("Choice"),
             "related title resolves: {shape_out}"
+        );
+    }
+
+    // BUG-013 for the prompt surface: `blocks` carries no traversal marker in the
+    // starter config, so the related BFS drops it and only
+    // `merge_declared_related` can put it in `context.related`. The prompt is the
+    // fifth renderer of the neighbourhood, and it dropped this class of relation
+    // while the CLI, the TUI and the web view surfaced it.
+    #[test]
+    fn context_related_surfaces_a_declared_relation_with_no_traversal_role() {
+        let (_tmp, store) = store_from(&[
+            (
+                "docs/stories/STORY-001-subject.md",
+                &doc_md("Subject", "story", "- blocks: ADR-001"),
+            ),
+            (
+                "docs/adrs/ADR-001-blocked.md",
+                &doc_md("Blocked", "adr", "[]"),
+            ),
+        ]);
+        let config = Config::default();
+        let doc = store.resolve_shorthand("STORY-001").unwrap();
+        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+
+        let prompt = body_prompt("[{% for r in context.related %}{{ r.id }},{% endfor %}]");
+        let out = render(&prompt, &ctx).unwrap();
+
+        assert_eq!(
+            out.trim(),
+            "[ADR-001,]",
+            "a relation the config gives no traversal role still reaches the prompt"
         );
     }
 

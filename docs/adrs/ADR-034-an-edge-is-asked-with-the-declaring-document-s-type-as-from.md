@@ -1,7 +1,7 @@
 ---
 title: An edge is asked with the declaring document's type as from
 type: adr
-status: draft
+status: accepted
 author: jack
 date: 2026-09-01
 tags: []

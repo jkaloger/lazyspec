@@ -26,9 +26,9 @@ pub struct GraphNode {
     pub status: Status,
     pub depth: usize,
     /// Doc ids of this node's OWN depth-1 related-role neighbours, minus those on
-    /// its `implements` lineage (its transitive ancestors and descendants, already
+    /// its chain lineage (its transitive ancestors and descendants, already
     /// drawn as tree edges through the node). Siblings/cousins reachable only
-    /// through a shared ancestor ARE included — they have no `implements` path to
+    /// through a shared ancestor ARE included — they have no chain path to
     /// the node, so the link is genuinely cross-cutting. Display-only (RFC-006
     /// Graph mode Phase 1, rendered `┄▷ <id>` by the renderer), sorted for
     /// determinism. This is the node's own depth-1 set, NOT the `context`
@@ -197,7 +197,7 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// Flatten the engine's whole-store context forest into the flat
 /// `Vec<GraphNode>` the graph view renders. Walks the forest roots-first,
 /// depth-first, mirroring the CLI `render_tree` traversal: roots (nodes with no
-/// in-graph `implements` parent) sorted by path, children sorted by path, with
+/// in-graph chain parent) sorted by path, children sorted by path, with
 /// `depth` assigned by tree level.
 ///
 /// Each row's `reverse` flag is decided AT THE EDGE it was reached by, from the
@@ -250,23 +250,23 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// annotation set (RFC-006 Graph mode Phase 1), sourced from the store's
 /// `forward_links`/`reverse_links` filtered to the triples the config gives the
 /// related traversal role — see [`related_neighbours`].
-/// A neighbour that lies on the node's own `implements` lineage — a transitive
+/// A neighbour that lies on the node's own chain lineage — a transitive
 /// ancestor (parent, grandparent, …) or a transitive descendant (child,
 /// grandchild, …) — is excluded, because such a link is already drawn as a tree
 /// edge through this node and is not cross-cutting. Everything else IS surfaced,
 /// including siblings/cousins reachable only through a SHARED ANCESTOR (e.g. two
-/// docs that both `implements` the same root and are `related-to` each other):
-/// there is no `implements` path between them, so the link is genuinely
+/// docs that both take the same root as a chain parent and are `related-to` each
+/// other): there is no chain path between them, so the link is genuinely
 /// cross-cutting and the Story AC ("connected only by a related-to link, no
 /// implements path between them") requires it to surface.
 ///
 /// The exclusion is the node's OWN ancestors and descendants only — see
-/// [`implements_lineage_of`] for why the up/down walks must stay independent so a
+/// [`chain_lineage_of`] for why the up/down walks must stay independent so a
 /// shared ancestor's other children are not swept in. The ancestor direction
 /// matches the upward BFS `chain_paths` exclusion in `resolve_chain`
 /// (`engine/context.rs`). Note this annotation set is therefore NOT equal in
 /// general to `resolve_chain(id, 1).related`: `resolve_chain` also surfaces the
-/// related-to links of the node's `implements` ancestors, whereas this annotation
+/// related-role links of the node's chain ancestors, whereas this annotation
 /// is strictly the node's OWN depth-1 cross-cutting set.
 pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -> Vec<GraphNode> {
     // child adjacency: parent path -> child paths.
@@ -297,11 +297,11 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
         sort_siblings(kids);
     }
 
-    // Per-node `implements` lineage: the node's own transitive ancestors AND
-    // descendants. A related-to neighbour on this set is already drawn as a tree
+    // Per-node chain lineage: the node's own transitive ancestors AND
+    // descendants. A related-role neighbour on this set is already drawn as a tree
     // edge through the node, so it is not re-surfaced as a cross-cutting
     // annotation. Siblings and cousins reached only via a shared ancestor are NOT
-    // on the lineage and ARE surfaced (see flatten_forest / implements_lineage_of
+    // on the lineage and ARE surfaced (see flatten_forest / chain_lineage_of
     // doc-comments).
     let parents_of: HashMap<&PathBuf, &Vec<PathBuf>> =
         forest.iter().map(|n| (&n.doc.path, &n.parents)).collect();
@@ -310,7 +310,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
         .map(|n| {
             (
                 &n.doc.path,
-                implements_lineage_of(&n.doc.path, &parents_of, &children),
+                chain_lineage_of(&n.doc.path, &parents_of, &children),
             )
         })
         .collect();
@@ -369,7 +369,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
     out
 }
 
-/// The node's own `implements` lineage: its transitive ANCESTORS (parents,
+/// The node's own chain lineage: its transitive ANCESTORS (parents,
 /// grandparents, …) and its transitive DESCENDANTS (children, grandchildren, …),
 /// with the node's own path excluded. Used to exclude already-edge-connected
 /// related-to neighbours (links drawn as a tree edge through this node) from the
@@ -379,7 +379,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
 /// parents and a downward pass over children — that never cross-pollinate. The
 /// up-walk never descends and the down-walk never ascends, so an ANCESTOR's other
 /// children (the node's siblings/cousins) are never collected. That is the whole
-/// fix: a sibling reached only through a shared ancestor has no `implements` path
+/// fix: a sibling reached only through a shared ancestor has no chain path
 /// to the node, so its related-to link is genuinely cross-cutting and must
 /// surface (the Story AC's "connected only by a related-to link"). The earlier
 /// single-stack walk pushed both parents and children of every popped node, so
@@ -387,11 +387,11 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
 ///
 /// The ancestor direction mirrors the upward BFS that builds `chain_paths` in
 /// `resolve_chain` (`engine/context.rs`). The descendant direction is also
-/// excluded because a direct/transitive child connected by a drawn `implements`
+/// excluded because a direct/transitive child connected by a drawn chain
 /// edge is on the tree, not cross-cutting (e.g. a root that both parents and is
 /// related-to its child must not annotate that child). Bounded by the forest
 /// size; the seen sets guard cycles.
-fn implements_lineage_of(
+fn chain_lineage_of(
     path: &Path,
     parents_of: &HashMap<&PathBuf, &Vec<PathBuf>>,
     children: &HashMap<PathBuf, Vec<PathBuf>>,
@@ -428,7 +428,7 @@ fn implements_lineage_of(
 }
 
 /// The node's OWN depth-1 cross-cutting related neighbours as doc ids, sorted,
-/// excluding any neighbour on the node's `implements` lineage (a transitive
+/// excluding any neighbour on the node's chain lineage (a transitive
 /// ancestor or descendant, already drawn as a tree edge through the node). Takes
 /// its neighbours from [`related_neighbours`], the same engine walk
 /// `resolve_chain`'s related BFS steps, but is NOT equal to `context <id>

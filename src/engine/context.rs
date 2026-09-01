@@ -153,11 +153,12 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
 /// they belong to the chain/forward sections -- and entries the related BFS
 /// already found dedupe on (relation type, target path).
 ///
-/// Every surface that renders a neighbourhood calls this immediately after
-/// [`resolve_chain`], and none of them may skip it: a surface that also displays
-/// the raw `doc.related` frontmatter row is not thereby covered, because that row
-/// is a verbatim list of declared links (chain ones included) and not the
-/// neighbourhood the walk names.
+/// All five surfaces that render a neighbourhood call this immediately after
+/// [`resolve_chain`] -- `cli::context`'s JSON and human renders, the TUI relations
+/// tab, the web doc page, and the agent prompt's `context.related` -- and none of
+/// them may skip it: a surface that also displays the raw `doc.related`
+/// frontmatter row is not thereby covered, because that row is a verbatim list of
+/// declared links (chain ones included) and not the neighbourhood the walk names.
 pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedContext<'a>) {
     let chain_paths: HashSet<&PathBuf> = resolved.nodes.iter().map(|n| &n.doc.path).collect();
     let mut seen: HashSet<(String, PathBuf)> = resolved

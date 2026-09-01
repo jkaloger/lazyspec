@@ -25,12 +25,15 @@
 //! inherited its link (`RFC-001`, whose child `ITERATION-002` declares nothing)
 //! separates consuming the engine's walk from repeating it (ADR-034).
 //!
-//! The graph forest is a fourth rendering of the same walk, asserted at three
-//! places rather than one: the engine seam both graph surfaces are meant to
-//! consume ([`rendered_parent_edges`]), and then each surface's own drawn rows --
-//! the TUI's `App::graph_nodes` ([`tui_graph_parent_edges`]) and the web
-//! `/graph` response. Pinning the seam alone leaves either view free to
-//! re-derive the edges after the call, which is undetectable from the seam.
+//! The forest is a fourth rendering of the same walk, asserted at four places
+//! rather than one: the engine seam every forest surface is meant to consume
+//! ([`rendered_parent_edges`]), and then each surface's own emitted rows -- the
+//! TUI's `App::graph_nodes` ([`tui_graph_parent_edges`]), the web `/graph`
+//! response, and `context --json` with no id ([`cli_forest_parent_edges`]).
+//! Pinning the seam alone leaves every one of them free to re-derive the edges
+//! after the call, which is undetectable from the seam. The forest surfaces carry
+//! the chain arm of the walk as tree edges; the related arm reaches the two graph
+//! views as a per-row annotation, compared in the web module.
 
 use crate::common::walk_fixture::{
     cli_neighbourhood, shorthand, sorted, walk_fixture, Neighbourhood, SUBJECT,
@@ -231,6 +234,42 @@ fn tui_graph_parent_edges(store: Store, config: &Config) -> BTreeMap<String, Vec
     )
 }
 
+/// The edges `context --json` with no id draws, read off `run_forest_json`'s
+/// `implements_in_context` -- the CLI's own rendering of the forest, and the
+/// fourth surface to consume it. Reduced straight to `child id -> parent ids`
+/// rather than through [`parent_edges_of`], because the CLI emits each node's
+/// parent paths outright instead of a depth-tagged row list.
+///
+/// Pinned for the same reason the two graph views are pinned separately from the
+/// engine seam: the CLI is free to re-derive the edges after the `resolve_forest`
+/// call, and [`rendered_parent_edges`] would never notice. Its only other
+/// coverage runs under blanket and wildcard configs, where `walks_chain` is
+/// symmetric in `from` and `to` and an endpoint swap is therefore invisible.
+fn cli_forest_parent_edges(store: &Store) -> BTreeMap<String, Vec<String>> {
+    let json = lazyspec::cli::context::run_forest_json(store, None).unwrap();
+    let forest: serde_json::Value = serde_json::from_str(&json).unwrap();
+    forest["forest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            let parents = node["implements_in_context"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|path| {
+                    store
+                        .get(std::path::Path::new(path.as_str().unwrap()))
+                        .unwrap()
+                        .id
+                        .clone()
+                })
+                .collect();
+            (node["id"].as_str().unwrap().to_string(), sorted(parents))
+        })
+        .collect()
+}
+
 /// The same edges as the chain walk `context` runs gives them: for each
 /// document, the parents recorded on its own node by `resolve_chain`.
 fn walked_parent_edges(store: &Store) -> BTreeMap<String, Vec<String>> {
@@ -314,6 +353,20 @@ fn the_tui_graph_view_draws_every_row_under_the_parents_the_chain_walk_gives_it(
          `rebuild_graph` re-deriving them after the engine call -- asking \
          `walks_chain` with the from- and to-types swapped, say (ADR-034) -- \
          draws every document as a root while `context` still reports its parent"
+    );
+}
+
+#[test]
+fn the_cli_forest_json_draws_every_node_under_the_parents_the_chain_walk_gives_it() {
+    let (_fixture, store, _config) = edge_table_fixture();
+
+    assert_eq!(
+        cli_forest_parent_edges(&store),
+        walked_parent_edges(&store),
+        "`context --json` with no id emits each node's parents as the chain walk \
+         gives them: a payload re-deriving them after the engine call -- asking \
+         `walks_chain` with the from- and to-types swapped, say (ADR-034) -- emits \
+         every document as a root while `context <id>` still reports its parent"
     );
 }
 
@@ -483,8 +536,36 @@ mod web {
         edges
     }
 
-    // TEMP PROBE (reviewer, not to be kept): do the two graph surfaces render the
-    // same related-role annotation per row?
+    /// The related-role annotation the TUI graph view draws on each row, read off
+    /// the same `App::graph_nodes` list [`tui_graph_parent_edges`] reads its edges
+    /// from. `GraphNode::related` is the node's own depth-1 cross-cutting set,
+    /// which `tui/views/graph.rs` draws as `┄▷ <id>` beside the row -- the tree
+    /// edges are the chain arm of the walk, this annotation is the related arm, and
+    /// only comparing it puts the related arm of the graph surfaces under test.
+    fn tui_graph_related(store: Store, config: &Config) -> BTreeMap<String, Vec<String>> {
+        let mut app = lazyspec::tui::state::App::new(
+            store,
+            config,
+            ratatui_image::picker::Picker::halfblocks(),
+            Box::new(lazyspec::engine::fs::RealFileSystem),
+        );
+        app.rebuild_graph();
+        app.graph_nodes
+            .iter()
+            .map(|row| {
+                (
+                    app.store.get(&row.path).unwrap().id.clone(),
+                    sorted(row.related.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// The related-role annotation the `/graph` page draws on each row, as
+    /// `id -> annotated ids`: the links inside the row's `class="graph-related"`
+    /// span, which is the whole of what `graph_node.html` emits for the
+    /// cross-cutting set. A row carrying no annotation maps to an empty list, so
+    /// the comparison covers every drawn row rather than only the annotated ones.
     fn web_graph_related(html: &str) -> BTreeMap<String, Vec<String>> {
         html.split("<li data-id=\"")
             .skip(1)
@@ -506,32 +587,33 @@ mod web {
             .collect()
     }
 
+    /// The two graph surfaces' RELATED arm, the counterpart to the chain-arm
+    /// comparisons above: the tree edges pin `walks_chain`, and only this pins
+    /// `walks_related` across the two drawn graphs. The fixture makes it
+    /// non-vacuous -- the concrete `stories-relate-to-rfcs` row annotates
+    /// `STORY-001` with `RFC-002` and leaves `ADR-001`'s inbound `related-to` off,
+    /// so a surface re-deriving the annotation from the link maps reports a
+    /// different set here rather than an empty one on both sides.
+    ///
+    /// Each surface gets its own load of the one fixture root because `App::new`
+    /// and [`state_for`] both take a `Store` by value and `Store` is not `Clone`.
+    /// The two loads read the same documents under the same config and the
+    /// comparison is keyed by doc id, so the pair is one graph.
     #[tokio::test]
-    async fn graph_surfaces_annotate_the_same_related_neighbours() {
-        let (_fixture, store, config) = edge_table_fixture();
-        let store2 = Store::load(_fixture.root(), &config).unwrap();
-        let tui: BTreeMap<String, Vec<String>> = {
-            let mut app = lazyspec::tui::state::App::new(
-                store2,
-                &config,
-                ratatui_image::picker::Picker::halfblocks(),
-                Box::new(lazyspec::engine::fs::RealFileSystem),
-            );
-            app.rebuild_graph();
-            app.graph_nodes
-                .iter()
-                .map(|n| {
-                    (
-                        app.store.get(&n.path).unwrap().id.clone(),
-                        sorted(n.related.clone()),
-                    )
-                })
-                .collect()
-        };
-        let html = body_of(&state_for(store, &config), "/graph").await;
-        let web = web_graph_related(&html);
-        let tui = keyed_as_the_graph_page_spells_it(tui);
-        assert_eq!(web, tui, "graph surfaces must annotate the same neighbours");
+    async fn the_graph_surfaces_annotate_the_same_related_neighbours_on_every_row() {
+        let (fixture, web_store, config) = edge_table_fixture();
+        let tui_store = Store::load(fixture.root(), &config).unwrap();
+        let expected = keyed_as_the_graph_page_spells_it(tui_graph_related(tui_store, &config));
+
+        let html = body_of(&state_for(web_store, &config), "/graph").await;
+
+        assert_eq!(
+            web_graph_related(&html),
+            expected,
+            "both graph views annotate each row with the walk's related-role \
+             neighbours: one that re-derived them after the engine call would \
+             annotate a row the other leaves bare"
+        );
     }
 
     #[tokio::test]

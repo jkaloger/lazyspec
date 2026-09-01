@@ -13,7 +13,7 @@ use std::path::Path;
 /// each, because a row already carries the role it assigns and the question
 /// asked of it is the same question either way.
 ///
-/// Two declarations feed this and they deliberately do NOT union. An
+/// Two declarations feed this and they deliberately do NOT union (ADR-035). An
 /// `[[edges]]` row that states a `traversal` for relationship X decides X's
 /// walk membership outright, suppressing `RelationshipDef.traversal` for X; a
 /// relationship no row states a traversal for keeps its global marker as a
@@ -36,6 +36,11 @@ pub struct TraversalWalk {
 /// role that row assigns. Such a row suppresses `rel_name`'s global marker for
 /// BOTH roles: the table has spoken about the relationship, so the blanket
 /// stops applying to it -- see the type doc on why the two do not union.
+///
+/// Suppression is keyed by relationship NAME, which makes it broader than a row's
+/// own selectors suggest: a row with `via = "*"` and any `traversal` suppresses
+/// the global marker of EVERY declared relationship, with no load-time diagnostic
+/// (ADR-035 §Consequences records the hazard and leaves the check to STORY-259/261).
 fn states_a_traversal_for(config: &Config, rel_name: &str) -> bool {
     config
         .edges
@@ -156,6 +161,14 @@ pub(crate) struct Neighbour<'a> {
 /// let wildcard rows admit it by accident and concrete rows reject it, which is
 /// membership decided by a type that does not exist. `validate` reports the
 /// broken link; the walk declines to invent a node for it.
+///
+/// THE RESULT MAY REPEAT A DOCUMENT. One declared link reaches both link maps, so
+/// a pair that states the relation at both ends appears twice, as does a link a
+/// nested child inherited when the subject is at its far end (once for the parent,
+/// once for the child). Every caller already dedupes -- `resolve_chain`'s BFS on
+/// first discovery, `graph::related_annotations` into a `BTreeSet` -- so this
+/// returns the raw per-link claims rather than picking one of two identical
+/// neighbours and discarding the other's relation type.
 pub(crate) fn related_neighbours<'a>(store: &'a Store, path: &Path) -> Vec<Neighbour<'a>> {
     let Some(subject) = store.get(path) else {
         return Vec::new();
@@ -173,6 +186,15 @@ pub(crate) fn related_neighbours<'a>(store: &'a Store, path: &Path) -> Vec<Neigh
                 target.doc_type.as_str(),
             )
         });
+    // `to` is the SUBJECT's type rather than anything read off the link, and that
+    // is the declaration's far end only because `reverse_links` is keyed by the
+    // declaration's target: an own reverse entry is filed under the target, and a
+    // propagated one under the PARENT's declared target (`propagate_parent_links`
+    // lends forward links only, so an inheriting child never has a reverse entry
+    // filed under it). Should propagation ever lend a parent's INBOUND links to
+    // its children too, a child's reverse list would hold declarations aimed at
+    // the parent and `to` would have to be resolved from `declared_by`'s own
+    // `related` entry instead of from the subject.
     let reverse = store
         .reverse_links_for(path)
         .iter()
@@ -214,6 +236,11 @@ pub(crate) fn chain_children<'a>(store: &'a Store, path: &Path) -> Vec<Neighbour
     };
     let walk = &store.traversal_walk;
 
+    // `to` is the subject's type on the same invariant [`related_neighbours`]
+    // stands on: `reverse_links` is keyed by the declaration's target, so the
+    // subject IS that target -- including for a link a nested child inherited,
+    // which is filed under the parent's declared target because propagation lends
+    // forward links only.
     store
         .reverse_links_for(path)
         .iter()
