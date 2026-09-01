@@ -1,7 +1,7 @@
 ---
 title: Wildcard edge endpoints for a short starter config
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-29
 tags: []

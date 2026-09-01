@@ -1,7 +1,7 @@
 ---
 title: Per-edge traversal role, rejected when two rows disagree
 type: iteration
-status: draft
+status: in-progress
 author: jack
 date: 2026-08-31
 tags: []
