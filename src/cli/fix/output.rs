@@ -98,8 +98,7 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
 
     // The edge migration rewrites rather than appends, so a run can change the
     // file while adding nothing. Reporting only the additions would let such a
-    // run print "nothing to add" over a rewrite. ITERATION-378 is what turns
-    // these facts into the warning the plan owes the reader before it applies.
+    // run print "nothing to add" over a rewrite.
     for name in &result.edges_written {
         if dry_run {
             out.push_str(&format!("Would write edge {}\n", name));
@@ -127,8 +126,34 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
+    // Last, so the destructions are the lines still on screen when the reader
+    // stops reading. Neither is recoverable from anything else in the plan: a
+    // comment leaves no trace in the migrated config, and the retired gate
+    // changes no finding on either side of the rewrite.
+    for lost in &result.comments_lost {
+        if dry_run {
+            out.push_str(&format!(
+                "Would lose comment on rule {}: {}\n",
+                lost.rule, lost.comment
+            ));
+        } else {
+            out.push_str(&format!(
+                "Lost comment on rule {}: {}\n",
+                lost.rule, lost.comment
+            ));
+        }
+    }
+
+    for name in &result.gates_dropped {
+        let verb = if dry_run { "Would drop" } else { "Dropped" };
+        out.push_str(&format!(
+            "{verb} the require_parent_status gate on rule {name}: \
+             status-conditioned create gating is retired with no successor (ADR-033)\n"
+        ));
+    }
+
     if out.is_empty() {
-        out.push_str("Config already up to date; nothing to add\n");
+        out.push_str("Config already up to date; nothing to add and nothing to migrate\n");
     }
 
     out

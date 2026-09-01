@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::bail;
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::engine::config::{
     default_lifecycle, default_rules, starter_relationships, Config, EdgeDef, RelSelector,
@@ -9,7 +10,75 @@ use crate::engine::config::{
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
 
-use super::ConfigFixResult;
+use super::{ConfigFixResult, LostComment};
+
+/// The status-conditioned `create` gate ADR-033 retired. It is no longer a
+/// field on [`ValidationRule`], so a source config still carrying the key
+/// parses without complaint and loses it without a word.
+const GATE_KEY: &str = "require_parent_status";
+
+/// What the translating rewrite deletes that the parsed [`Config`] cannot
+/// account for: comments, which `Config::parse_lenient` throws away, and the
+/// retired gate, which it silently ignores.
+#[derive(Debug, Default)]
+struct SourceLosses {
+    comments: Vec<LostComment>,
+    gates: Vec<String>,
+}
+
+/// Read those losses off the source text's `toml_edit` decor.
+///
+/// Only `[[rules]]` blocks are inspected, because only they are deleted whole:
+/// their decor goes with them, while every other block survives the rewrite and
+/// keeps its own comments (STORY-258 AC8).
+fn losses_from_source(src: &str) -> anyhow::Result<SourceLosses> {
+    let doc: DocumentMut = src.parse()?;
+    let Some(rules) = doc.get("rules").and_then(Item::as_array_of_tables) else {
+        return Ok(SourceLosses::default());
+    };
+
+    let mut losses = SourceLosses::default();
+    for table in rules.iter() {
+        let Some(name) = table.get("name").and_then(Item::as_str) else {
+            continue;
+        };
+        losses
+            .comments
+            .extend(comments_on(table).map(|comment| LostComment {
+                rule: name.to_string(),
+                comment,
+            }));
+        if table.contains_key(GATE_KEY) {
+            losses.gates.push(name.to_string());
+        }
+    }
+    Ok(losses)
+}
+
+/// Every comment that dies with a `[[rules]]` table: the ones above its header,
+/// one trailing the header itself, and one trailing each of its keys. Reading
+/// order, so the plan lists them the way the file does.
+fn comments_on(table: &Table) -> impl Iterator<Item = String> + '_ {
+    let decor = table.decor();
+    comment_lines(decor.prefix().and_then(|raw| raw.as_str()))
+        .chain(comment_lines(decor.suffix().and_then(|raw| raw.as_str())))
+        .chain(table.iter().flat_map(|(_, item)| {
+            let suffix = item
+                .as_value()
+                .and_then(|value| value.decor().suffix())
+                .and_then(|raw| raw.as_str());
+            comment_lines(suffix)
+        }))
+}
+
+fn comment_lines(decor: Option<&str>) -> impl Iterator<Item = String> + '_ {
+    decor
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('#'))
+        .map(str::to_string)
+}
 
 fn rule_name(rule: &ValidationRule) -> &str {
     match rule {
@@ -182,8 +251,10 @@ fn rule_types(rule: &ValidationRule) -> Vec<&str> {
 /// survive. The RFC-067 edge migration is a translating REWRITE (ADR-032) — the
 /// source `[[rules]]` blocks and `[[relationships]].traversal` keys have to go,
 /// or the config declares its DAG twice. A comment attached to a block the
-/// migration translates does not survive it. Nothing else about the file
-/// changes, but that much is lost.
+/// migration translates does not survive it, and neither does a
+/// `require_parent_status` gate on one; both are read off the source by
+/// [`losses_from_source`] so the plan can name them before applying. Nothing
+/// else about the file changes, but that much is lost.
 ///
 /// The two meet on the standard rule set, and the rewrite wins: `default_rules`
 /// is seeded through the translation, so the standard constraints land as
@@ -245,6 +316,10 @@ pub fn collect_config_fixes(
         .filter(|r| r.traversal.is_some())
         .map(|r| r.name.clone())
         .collect();
+    let SourceLosses {
+        comments: comments_lost,
+        gates: gates_dropped,
+    } = losses_from_source(&existing)?;
 
     // The buffer the whole repair is planned against: the source plus every
     // block the append fixes supply, so the seeded rules translate in this run.
@@ -284,6 +359,8 @@ pub fn collect_config_fixes(
         edges_written,
         rules_removed,
         traversal_removed,
+        comments_lost,
+        gates_dropped,
         written,
     })
 }
@@ -630,6 +707,92 @@ mod tests {
 
         let names: Vec<&str> = edges.iter().map(|edge| edge.name.as_str()).collect();
         assert_eq!(names, vec!["a-rule", "implements-traversal"]);
+    }
+
+    const RULE_WITH_COMMENTS: &str = r#"# a comment about the whole file
+
+[[relationships]]
+name = "implements"
+traversal = "chain" # not a rules block
+
+# every story traces to an rfc
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning" # loud enough to notice
+
+[[rules]]
+name = "adrs-need-relations"
+shape = "relation-existence"
+type = "adr"
+require = "any-relation"
+severity = "error"
+"#;
+
+    #[test]
+    fn a_rules_block_loses_the_comments_above_it_and_the_ones_trailing_its_keys() {
+        let losses = losses_from_source(RULE_WITH_COMMENTS).expect("the source is valid TOML");
+
+        assert_eq!(
+            losses
+                .comments
+                .iter()
+                .map(|c| (c.rule.as_str(), c.comment.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("stories-need-rfcs", "# every story traces to an rfc"),
+                ("stories-need-rfcs", "# loud enough to notice"),
+            ]
+        );
+    }
+
+    /// The whole point of naming the block: a warning on every rule is a
+    /// warning the reader learns to skip.
+    #[test]
+    fn a_rules_block_with_no_comments_loses_none() {
+        let losses = losses_from_source(RULE_WITH_COMMENTS).expect("the source is valid TOML");
+
+        assert!(losses
+            .comments
+            .iter()
+            .all(|c| c.rule != "adrs-need-relations"));
+    }
+
+    #[test]
+    fn a_config_with_no_rules_block_loses_nothing() {
+        let losses = losses_from_source("[[relationships]]\nname = \"implements\"\n")
+            .expect("the source is valid TOML");
+
+        assert!(losses.comments.is_empty());
+        assert!(losses.gates.is_empty());
+    }
+
+    /// ADR-033 retired the gate with no successor, and `Config::parse_lenient`
+    /// drops the key without a word, so the source text is the only place the
+    /// plan can learn it was there.
+    #[test]
+    fn a_rule_carrying_require_parent_status_reports_a_dropped_gate() {
+        let source = r#"[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning"
+require_parent_status = "accepted"
+
+[[rules]]
+name = "adrs-need-relations"
+shape = "relation-existence"
+type = "adr"
+require = "any-relation"
+severity = "error"
+"#;
+
+        let losses = losses_from_source(source).expect("the source is valid TOML");
+
+        assert_eq!(losses.gates, vec!["stories-need-rfcs".to_string()]);
     }
 
     #[test]

@@ -136,6 +136,205 @@ require = "any-relation"
 severity = "error"
 "#;
 
+/// A legacy config whose `[[rules]]` blocks carry the two things the
+/// translating rewrite deletes without trace: comments on a translated block,
+/// and the `require_parent_status` gate ADR-033 retired. `adrs-need-relations`
+/// carries neither and is the control — a plan that warns about every block
+/// teaches the reader to skip the warning.
+const COMMENTED_LEGACY_CONFIG: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+
+# every story traces to an rfc
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning" # loud enough to notice
+require_parent_status = "accepted"
+
+[[rules]]
+name = "adrs-need-relations"
+shape = "relation-existence"
+type = "adr"
+require = "any-relation"
+severity = "error"
+
+# the tracker this project files against
+[bugtracker]
+url = "https://example.invalid"
+"#;
+
+// AC7 — the plan names each comment the rewrite destroys and the block it
+// belongs to, before anything is written.
+#[test]
+fn fix_config_dry_run_names_the_comments_the_rewrite_destroys() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+    let original = fixture.config_bytes();
+
+    let output = lazyspec::cli::fix::run_config_human(fixture.root(), true, &RealFileSystem);
+
+    assert!(
+        output.contains(
+            "Would lose comment on rule stories-need-rfcs: # every story traces to an rfc"
+        ),
+        "{output}"
+    );
+    assert!(
+        output.contains("Would lose comment on rule stories-need-rfcs: # loud enough to notice"),
+        "{output}"
+    );
+    assert_eq!(
+        fixture.config_bytes(),
+        original,
+        "the plan is shown before anything is applied"
+    );
+}
+
+// AC7 — the warning is true: exactly the comments named are the ones gone from
+// the file afterwards, and a comment on a section the migration does not
+// translate is untouched.
+#[test]
+fn the_comments_the_plan_names_are_the_ones_the_rewrite_removes() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    let text = fixture.config_text();
+    assert!(!text.contains("# every story traces to an rfc"), "{text}");
+    assert!(!text.contains("# loud enough to notice"), "{text}");
+    assert!(
+        text.contains("# the tracker this project files against"),
+        "a comment outside the translated blocks survives: {text}"
+    );
+}
+
+// AC7 — no warning on a block that loses nothing.
+#[test]
+fn fix_config_reports_no_lost_comment_for_an_uncommented_rule() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let named: Vec<&str> = parsed["comments_lost"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["rule"].as_str().unwrap())
+        .collect();
+    assert!(!named.contains(&"adrs-need-relations"), "{json}");
+}
+
+// AC7 — a config whose rules carry no comments produces no warning at all.
+#[test]
+fn fix_config_reports_no_lost_comments_for_a_config_carrying_none() {
+    let fixture = ConfigFixture::new(LEGACY_DAG_CONFIG);
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        parsed["comments_lost"].as_array().unwrap().is_empty(),
+        "{json}"
+    );
+    assert!(
+        parsed["gates_dropped"].as_array().unwrap().is_empty(),
+        "{json}"
+    );
+}
+
+// AC7, dictum 2 — every fact in the human plan is a field in the JSON.
+#[test]
+fn fix_config_json_carries_the_lost_comments_and_dropped_gates() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+
+    let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let lost: Vec<(&str, &str)> = parsed["comments_lost"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["rule"].as_str().unwrap(), c["comment"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        lost,
+        vec![
+            ("stories-need-rfcs", "# every story traces to an rfc"),
+            ("stories-need-rfcs", "# loud enough to notice"),
+        ],
+        "{json}"
+    );
+    assert_eq!(
+        parsed["gates_dropped"].as_array().unwrap(),
+        &vec![serde_json::json!("stories-need-rfcs")],
+        "{json}"
+    );
+}
+
+// AC7 — the retired gate gets its own line naming ADR-033. It changes no
+// finding, so nothing else in the plan would disclose it.
+#[test]
+fn fix_config_dry_run_reports_the_dropped_gate_naming_adr_033() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+
+    let output = lazyspec::cli::fix::run_config_human(fixture.root(), true, &RealFileSystem);
+
+    let line = output
+        .lines()
+        .find(|l| l.contains("require_parent_status"))
+        .unwrap_or_else(|| panic!("no gate line in: {output}"));
+    assert!(line.contains("stories-need-rfcs"), "{line}");
+    assert!(line.contains("ADR-033"), "{line}");
+}
+
+// AC7 — "nothing to add" is false over a rewrite, so the no-op line has to
+// speak for the migration too.
+#[test]
+fn fix_config_no_op_line_speaks_for_the_migration_as_well() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    let output = lazyspec::cli::fix::run_config_human(fixture.root(), true, &RealFileSystem);
+
+    assert!(output.contains("nothing to migrate"), "{output}");
+}
+
 // AC1 — the source declarations are translated and then deleted.
 #[test]
 fn fix_config_translates_rules_and_traversal_into_edges() {

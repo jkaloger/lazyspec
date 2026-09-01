@@ -58,15 +58,31 @@ pub struct FieldFixResult {
     pub written: bool,
 }
 
+/// A comment the RFC-067 rewrite deletes along with the `[[rules]]` block it
+/// sits on. ADR-032 §Consequences accepts the loss; naming the rule is what
+/// lets the plan say which block loses what, so the reader can copy the text
+/// somewhere it will survive.
+#[derive(Debug, Serialize)]
+pub struct LostComment {
+    pub rule: String,
+    pub comment: String,
+}
+
 /// Outcome of `fix --config`: what the run adds, what the RFC-067 edge
 /// migration takes away, and whether the file was written.
 ///
 /// The two halves never name the same thing. `*_added` is what the file was
-/// missing; `*_removed` is what the translating rewrite deletes from it, read
-/// off the source alone (ADR-032). `edges_written` names the `[[edges]]` rows
-/// the translation produces, which include the standard constraints seeded
-/// through it — those appear in `rules_added` too, because the constraint is
-/// what was missing and the row is how it is now spelled.
+/// missing; `*_removed` / `*_lost` / `*_dropped` is what the translating
+/// rewrite deletes from it, read off the source alone (ADR-032).
+/// `edges_written` names the `[[edges]]` rows the translation produces, which
+/// include the standard constraints seeded through it — those appear in
+/// `rules_added` too, because the constraint is what was missing and the row is
+/// how it is now spelled.
+///
+/// `comments_lost` and `gates_dropped` are the destructions nothing else here
+/// would disclose: a comment leaves no trace in the parsed config, and a
+/// `require_parent_status` gate changes no finding either before or after
+/// (ADR-033 retired it with no successor).
 #[derive(Debug, Serialize)]
 pub struct ConfigFixResult {
     pub relationships_added: Vec<String>,
@@ -75,6 +91,8 @@ pub struct ConfigFixResult {
     pub edges_written: Vec<String>,
     pub rules_removed: Vec<String>,
     pub traversal_removed: Vec<String>,
+    pub comments_lost: Vec<LostComment>,
+    pub gates_dropped: Vec<String>,
     pub written: bool,
 }
 

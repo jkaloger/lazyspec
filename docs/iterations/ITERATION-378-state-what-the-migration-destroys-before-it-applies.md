@@ -1,7 +1,7 @@
 ---
 title: State what the migration destroys before it applies
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
