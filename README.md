@@ -124,8 +124,12 @@ Lazyspec ships a set of config-driven generic verb skills that enforce its workf
 | `co-write` | Collaboratively draft a document body: AI proposes, human edits, iterate          |
 | `generate` | Author a full document body from context (only when the type's ceiling allows it) |
 | `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates |
-| `execute`  | Carry out the work a delivery document describes against its tasks and ACs        |
-| `review`   | Critique a document against its intent and acceptance criteria before advancing   |
+| `review`   | Critique a *document* against its intent and acceptance criteria before advancing |
+| `execute`  | Build one delivery document's task breakdown in a single agent pass, then report  |
+| `orchestrate` | Drive a batch of delivery documents to done: order, dispatch, review, commit, close |
+| `review-work` | Critique landed *code*: acceptance conformance, convention conformance, quality |
+
+The work verbs split on two axes. `/review` reads document bodies, `/review-work` reads diffs and is the only place project conventions are checked. `/execute` owns exactly one delivery document and never spawns an agent; `/orchestrate` owns a set and is the only agent that spawns agents.
 
 ### Installing skills
 
