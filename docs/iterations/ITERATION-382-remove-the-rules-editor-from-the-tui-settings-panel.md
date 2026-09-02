@@ -1,7 +1,7 @@
 ---
 title: Remove the rules editor from the TUI settings panel
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

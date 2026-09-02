@@ -14,16 +14,14 @@ use std::path::PathBuf;
 
 use std::collections::BTreeMap;
 
-use crate::engine::config::{
-    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
-};
+use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, StoreBackend};
 use crate::engine::document::{AttrValue, DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
     anchor_to_flat, App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath,
-    FilterField, GraphNode, PreviewTab, RelKey, RuleKey, TypeKey,
+    FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
 };
 
 use super::colors::{status_color, tag_color, StatusPalette};
@@ -2032,13 +2030,6 @@ pub fn draw_graph(
     }
 }
 
-fn severity_str(s: &Severity) -> &'static str {
-    match s {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    }
-}
-
 fn reserved_format_str(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
@@ -2062,8 +2053,6 @@ const STORE_VARIANTS: &[&str] = &[
     "github-projects",
     "git-ref",
 ];
-const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
-const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
 
 fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> EditableField {
@@ -2095,9 +2084,9 @@ fn statusbar_value(slot: Option<&Vec<String>>) -> String {
 /// The FIELD list for the current settings field-view, mirroring the display
 /// rendered by `settings_lines_inner` exactly (same fields, order, values) with
 /// the editor kind and buffer path per field. Entry-LIST views (a collection
-/// category that is not drilled) carry no fields and return empty; the cat-6
+/// category that is not drilled) carry no fields and return empty; the cat-5
 /// override entries below `normalize` are likewise an entry-list, not fields, so
-/// the not-drilled cat-6 view returns only the top-level `normalize` field.
+/// the not-drilled cat-5 view returns only the top-level `normalize` field.
 pub fn settings_fields(
     category: usize,
     _entry: usize,
@@ -2233,98 +2222,6 @@ pub fn settings_fields(
             }
         }
         3 => {
-            if let Some(d) = drill {
-                if let Some(rule) = config.rules.get(d) {
-                    let key = |k| FieldPath::Rule { index: d, key: k };
-                    match rule {
-                        ValidationRule::ParentChild {
-                            name,
-                            child,
-                            parent,
-                            severity,
-                            ..
-                        } => {
-                            fields.push(field(
-                                "name",
-                                name.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Name),
-                            ));
-                            fields.push(field(
-                                "shape",
-                                "parent-child".to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: RULE_SHAPE_VARIANTS,
-                                },
-                                key(RuleKey::Shape),
-                            ));
-                            fields.push(field(
-                                "child",
-                                child.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Child),
-                            ));
-                            fields.push(field(
-                                "parent",
-                                parent.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Parent),
-                            ));
-                            fields.push(field(
-                                "severity",
-                                severity_str(severity).to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: SEVERITY_VARIANTS,
-                                },
-                                key(RuleKey::Severity),
-                            ));
-                        }
-                        ValidationRule::RelationExistence {
-                            name,
-                            doc_type,
-                            require,
-                            severity,
-                        } => {
-                            fields.push(field(
-                                "name",
-                                name.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Name),
-                            ));
-                            fields.push(field(
-                                "shape",
-                                "relation-existence".to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: RULE_SHAPE_VARIANTS,
-                                },
-                                key(RuleKey::Shape),
-                            ));
-                            fields.push(field(
-                                "doc_type",
-                                doc_type.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::DocType),
-                            ));
-                            fields.push(field(
-                                "require",
-                                require.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Require),
-                            ));
-                            fields.push(field(
-                                "severity",
-                                severity_str(severity).to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: SEVERITY_VARIANTS,
-                                },
-                                key(RuleKey::Severity),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        4 => {
             match &config.documents.sqids {
                 Some(s) => {
                     fields.push(field(
@@ -2400,7 +2297,7 @@ pub fn settings_fields(
                 }
             }
         }
-        5 => match &config.documents.github {
+        4 => match &config.documents.github {
             Some(g) => {
                 fields.push(field(
                     "repo",
@@ -2433,7 +2330,7 @@ pub fn settings_fields(
                 ));
             }
         },
-        6 => {
+        5 => {
             if let Some(d) = drill {
                 let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
                 keys.sort();
@@ -2458,7 +2355,7 @@ pub fn settings_fields(
                 ));
             }
         }
-        7 => {
+        6 => {
             fields.push(field(
                 "interactive",
                 nullable_value(config.agents.interactive.as_deref()),
@@ -2466,7 +2363,7 @@ pub fn settings_fields(
                 FieldPath::AgentsInteractive,
             ));
         }
-        8 => {
+        7 => {
             fields.push(field(
                 "ascii_diagrams",
                 config.ui.ascii_diagrams.to_string(),
@@ -2553,8 +2450,8 @@ fn settings_display_value(
     }
 }
 
-/// The navigable entry names for an entry-list collection (categories 1/2/3 and
-/// cat 6's certification overrides), read straight from the config model. The
+/// The navigable entry names for an entry-list collection (categories 1/2 and
+/// cat 5's certification overrides), read straight from the config model. The
 /// single source of truth for entry-list content: the render, the drilled-view
 /// title (`drill_entry_name`), and the legacy display-line builder all derive
 /// from it, so nothing reconstructs entry text from a rendered string.
@@ -2571,15 +2468,7 @@ pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<Stri
             .iter()
             .map(|r| r.name.clone())
             .collect(),
-        3 => config
-            .rules
-            .iter()
-            .map(|rule| match rule {
-                ValidationRule::ParentChild { name, .. } => name.clone(),
-                ValidationRule::RelationExistence { name, .. } => name.clone(),
-            })
-            .collect(),
-        6 => {
+        5 => {
             let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
             keys.sort();
             keys.into_iter().cloned().collect()
@@ -2599,9 +2488,9 @@ fn settings_lines_inner(
     drill: Option<usize>,
     config: &Config,
 ) -> Vec<String> {
-    const COLLECTIONS: [usize; 3] = [1, 2, 3];
-    // Entry-list categories (1,2,3) that are NOT drilled render a navigable name
-    // list, not a field list. cat 6 is a hybrid: the top `normalize` field plus an
+    const COLLECTIONS: [usize; 2] = [1, 2];
+    // Entry-list categories (1,2) that are NOT drilled render a navigable name
+    // list, not a field list. cat 5 is a hybrid: the top `normalize` field plus an
     // override entry-list below it. Everything else (including drilled collections)
     // is a pure field-view derived from `settings_fields`.
     if COLLECTIONS.contains(&category) && drill.is_none() {
@@ -2615,7 +2504,7 @@ fn settings_lines_inner(
             .collect();
     }
 
-    if category == 6 {
+    if category == 5 {
         let mut lines: Vec<String> = settings_fields(category, entry, drill, config)
             .iter()
             .map(field_line)
@@ -2748,10 +2637,9 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         .padding(Padding::horizontal(1))
         .title(title);
 
-    // Collection categories (1,2,3,6) that are not drilled render a navigable
+    // Collection categories (1,2,5) that are not drilled render a navigable
     // entry-name LIST; everything else is a two-column field-view.
-    let in_entry_list =
-        matches!(app.settings_category, 1 | 2 | 3 | 6) && app.settings_drill.is_none();
+    let in_entry_list = matches!(app.settings_category, 1 | 2 | 5) && app.settings_drill.is_none();
 
     let highlight_style = Style::default().add_modifier(Modifier::REVERSED);
 
@@ -2760,21 +2648,21 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
         // former inline `▸` marker. Rows are sourced straight from the config model
         // (`settings_entry_names`), not by stripping a prefix off a rendered line.
         let mut rows: Vec<Row> = Vec::new();
-        // cat 6 keeps a non-selectable `normalize` field above its override entries.
-        if app.settings_category == 6 {
-            if let Some(fld) = settings_fields(6, app.settings_entry, None, config).first() {
+        // cat 5 keeps a non-selectable `normalize` field above its override entries.
+        if app.settings_category == 5 {
+            if let Some(fld) = settings_fields(5, app.settings_entry, None, config).first() {
                 rows.push(Row::new([Cell::from(field_line(fld))]));
             }
         }
         let names = settings_entry_names(app.settings_category, config);
-        if app.settings_category == 6 && names.is_empty() {
+        if app.settings_category == 5 && names.is_empty() {
             rows.push(Row::new([Cell::from("(no overrides configured)")]));
         } else {
             rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
         }
-        // cat 6's leading `normalize` field offsets the entry cursor by one; other
+        // cat 5's leading `normalize` field offsets the entry cursor by one; other
         // collections select the entry row directly.
-        let selected = if app.settings_category == 6 {
+        let selected = if app.settings_category == 5 {
             app.settings_entry + 1
         } else {
             app.settings_entry
@@ -3924,7 +3812,7 @@ mod tests {
     #[test]
     fn settings_lines_github_absent_shows_unset() {
         let config = Config::default();
-        let lines = settings_lines_inner(5, 0, None, &config);
+        let lines = settings_lines_inner(4, 0, None, &config);
         assert_eq!(lines.len(), 2);
         assert!(lines.contains(&"repo: (unset)".to_string()));
         assert!(lines.contains(&"cache_ttl: (unset)".to_string()));
@@ -3999,7 +3887,7 @@ mod tests {
     #[test]
     fn settings_lines_agents_absent_shows_unset() {
         let config = Config::default();
-        let lines = settings_lines_inner(7, 0, None, &config);
+        let lines = settings_lines_inner(6, 0, None, &config);
         assert!(lines.contains(&"interactive: (unset)".to_string()));
     }
 
@@ -4036,7 +3924,7 @@ mod tests {
     #[test]
     fn settings_lines_numbering_all_unset() {
         let config = Config::default();
-        let lines = settings_lines_inner(4, 0, None, &config);
+        let lines = settings_lines_inner(3, 0, None, &config);
         assert_eq!(lines.len(), 5);
         assert!(lines.contains(&"sqids.salt: (unset)".to_string()));
         assert!(lines.contains(&"sqids.min_length: (unset)".to_string()));
@@ -4048,7 +3936,7 @@ mod tests {
     #[test]
     fn settings_lines_interface_default() {
         let config = Config::default();
-        let lines = settings_lines_inner(8, 0, None, &config);
+        let lines = settings_lines_inner(7, 0, None, &config);
         assert_eq!(lines.len(), 6);
         assert!(lines.contains(&"ascii_diagrams: false".to_string()));
         assert!(lines.contains(&"statusbar.enabled: true".to_string()));
@@ -4084,7 +3972,7 @@ mod tests {
     #[test]
     fn settings_lines_certification_empty_overrides() {
         let config = Config::default();
-        let lines = settings_lines_inner(6, 0, None, &config);
+        let lines = settings_lines_inner(5, 0, None, &config);
         assert!(lines.iter().any(|l| l.starts_with("normalize:")));
         assert!(lines.contains(&"(no overrides configured)".to_string()));
     }
@@ -4096,43 +3984,27 @@ mod tests {
         assert!(lines.is_empty());
     }
 
+    // STORY-259: the settings panel no longer offers a category for editing
+    // `[[rules]]`, so nothing in the TUI can author a shape the load path is about
+    // to refuse. Category 3 is now Numbering, a field-view, not an entry list.
     #[test]
-    fn settings_lines_validation_rules_not_drilled_shows_entries() {
-        let config = Config::default();
-        let lines = settings_lines_inner(3, 0, None, &config);
-        assert_eq!(lines.len(), config.rules.len());
-        assert!(lines.iter().any(|l| l.contains("stories-need-rfcs")));
-        assert!(lines.iter().any(|l| l.contains("iterations-need-stories")));
-        assert!(lines.iter().any(|l| l.contains("adrs-need-relations")));
-        assert!(lines.iter().any(|l| l.contains("▸")));
-    }
-
-    #[test]
-    fn settings_lines_validation_rules_drilled_parent_child() {
-        let config = Config::default();
-        let lines = settings_lines_inner(3, 0, Some(0), &config);
-        assert!(lines.contains(&"name: stories-need-rfcs".to_string()));
-        assert!(lines.contains(&"shape: parent-child".to_string()));
-        assert!(lines.contains(&"child: story".to_string()));
-        assert!(lines.contains(&"parent: rfc".to_string()));
-        assert!(lines.contains(&"severity: warning".to_string()));
+    fn settings_categories_offer_no_validation_rules() {
+        let cats = App::settings_categories();
         assert!(
-            !lines.iter().any(|l| l.starts_with("link:")),
-            "the link field no longer renders: {lines:?}"
+            !cats.iter().any(|c| c.contains("Rule")),
+            "the rules editor is retired: {cats:?}"
         );
-        assert_eq!(lines.len(), 5);
-    }
-
-    #[test]
-    fn settings_lines_validation_rules_drilled_relation_existence() {
+        assert_eq!(
+            cats[3], "Numbering",
+            "Numbering took the retired category's index: {cats:?}"
+        );
         let config = Config::default();
-        let lines = settings_lines_inner(3, 0, Some(2), &config);
-        assert!(lines.contains(&"name: adrs-need-relations".to_string()));
-        assert!(lines.contains(&"shape: relation-existence".to_string()));
-        assert!(lines.contains(&"doc_type: adr".to_string()));
-        assert!(lines.contains(&"require: any-relation".to_string()));
-        assert!(lines.contains(&"severity: error".to_string()));
-        assert_eq!(lines.len(), 5);
+        assert!(
+            !settings_entry_names(3, &config)
+                .iter()
+                .any(|n| n == "stories-need-rfcs"),
+            "no category lists rule entries"
+        );
     }
 
     fn field_by_label<'a>(fields: &'a [EditableField], label: &str) -> &'a EditableField {
@@ -4189,7 +4061,7 @@ prefix = "RFC"
 name = "related-to"
 "#;
         let config = Config::parse(toml_str).unwrap();
-        let fields = settings_fields(5, 0, None, &config);
+        let fields = settings_fields(4, 0, None, &config);
         let repo = field_by_label(&fields, "repo");
         assert_eq!(repo.editor, FieldEditor::Nullable);
         assert_eq!(repo.path, FieldPath::GithubRepo);
@@ -4200,7 +4072,7 @@ name = "related-to"
     #[test]
     fn settings_fields_sqids_read_only_when_section_absent() {
         let config = Config::default();
-        let fields = settings_fields(4, 0, None, &config);
+        let fields = settings_fields(3, 0, None, &config);
         let salt = field_by_label(&fields, "sqids.salt");
         assert_eq!(salt.editor, FieldEditor::ReadOnly);
         assert_eq!(salt.path, FieldPath::Unset);
@@ -4213,7 +4085,7 @@ name = "related-to"
     #[test]
     fn settings_fields_interface_surfaces_full_uiconfig_with_defaults() {
         let config = Config::default();
-        let fields = settings_fields(8, 0, None, &config);
+        let fields = settings_fields(7, 0, None, &config);
 
         let expected: &[(&str, FieldEditor, FieldPath)] = &[
             (
@@ -4288,7 +4160,7 @@ left = ["mode", "git_branch"]
 max_expanded_height = 8
 "#;
         let config = Config::parse(toml_str).unwrap();
-        let fields = settings_fields(8, 0, None, &config);
+        let fields = settings_fields(7, 0, None, &config);
         assert_eq!(field_by_label(&fields, "ascii_diagrams").value, "true");
         assert_eq!(field_by_label(&fields, "statusbar.enabled").value, "false");
         assert_eq!(
@@ -4306,13 +4178,12 @@ max_expanded_height = 8
         let config = Config::default();
         assert!(settings_fields(1, 0, None, &config).is_empty());
         assert!(settings_fields(2, 0, None, &config).is_empty());
-        assert!(settings_fields(3, 0, None, &config).is_empty());
     }
 
     #[test]
     fn settings_fields_cert_normalize_top_is_toggle() {
         let config = Config::default();
-        let fields = settings_fields(6, 0, None, &config);
+        let fields = settings_fields(5, 0, None, &config);
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].label, "normalize");
         assert_eq!(fields[0].editor, FieldEditor::Toggle);

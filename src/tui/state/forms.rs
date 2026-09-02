@@ -134,8 +134,8 @@ impl DeleteConfirm {
 }
 
 /// Which buffer entry a `SettingsDeleteConfirm` targets. Vec-backed collections
-/// (Document Types / Relationships / Validation Rules) carry the entry index;
-/// certification overrides carry the sorted-key (spec-path) they live under.
+/// (Document Types / Relationships) carry the entry index; certification
+/// overrides carry the sorted-key (spec-path) they live under.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsDeleteTarget {
     Index(usize),
@@ -266,9 +266,9 @@ impl StatusPicker {
 }
 
 /// The variant-picker overlay shown when an enum settings field is opened with
-/// `Enter` (numbering, store, reserved format, rule severity, or rule shape). It
-/// lists the field's variants; the chosen one is written back to the buffer at
-/// `path` (RFC-023 / STORY-144). Cursor ops are pure (no terminal).
+/// `Enter` (numbering, store, or reserved format). It lists the field's
+/// variants; the chosen one is written back to the buffer at `path` (RFC-023 /
+/// STORY-144). Cursor ops are pure (no terminal).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsVariantPicker {
     pub path: FieldPath,
@@ -608,19 +608,6 @@ pub enum RelKey {
     Inverse,
 }
 
-/// A rule-key inside a drilled [[rules]] entry. `child`/`parent` are
-/// ParentChild-only; `doc_type`/`require` are RelationExistence-only.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RuleKey {
-    Name,
-    Shape,
-    Child,
-    Parent,
-    DocType,
-    Require,
-    Severity,
-}
-
 /// Uniquely identifies the buffer target for one editable settings field, so a
 /// later increment can read/write `App.settings_buffer` (a `Config`) for it via
 /// an exhaustive `match`. Collection variants carry the entry index; the
@@ -638,10 +625,6 @@ pub enum FieldPath {
     Rel {
         index: usize,
         key: RelKey,
-    },
-    Rule {
-        index: usize,
-        key: RuleKey,
     },
     SqidsSalt,
     SqidsMinLength,

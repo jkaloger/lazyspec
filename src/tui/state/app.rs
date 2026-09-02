@@ -2,9 +2,9 @@
 use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, OpenRequest,
-    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
-    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
-    StatusPicker, TypeKey, ZoneOrderingEditor,
+    OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm, SettingsDeleteTarget,
+    SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker, StatusPicker, TypeKey,
+    ZoneOrderingEditor,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -13,8 +13,7 @@ pub use crate::engine::graph::GraphNode;
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
     default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
-    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, TypeDef,
-    ValidationRule,
+    RelationshipDef, ReservedConfig, ReservedFormat, SqidsConfig, StoreBackend, TypeDef,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -45,7 +44,6 @@ enum SettingsValue {
     Numbering(NumberingStrategy),
     Store(StoreBackend),
     ReservedFormat(ReservedFormat),
-    Severity(Severity),
 }
 
 /// Parse and bounds-check a numeric settings input. Pure and unit-testable.
@@ -172,72 +170,8 @@ fn reserved_format_from_variant(v: &str) -> Option<ReservedFormat> {
     }
 }
 
-fn severity_from_variant(v: &str) -> Option<Severity> {
-    match v {
-        "error" => Some(Severity::Error),
-        "warning" => Some(Severity::Warning),
-        _ => None,
-    }
-}
-
 fn statusbar_raw(slot: Option<&Vec<String>>) -> String {
     slot.map(|v| v.join(", ")).unwrap_or_default()
-}
-
-/// The raw editable string for a rule body field, read from the variant in play.
-/// Fields absent from the current variant render empty.
-fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
-    match (rule, key) {
-        (ValidationRule::ParentChild { name, .. }, RuleKey::Name)
-        | (ValidationRule::RelationExistence { name, .. }, RuleKey::Name) => name.clone(),
-        (ValidationRule::ParentChild { .. }, RuleKey::Shape) => "parent-child".to_string(),
-        (ValidationRule::RelationExistence { .. }, RuleKey::Shape) => {
-            "relation-existence".to_string()
-        }
-        (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
-        (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
-        (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
-        (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
-        (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
-        | (ValidationRule::RelationExistence { severity, .. }, RuleKey::Severity) => match severity
-        {
-            Severity::Error => "error".to_string(),
-            Severity::Warning => "warning".to_string(),
-        },
-        _ => String::new(),
-    }
-}
-
-/// Write a typed value into a rule body field. Mismatched key/variant
-/// combinations and value-kind mismatches are no-ops.
-fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
-    match rule {
-        ValidationRule::ParentChild {
-            name,
-            child,
-            parent,
-            severity,
-            ..
-        } => match (key, value) {
-            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
-            (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
-            (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
-            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
-            _ => {}
-        },
-        ValidationRule::RelationExistence {
-            name,
-            doc_type,
-            require,
-            severity,
-        } => match (key, value) {
-            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
-            (RuleKey::DocType, SettingsValue::Text(s)) => *doc_type = s,
-            (RuleKey::Require, SettingsValue::Text(s)) => *require = s,
-            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
-            _ => {}
-        },
-    }
 }
 
 pub struct CreateResult {
@@ -667,9 +601,9 @@ pub struct App {
     /// back into `settings_buffer` (RFC-023 slice 7).
     pub settings_zone_editor: Option<ZoneOrderingEditor>,
     /// The enum variant-picker overlay, active while an enum field (numbering,
-    /// store, reserved format, rule severity, or rule shape) is being edited via
-    /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
-    /// variant back into `settings_buffer` (RFC-023 / STORY-144).
+    /// store, or reserved format) is being edited via `Enter`. `Some` routes keys
+    /// to the picker; selecting writes the chosen variant back into
+    /// `settings_buffer` (RFC-023 / STORY-144).
     pub settings_variant_picker: Option<SettingsVariantPicker>,
     /// Free-running render-loop counter, set each frame before `terminal.draw`.
     /// Drives spinner animation phase; shared with the header sync/push face.
@@ -989,7 +923,6 @@ impl App {
             "General",
             "Document Types",
             "Relationships",
-            "Validation Rules",
             "Numbering",
             "GitHub",
             "Certification",
@@ -1049,11 +982,6 @@ impl App {
                     RelKey::Name => r.name.clone(),
                     RelKey::Inverse => r.inverse.clone().unwrap_or_default(),
                 })
-                .unwrap_or_default(),
-            FieldPath::Rule { index, key } => buf
-                .rules
-                .get(*index)
-                .map(|r| rule_raw(r, key))
                 .unwrap_or_default(),
             FieldPath::SqidsSalt => buf
                 .documents
@@ -1164,11 +1092,6 @@ impl App {
                         (RelKey::Inverse, SettingsValue::OptText(o)) => r.inverse = o,
                         _ => {}
                     }
-                }
-            }
-            FieldPath::Rule { index, key } => {
-                if let Some(rule) = buf.rules.get_mut(*index) {
-                    rule_write(rule, key, value);
                 }
             }
             FieldPath::SqidsSalt => {
@@ -1415,22 +1338,12 @@ impl App {
     /// auto-scaffolding the enum-cycle path does. This is the shared write the
     /// cycle path and the variant picker both call: the cycle computes `next` then
     /// delegates here, so cycle and pick converge on identical behaviour (RFC-023
-    /// STORY-144). Rule `shape` is special: it routes through the whole-rule
-    /// conversion (preserving name + severity) when `variant` names the *other*
-    /// shape, and is a no-op when it names the current one.
+    /// STORY-144).
     pub fn settings_set_enum_variant(&mut self, path: &FieldPath, variant: &str) {
         // Re-selecting the current variant is a no-op: no buffer write, no dirty.
         // The cycle path never reaches here unchanged (it advances the index); the
         // picker can, when the user re-picks the row already in force.
         if variant == self.settings_focused_raw() {
-            return;
-        }
-        if let FieldPath::Rule {
-            index,
-            key: RuleKey::Shape,
-        } = path
-        {
-            self.settings_cycle_rule_shape(*index);
             return;
         }
         match path {
@@ -1457,15 +1370,6 @@ impl App {
             FieldPath::ReservedFormat => {
                 if let Some(f) = reserved_format_from_variant(variant) {
                     self.settings_write(path, SettingsValue::ReservedFormat(f));
-                    self.settings_dirty = true;
-                }
-            }
-            FieldPath::Rule {
-                key: RuleKey::Severity,
-                ..
-            } => {
-                if let Some(sev) = severity_from_variant(variant) {
-                    self.settings_write(path, SettingsValue::Severity(sev));
                     self.settings_dirty = true;
                 }
             }
@@ -1513,33 +1417,6 @@ impl App {
                 self.settings_scaffold_offer = Some(result);
             }
         }
-    }
-
-    /// Convert `rules[index]` to the other `ValidationRule` variant, preserving
-    /// `name` and `severity` and seeding the new body fields to empty strings.
-    fn settings_cycle_rule_shape(&mut self, index: usize) {
-        let Some(rule) = self.settings_buffer.rules.get_mut(index) else {
-            return;
-        };
-        *rule = match rule {
-            ValidationRule::ParentChild { name, severity, .. } => {
-                ValidationRule::RelationExistence {
-                    name: std::mem::take(name),
-                    doc_type: String::new(),
-                    require: String::new(),
-                    severity: severity.clone(),
-                }
-            }
-            ValidationRule::RelationExistence { name, severity, .. } => {
-                ValidationRule::ParentChild {
-                    name: std::mem::take(name),
-                    child: String::new(),
-                    parent: String::new(),
-                    severity: severity.clone(),
-                }
-            }
-        };
-        self.settings_dirty = true;
     }
 
     /// Save the settings buffer to `.lazyspec.toml`, pausing first when the edit
@@ -1658,7 +1535,7 @@ impl App {
             if !salt_ok {
                 // The salt is a focusable field only when the section exists.
                 if buf.documents.sqids.is_some() {
-                    self.settings_jump_to_field(4, None, |f| {
+                    self.settings_jump_to_field(3, None, |f| {
                         matches!(f.path, FieldPath::SqidsSalt)
                     });
                 } else {
@@ -1699,7 +1576,7 @@ impl App {
 
         // 3. Any other constraint (reserved/relationships): best-effort landing on
         // a relevant category, clamped, never crashing.
-        self.settings_jump_to_field(4, None, |_| false);
+        self.settings_jump_to_field(3, None, |_| false);
     }
 
     /// Land the settings nav on the scaffold offer's required-but-empty field
@@ -1708,11 +1585,11 @@ impl App {
     pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
         match path {
             FieldPath::SqidsSalt => {
-                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+                self.settings_jump_to_field(3, None, |f| matches!(f.path, FieldPath::SqidsSalt));
             }
             // No other scaffolded section produces a required-empty field today; a
             // best-effort landing keeps this total without crashing.
-            _ => self.settings_jump_to_field(4, None, |_| false),
+            _ => self.settings_jump_to_field(3, None, |_| false),
         }
     }
 
@@ -2676,9 +2553,9 @@ impl App {
     }
 
     /// Seed a default entry into the current Vec-backed collection (Document
-    /// Types / Relationships / Validation Rules) and drill into it. Placeholder
-    /// fields carry starter/default values so the new entry is immediately
-    /// editable. Buffer-only; sets `settings_dirty`.
+    /// Types / Relationships) and drill into it. Placeholder fields carry
+    /// starter/default values so the new entry is immediately editable.
+    /// Buffer-only; sets `settings_dirty`.
     pub fn settings_seed_entry(&mut self) {
         match self.settings_category {
             1 => {
@@ -2716,17 +2593,6 @@ impl App {
                     traversal: None,
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
-            }
-            3 => {
-                self.settings_buffer
-                    .rules
-                    .push(ValidationRule::ParentChild {
-                        name: "rule".to_string(),
-                        child: String::new(),
-                        parent: String::new(),
-                        severity: Severity::Error,
-                    });
-                self.settings_entry = self.settings_buffer.rules.len() - 1;
             }
             _ => return,
         }
@@ -2789,7 +2655,7 @@ impl App {
     }
 
     /// Open the confirm prompt for removing the selected settings collection
-    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 6).
+    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 5).
     /// ADR-011: refuses to delete the last `[[relationships]]` entry (cat 2),
     /// returning without activating the confirm. No buffer mutation here.
     pub fn settings_open_delete_confirm(&mut self) {
@@ -2822,17 +2688,7 @@ impl App {
                     r.name.clone(),
                 )
             }
-            3 => {
-                let Some(rule) = self.settings_buffer.rules.get(self.settings_entry) else {
-                    return;
-                };
-                let name = match rule {
-                    ValidationRule::ParentChild { name, .. } => name.clone(),
-                    ValidationRule::RelationExistence { name, .. } => name.clone(),
-                };
-                (SettingsDeleteTarget::Index(self.settings_entry), name)
-            }
-            6 => {
+            5 => {
                 let mut keys: Vec<&String> = self
                     .settings_buffer
                     .certification
@@ -2878,12 +2734,6 @@ impl App {
                         self.settings_buffer.relationships.remove(i);
                     }
                     self.settings_buffer.relationships.len()
-                }
-                3 => {
-                    if i < self.settings_buffer.rules.len() {
-                        self.settings_buffer.rules.remove(i);
-                    }
-                    self.settings_buffer.rules.len()
                 }
                 _ => 0,
             },
@@ -5885,9 +5735,7 @@ mod tests {
 
     // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
 
-    use crate::engine::config::{
-        GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, ValidationRule,
-    };
+    use crate::engine::config::{GithubConfig, ReservedFormat, SqidsConfig, StoreBackend};
 
     /// Build a settings-edit-ready app: set the buffer to `config`, focus the
     /// given category and field, leave it clean and not editing.
@@ -5959,7 +5807,7 @@ mod tests {
     fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, 7, 1); // Interface > statusbar.enabled
 
         app.settings_space();
         assert!(!app.settings_buffer.ui.statusbar.enabled);
@@ -5993,7 +5841,7 @@ mod tests {
             salt: "seed".to_string(),
             min_length: 3,
         });
-        let mut app = settings_app(config, 4, 1); // Numbering > sqids.min_length
+        let mut app = settings_app(config, 3, 1); // Numbering > sqids.min_length
 
         // Reject "0".
         app.settings_start_edit();
@@ -6039,7 +5887,7 @@ mod tests {
             repo: Some("old/repo".to_string()),
             cache_ttl: 60,
         });
-        let mut app = settings_app(config, 5, 0); // GitHub > repo
+        let mut app = settings_app(config, 4, 0); // GitHub > repo
 
         // Empty => None (not Some("")).
         app.settings_start_edit();
@@ -6172,84 +6020,6 @@ mod tests {
     }
 
     #[test]
-    fn ac7_rule_severity_cycles() {
-        let mut config = config_one_type();
-        config.rules = vec![ValidationRule::ParentChild {
-            name: "r".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Error,
-        }];
-        let mut app = settings_app(config, 3, 4); // Validation Rules, severity (ParentChild)
-        app.settings_drill = Some(0);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild { severity, .. } => {
-                assert_eq!(*severity, Severity::Warning)
-            }
-            _ => panic!("variant changed unexpectedly"),
-        }
-        assert!(app.settings_dirty);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild { severity, .. } => {
-                assert_eq!(*severity, Severity::Error, "wraps")
-            }
-            _ => panic!("variant changed unexpectedly"),
-        }
-    }
-
-    #[test]
-    fn ac7_rule_shape_converts_variant_preserving_name_and_severity() {
-        let mut config = config_one_type();
-        config.rules = vec![ValidationRule::ParentChild {
-            name: "my-rule".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Warning,
-        }];
-        let mut app = settings_app(config, 3, 1); // Validation Rules, shape
-        app.settings_drill = Some(0);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::RelationExistence {
-                name,
-                doc_type,
-                require,
-                severity,
-            } => {
-                assert_eq!(name, "my-rule", "name preserved");
-                assert_eq!(*severity, Severity::Warning, "severity preserved");
-                assert_eq!(doc_type, "", "new body seeded empty");
-                assert_eq!(require, "", "new body seeded empty");
-            }
-            _ => panic!("shape cycle must convert to relation-existence"),
-        }
-        assert!(app.settings_dirty);
-
-        // Cycling shape again converts back to parent-child.
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild {
-                name,
-                child,
-                parent,
-                severity,
-                ..
-            } => {
-                assert_eq!(name, "my-rule");
-                assert_eq!(*severity, Severity::Warning);
-                assert_eq!(child, "");
-                assert_eq!(parent, "");
-            }
-            _ => panic!("shape cycle must convert back to parent-child"),
-        }
-    }
-
-    #[test]
     fn ac7_reserved_format_cycles() {
         let mut config = config_one_type();
         config.documents.reserved = Some(crate::engine::config::ReservedConfig {
@@ -6259,7 +6029,7 @@ mod tests {
         });
         // Numbering view: sqids absent => 2 ReadOnly fields, then reserved.remote(2),
         // reserved.format(3), reserved.max_retries(4).
-        let mut app = settings_app(config, 4, 3);
+        let mut app = settings_app(config, 3, 3);
 
         app.settings_space();
         assert_eq!(
@@ -6424,7 +6194,7 @@ mod tests {
             &config,
         );
 
-        assert_eq!(app.settings_category, 4, "landed on the Numbering category");
+        assert_eq!(app.settings_category, 3, "landed on the Numbering category");
         assert_eq!(app.settings_drill, None);
         let fields = crate::tui::views::panels::settings_fields(
             app.settings_category,
@@ -6477,7 +6247,7 @@ mod tests {
     fn ac3_enter_on_bool_flips_buffer_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, 7, 1); // Interface > statusbar.enabled
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6528,7 +6298,7 @@ mod tests {
     #[test]
     fn ac7_enter_on_readonly_is_noop() {
         // Numbering view with no sqids section: field 0 is ReadOnly.
-        let mut app = settings_app(config_one_type(), 4, 0);
+        let mut app = settings_app(config_one_type(), 3, 0);
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6708,7 +6478,7 @@ mod tests {
     #[test]
     fn readonly_field_start_edit_and_space_are_noops() {
         // Numbering view with no sqids section: sqids.salt is ReadOnly/Unset.
-        let mut app = settings_app(config_one_type(), 4, 0);
+        let mut app = settings_app(config_one_type(), 3, 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "start_edit no-op on ReadOnly");
         app.settings_space();
@@ -6719,7 +6489,7 @@ mod tests {
     fn start_edit_noop_on_toggle_and_enumcycle() {
         let config = config_one_type();
         // Toggle field (Interface > ascii_diagrams at index 0).
-        let mut app = settings_app(config.clone(), 8, 0);
+        let mut app = settings_app(config.clone(), 7, 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "Toggle does not use edit mode");
 
@@ -7744,29 +7514,11 @@ inverse = "implemented-by"
         assert!(app.settings_dirty);
     }
 
-    // AC2: seeding a Validation Rule appends a ParentChild rule and drills in.
-    #[test]
-    fn ac2_seed_validation_rule_appends_parent_child_and_drills() {
-        let mut app = settings_app(Config::default(), 3, 0);
-        let before = app.settings_buffer.rules.len();
-
-        app.settings_seed_entry();
-
-        assert_eq!(app.settings_buffer.rules.len(), before + 1);
-        assert!(matches!(
-            app.settings_buffer.rules.last().unwrap(),
-            ValidationRule::ParentChild { .. }
-        ));
-        assert_eq!(app.settings_entry, before);
-        assert_eq!(app.settings_drill, Some(before));
-        assert!(app.settings_dirty);
-    }
-
     // AC3: seeding an override opens the key prompt without inserting; confirming
     // a non-empty key inserts the override (default normalize) and drills in.
     #[test]
     fn ac3_seed_override_prompts_then_inserts_on_confirm() {
-        let mut app = settings_app(Config::default(), 6, 0);
+        let mut app = settings_app(Config::default(), 5, 0);
         let before = app.settings_buffer.certification.overrides.len();
 
         app.settings_seed_override();
@@ -7806,7 +7558,7 @@ inverse = "implemented-by"
     // AC3 edge: an empty key on confirm inserts nothing.
     #[test]
     fn ac3_empty_override_key_inserts_nothing() {
-        let mut app = settings_app(Config::default(), 6, 0);
+        let mut app = settings_app(Config::default(), 5, 0);
         app.settings_seed_override();
         app.settings_confirm_override();
         assert!(app.settings_buffer.certification.overrides.is_empty());
@@ -7995,6 +7747,48 @@ name = "related-to"
         assert_eq!(app.settings_footer_error, None);
     }
 
+    // STORY-259: with the rules editor gone the panel is read-only about
+    // `[[rules]]`, not destructive. A save driven by an unrelated edit leaves a
+    // config that still declares rules with those rules intact.
+    #[test]
+    fn save_preserves_rules_the_panel_no_longer_edits() {
+        const RULES_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+
+[[rules]]
+shape = "parent-child"
+name = "stories-need-rfcs"
+child = "story"
+parent = "rfc"
+severity = "warning"
+"#;
+        let (tmp, mut app) = save_app(RULES_SRC);
+        let on_disk = Config::parse(RULES_SRC).unwrap();
+        assert_eq!(on_disk.rules.len(), 1, "fixture declares a rule");
+
+        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
+        app.settings_dirty = true;
+        app.settings_save(tmp.path(), &on_disk);
+
+        assert_eq!(app.settings_footer_error, None, "save succeeds");
+        let out = read_config_file(&tmp);
+        assert!(out.contains(r#"shape = "parent-child""#));
+        assert_eq!(
+            Config::parse(&out).unwrap().rules,
+            on_disk.rules,
+            "the rules table round-trips untouched"
+        );
+    }
+
     // --- RFC-023 slice 7 / ITERATION-192: Interface category + zone ordering ---
 
     // AC2: the ascii_diagrams boolean toggles through the slice-3 Space path and
@@ -8004,7 +7798,7 @@ name = "related-to"
     fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.ascii_diagrams = false;
-        let mut app = settings_app(config, 8, 0); // Interface > ascii_diagrams
+        let mut app = settings_app(config, 7, 0); // Interface > ascii_diagrams
 
         app.settings_space();
         assert!(app.settings_buffer.ui.ascii_diagrams);
@@ -8019,7 +7813,7 @@ name = "related-to"
     #[test]
     fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
         let config = config_one_type(); // [tui.multiline] absent -> default 5
-        let mut app = settings_app(config, 8, 5); // Interface > multiline.max_expanded_height
+        let mut app = settings_app(config, 7, 5); // Interface > multiline.max_expanded_height
         assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
 
         // Reject "0" (below min 1): prior value retained, error set, still editing.
@@ -8049,7 +7843,7 @@ name = "related-to"
         use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
 
         let config = config_one_type(); // statusbar.left is None
-        let mut app = settings_app(config, 8, 2); // Interface > statusbar.left
+        let mut app = settings_app(config, 7, 2); // Interface > statusbar.left
 
         // Enter opens the zone editor (routed via start_edit).
         app.settings_start_edit();
@@ -8126,7 +7920,7 @@ left = ["mode"]
 center = ["warnings"]
 "#;
         let (tmp, mut app) = save_app(SRC);
-        app.settings_category = 8;
+        app.settings_category = 7;
 
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center
