@@ -608,6 +608,19 @@ pub enum RelKey {
     Inverse,
 }
 
+/// An edge-key inside a drilled [[edges]] entry -- one key per `EdgeDef` field,
+/// so the drilled view is the row (RFC-067). Every key is read-only in
+/// ITERATION-386, which lists the DAG; ITERATION-387 makes them editable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EdgeKey {
+    Name,
+    From,
+    To,
+    Via,
+    Required,
+    Traversal,
+}
+
 /// Uniquely identifies the buffer target for one editable settings field, so a
 /// later increment can read/write `App.settings_buffer` (a `Config`) for it via
 /// an exhaustive `match`. Collection variants carry the entry index; the
@@ -625,6 +638,10 @@ pub enum FieldPath {
     Rel {
         index: usize,
         key: RelKey,
+    },
+    Edge {
+        index: usize,
+        key: EdgeKey,
     },
     SqidsSalt,
     SqidsMinLength,

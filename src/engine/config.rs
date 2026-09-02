@@ -12,6 +12,17 @@ pub enum Severity {
     Warning,
 }
 
+impl Severity {
+    /// How this severity is written on an `[[edges]]` row, and read back
+    /// wherever one is shown.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
 /// A role in context traversal. `Chain` is the parent-child DAG walked by
 /// `resolve_chain`/`resolve_forest`; `Related` is the symmetric depth-bounded
 /// neighbourhood.
@@ -25,6 +36,17 @@ pub enum Severity {
 pub enum Traversal {
     Chain,
     Related,
+}
+
+impl Traversal {
+    /// How this role is written on an `[[edges]]` row, and read back wherever
+    /// one is shown.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Traversal::Chain => "chain",
+            Traversal::Related => "related",
+        }
+    }
 }
 
 /// One entry in the `[[edges]]` block: a directed edge kind in the document DAG
@@ -190,6 +212,18 @@ struct RawEdgeDef {
 /// The wildcard spelling of any edge position (ADR-031).
 pub(crate) const WILDCARD: &str = "*";
 
+/// How a set of names on an edge position reads back to whoever wrote it: a
+/// lone name bare, exactly as `to_toml` re-emits it, and anything else as the
+/// list it was written as. The empty set falls out of the list arm as `[]`,
+/// which is the point -- a position that names nothing matches nothing, and
+/// spelling that `*` would say the row does the reverse of what it does.
+fn names_spelling(names: &[String]) -> String {
+    match names {
+        [only] => only.clone(),
+        many => format!("[{}]", many.join(", ")),
+    }
+}
+
 /// A type position on an `[[edges]]` row (`from`, `to`). `"*"` is [`Any`]; a
 /// bare type name and a one-element list are the same selector, so the pair
 /// re-emits as the bare name.
@@ -209,6 +243,17 @@ impl TypeSelector {
         match self {
             TypeSelector::Any => &[],
             TypeSelector::Types(names) => names,
+        }
+    }
+
+    /// How this position reads back: the wildcard as the `"*"` its author
+    /// wrote, a set by its names. Shared by every surface that shows an edge --
+    /// the `init` DAG summary and the TUI settings panel -- so the two cannot
+    /// spell one row two ways.
+    pub fn spelling(&self) -> String {
+        match self {
+            TypeSelector::Any => WILDCARD.to_string(),
+            TypeSelector::Types(names) => names_spelling(names),
         }
     }
 
@@ -260,6 +305,15 @@ impl RelSelector {
         match self {
             RelSelector::Any => &[],
             RelSelector::Named(names) => names,
+        }
+    }
+
+    /// How this position reads back, on the same terms a type position does
+    /// ([`TypeSelector::spelling`]).
+    pub fn spelling(&self) -> String {
+        match self {
+            RelSelector::Any => WILDCARD.to_string(),
+            RelSelector::Named(names) => names_spelling(names),
         }
     }
 
@@ -2394,6 +2448,31 @@ to = "rfc"
 via = ["implements", "related-to"]
 "#
         )
+    }
+
+    // Every surface that shows an edge position shares one spelling, so the
+    // `init` DAG summary and the TUI settings panel cannot drift. It follows
+    // `to_toml`: a wildcard is bare, a lone name is bare, a set is a list.
+    #[test]
+    fn edge_position_spelling_follows_the_toml_it_was_written_as() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        assert_eq!(config.edges[0].from.spelling(), "*");
+        assert_eq!(config.edges[0].via.spelling(), "*");
+        assert_eq!(config.edges[1].from.spelling(), "story");
+        assert_eq!(config.edges[1].to.spelling(), "[story, rfc]");
+        assert_eq!(config.edges[1].via.spelling(), "implements");
+        assert_eq!(config.edges[2].via.spelling(), "[implements, related-to]");
+    }
+
+    // A `via` naming nothing matches no relationship (ADR-032), which is the
+    // opposite of the wildcard: spelling both `*` would tell a reader the row
+    // does the reverse of what it does.
+    #[test]
+    fn an_empty_edge_position_is_not_spelled_as_the_wildcard() {
+        assert_eq!(RelSelector::Named(Vec::new()).spelling(), "[]");
+        assert_eq!(TypeSelector::Types(Vec::new()).spelling(), "[]");
+        assert_eq!(RelSelector::Any.spelling(), "*");
     }
 
     // `Config::to_toml` backs the config writers in `src/cli/config.rs`, so a

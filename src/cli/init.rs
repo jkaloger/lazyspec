@@ -3,7 +3,7 @@ use crate::cli::style::{bold, dim, section_header, success_line, warning_prefix}
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     starter_edges, starter_relationships, starter_types, CertificationConfig, Config,
-    DocumentConfig, EdgeDef, FilesystemConfig, Naming, Severity, Templates, Traversal, UiConfig,
+    DocumentConfig, EdgeDef, FilesystemConfig, Naming, Templates, UiConfig,
 };
 use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
@@ -266,38 +266,15 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
     }
 }
 
-/// How one position of an `[[edges]]` row reads back in the summary. A selector
-/// that names nothing is the wildcard, and reads as the `"*"` its author wrote;
-/// a set reads as the list it was written as.
-fn position_spelling(names: &[String]) -> String {
-    match names {
-        [] => crate::engine::config::WILDCARD.to_string(),
-        [only] => only.clone(),
-        many => format!("[{}]", many.join(", ")),
-    }
-}
-
 /// The parenthesised tail of an edge line: whichever of `required` and
 /// `traversal` the row states, or nothing at all when it states neither.
 fn edge_qualifiers(edge: &EdgeDef) -> String {
     let mut parts = Vec::new();
     if let Some(required) = &edge.required {
-        parts.push(format!(
-            "required: {}",
-            match required {
-                Severity::Error => "error",
-                Severity::Warning => "warning",
-            }
-        ));
+        parts.push(format!("required: {}", required.as_str()));
     }
-    if let Some(traversal) = edge.traversal {
-        parts.push(format!(
-            "traversal: {}",
-            match traversal {
-                Traversal::Chain => "chain",
-                Traversal::Related => "related",
-            }
-        ));
+    if let Some(traversal) = &edge.traversal {
+        parts.push(format!("traversal: {}", traversal.as_str()));
     }
     if parts.is_empty() {
         return String::new();
@@ -347,10 +324,10 @@ fn render_dag_summary(config: &Config) -> String {
             bold(&edge.name),
             dim(&format!(
                 "{} -> {}",
-                position_spelling(edge.from.names()),
-                position_spelling(edge.to.names())
+                edge.from.spelling(),
+                edge.to.spelling()
             )),
-            dim(&position_spelling(edge.via.names())),
+            dim(&edge.via.spelling()),
             dim(&edge_qualifiers(edge)),
         );
     }

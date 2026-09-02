@@ -1,10 +1,10 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
 use super::forms::{
-    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, OpenRequest,
-    OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm, SettingsDeleteTarget,
-    SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker, StatusPicker, TypeKey,
-    ZoneOrderingEditor,
+    CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, LinkEditor,
+    OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm,
+    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
+    StatusPicker, TypeKey, ZoneOrderingEditor,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -13,7 +13,8 @@ pub use crate::engine::graph::GraphNode;
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
     default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
-    RelationshipDef, ReservedConfig, ReservedFormat, SqidsConfig, StoreBackend, TypeDef,
+    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
+    Traversal, TypeDef,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -923,6 +924,7 @@ impl App {
             "General",
             "Document Types",
             "Relationships",
+            "Edges",
             "Numbering",
             "GitHub",
             "Certification",
@@ -981,6 +983,28 @@ impl App {
                 .map(|r| match key {
                     RelKey::Name => r.name.clone(),
                     RelKey::Inverse => r.inverse.clone().unwrap_or_default(),
+                })
+                .unwrap_or_default(),
+            FieldPath::Edge { index, key } => buf
+                .edges
+                .get(*index)
+                .map(|e| match key {
+                    EdgeKey::Name => e.name.clone(),
+                    EdgeKey::From => e.from.spelling(),
+                    EdgeKey::To => e.to.spelling(),
+                    EdgeKey::Via => e.via.spelling(),
+                    EdgeKey::Required => e
+                        .required
+                        .as_ref()
+                        .map(Severity::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    EdgeKey::Traversal => e
+                        .traversal
+                        .as_ref()
+                        .map(Traversal::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                 })
                 .unwrap_or_default(),
             FieldPath::SqidsSalt => buf
@@ -1165,6 +1189,9 @@ impl App {
                     buf.ui.multiline.max_expanded_height = n as usize;
                 }
             }
+            // An edge field is ReadOnly this slice, so nothing reaches here;
+            // ITERATION-387 fills the arm in and makes the fields editable.
+            FieldPath::Edge { .. } => {}
             // Statusbar slot ordering and unset placeholders are not editable here.
             FieldPath::StatusbarLeft
             | FieldPath::StatusbarCenter
@@ -1535,7 +1562,7 @@ impl App {
             if !salt_ok {
                 // The salt is a focusable field only when the section exists.
                 if buf.documents.sqids.is_some() {
-                    self.settings_jump_to_field(3, None, |f| {
+                    self.settings_jump_to_field(4, None, |f| {
                         matches!(f.path, FieldPath::SqidsSalt)
                     });
                 } else {
@@ -1576,7 +1603,7 @@ impl App {
 
         // 3. Any other constraint (reserved/relationships): best-effort landing on
         // a relevant category, clamped, never crashing.
-        self.settings_jump_to_field(3, None, |_| false);
+        self.settings_jump_to_field(4, None, |_| false);
     }
 
     /// Land the settings nav on the scaffold offer's required-but-empty field
@@ -1585,11 +1612,11 @@ impl App {
     pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
         match path {
             FieldPath::SqidsSalt => {
-                self.settings_jump_to_field(3, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
             }
             // No other scaffolded section produces a required-empty field today; a
             // best-effort landing keeps this total without crashing.
-            _ => self.settings_jump_to_field(3, None, |_| false),
+            _ => self.settings_jump_to_field(4, None, |_| false),
         }
     }
 
@@ -2655,7 +2682,7 @@ impl App {
     }
 
     /// Open the confirm prompt for removing the selected settings collection
-    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 5).
+    /// entry. Resolves the target from `settings_entry` (sorted-key for cat 6).
     /// ADR-011: refuses to delete the last `[[relationships]]` entry (cat 2),
     /// returning without activating the confirm. No buffer mutation here.
     pub fn settings_open_delete_confirm(&mut self) {
@@ -2688,7 +2715,7 @@ impl App {
                     r.name.clone(),
                 )
             }
-            5 => {
+            6 => {
                 let mut keys: Vec<&String> = self
                     .settings_buffer
                     .certification
@@ -5733,15 +5760,29 @@ mod tests {
 
     // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
 
-    use crate::engine::config::{GithubConfig, ReservedFormat, SqidsConfig, StoreBackend};
+    use crate::engine::config::{
+        EdgeDef, GithubConfig, RelSelector, ReservedFormat, SqidsConfig, StoreBackend, TypeSelector,
+    };
+
+    /// The index of the settings category called `name`, panicking when there
+    /// is none. Tests address a category by name because an index does not
+    /// fail when a new category is inserted above it -- it silently addresses
+    /// the neighbour, and the assertions go on passing (STORY-260 put `Edges`
+    /// at index 3 and moved five categories down one).
+    fn settings_category_index(name: &str) -> usize {
+        App::settings_categories()
+            .iter()
+            .position(|cat| *cat == name)
+            .unwrap_or_else(|| panic!("no settings category named {name}"))
+    }
 
     /// Build a settings-edit-ready app: set the buffer to `config`, focus the
-    /// given category and field, leave it clean and not editing.
-    fn settings_app(config: Config, category: usize, field: usize) -> App {
+    /// named category and the field at `field`, leave it clean and not editing.
+    fn settings_app(config: Config, category: &str, field: usize) -> App {
         let mut app = make_test_app(0);
         app.settings_buffer = config;
         app.settings_dirty = false;
-        app.settings_category = category;
+        app.settings_category = settings_category_index(category);
         app.settings_entry = 0;
         app.settings_drill = None;
         app.settings_field = field;
@@ -5783,7 +5824,7 @@ mod tests {
 
     #[test]
     fn ac1_text_edit_writes_to_buffer_and_dirties() {
-        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern
+        let mut app = settings_app(config_one_type(), "General", 0); // naming.pattern
         app.settings_start_edit();
         assert!(app.settings_editing);
         // Replace seeded input with a fresh value.
@@ -5805,7 +5846,7 @@ mod tests {
     fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 7, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, "Interface", 1); // statusbar.enabled
 
         app.settings_space();
         assert!(!app.settings_buffer.ui.statusbar.enabled);
@@ -5821,7 +5862,7 @@ mod tests {
     #[test]
     fn ac2_toggle_drilled_type_subdirectory_flips() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 6); // Document Types, subdirectory
+        let mut app = settings_app(config, "Document Types", 6); // subdirectory
         app.settings_drill = Some(0);
 
         let before = app.settings_buffer.documents.types[0].subdirectory;
@@ -5839,7 +5880,7 @@ mod tests {
             salt: "seed".to_string(),
             min_length: 3,
         });
-        let mut app = settings_app(config, 3, 1); // Numbering > sqids.min_length
+        let mut app = settings_app(config, "Numbering", 1); // sqids.min_length
 
         // Reject "0".
         app.settings_start_edit();
@@ -5885,7 +5926,7 @@ mod tests {
             repo: Some("old/repo".to_string()),
             cache_ttl: 60,
         });
-        let mut app = settings_app(config, 4, 0); // GitHub > repo
+        let mut app = settings_app(config, "GitHub", 0); // repo
 
         // Empty => None (not Some("")).
         app.settings_start_edit();
@@ -5919,7 +5960,7 @@ mod tests {
     #[test]
     fn ac6_list_splits_trims_drops_empties() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 10); // Document Types, agents
+        let mut app = settings_app(config, "Document Types", 10); // agents
         app.settings_drill = Some(0);
 
         app.settings_start_edit();
@@ -5951,7 +5992,7 @@ mod tests {
     #[test]
     fn ac7_numbering_cycles_and_wraps() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 5); // Document Types, numbering
+        let mut app = settings_app(config, "Document Types", 5); // numbering
         app.settings_drill = Some(0);
         assert_eq!(
             app.settings_buffer.documents.types[0].numbering,
@@ -5982,7 +6023,7 @@ mod tests {
     #[test]
     fn ac7_store_cycles_through_three_variants() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 7); // Document Types, store
+        let mut app = settings_app(config, "Document Types", 7); // store
         app.settings_drill = Some(0);
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
@@ -6027,7 +6068,7 @@ mod tests {
         });
         // Numbering view: sqids absent => 2 ReadOnly fields, then reserved.remote(2),
         // reserved.format(3), reserved.max_retries(4).
-        let mut app = settings_app(config, 3, 3);
+        let mut app = settings_app(config, "Numbering", 3);
 
         app.settings_space();
         assert_eq!(
@@ -6058,7 +6099,7 @@ mod tests {
     /// A drilled-type app focused on the type's `numbering` EnumCycle, clean and
     /// not editing. cat 1 (Document Types), drilled into type 0, field 5.
     fn numbering_app(config: Config) -> App {
-        let mut app = settings_app(config, 1, 5);
+        let mut app = settings_app(config, "Document Types", 5);
         app.settings_drill = Some(0);
         app
     }
@@ -6133,7 +6174,7 @@ mod tests {
     // required-empty offer.
     #[test]
     fn ac5_store_to_github_issues_scaffolds_section_no_offer() {
-        let mut app = settings_app(config_one_type(), 1, 7); // store field
+        let mut app = settings_app(config_one_type(), "Document Types", 7); // store field
         app.settings_drill = Some(0);
         assert!(app.settings_buffer.documents.github.is_none());
 
@@ -6192,7 +6233,11 @@ mod tests {
             &config,
         );
 
-        assert_eq!(app.settings_category, 3, "landed on the Numbering category");
+        assert_eq!(
+            App::settings_categories()[app.settings_category],
+            "Numbering",
+            "landed on the Numbering category"
+        );
         assert_eq!(app.settings_drill, None);
         let fields = crate::tui::views::panels::settings_fields(
             app.settings_category,
@@ -6245,7 +6290,7 @@ mod tests {
     fn ac3_enter_on_bool_flips_buffer_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 7, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, "Interface", 1); // statusbar.enabled
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6284,7 +6329,7 @@ mod tests {
     // AC2: Enter on a text field begins inline editing.
     #[test]
     fn ac2_enter_on_text_starts_editing() {
-        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern (Text)
+        let mut app = settings_app(config_one_type(), "General", 0); // naming.pattern (Text)
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6296,7 +6341,7 @@ mod tests {
     #[test]
     fn ac7_enter_on_readonly_is_noop() {
         // Numbering view with no sqids section: field 0 is ReadOnly.
-        let mut app = settings_app(config_one_type(), 3, 0);
+        let mut app = settings_app(config_one_type(), "Numbering", 0);
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6339,7 +6384,7 @@ mod tests {
     #[test]
     fn ac9_enter_on_entry_list_drills_into_entry() {
         let config = config_with_types(&["rfc", "story"]);
-        let mut app = settings_app(config, 1, 0); // Document Types collection, not drilled
+        let mut app = settings_app(config, "Document Types", 0); // the collection, not drilled
         app.settings_entry = 1;
         let config = Config::default();
 
@@ -6476,23 +6521,66 @@ mod tests {
     #[test]
     fn readonly_field_start_edit_and_space_are_noops() {
         // Numbering view with no sqids section: sqids.salt is ReadOnly/Unset.
-        let mut app = settings_app(config_one_type(), 3, 0);
+        let mut app = settings_app(config_one_type(), "Numbering", 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "start_edit no-op on ReadOnly");
         app.settings_space();
         assert!(!app.settings_dirty, "space no-op on ReadOnly");
     }
 
+    /// A config whose DAG is one fully-stated edge row, for the Edges category.
+    fn config_one_edge() -> Config {
+        Config {
+            edges: vec![EdgeDef {
+                name: "a-implements-a".to_string(),
+                from: TypeSelector::Types(vec![type_a()]),
+                to: TypeSelector::Any,
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: Some(Severity::Error),
+                traversal: Some(Traversal::Chain),
+            }],
+            ..config_one_type()
+        }
+    }
+
+    // STORY-260 AC1: the Edges category lists the DAG and refuses to change it
+    // this slice, so Enter on a drilled edge field opens no editor of any kind
+    // -- an editor whose commit is dropped is worse than no editor.
+    // ITERATION-387 is what makes these fields editable.
+    #[test]
+    fn ac1_enter_on_an_edge_field_opens_no_editor() {
+        let mut app = settings_app(config_one_edge(), "Edges", 1);
+        app.settings_drill = Some(0);
+
+        assert_eq!(
+            app.settings_focused_raw(),
+            type_a(),
+            "the focused field resolves to the row's `from`"
+        );
+
+        app.handle_settings_key(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            Path::new("."),
+            &Config::default(),
+        );
+
+        assert!(!app.settings_editing, "no text editor opened");
+        assert!(app.settings_variant_picker.is_none(), "no variant picker");
+        assert!(app.settings_zone_editor.is_none(), "no zone editor");
+        assert!(!app.settings_dirty, "nothing was written to the buffer");
+    }
+
     #[test]
     fn start_edit_noop_on_toggle_and_enumcycle() {
         let config = config_one_type();
         // Toggle field (Interface > ascii_diagrams at index 0).
-        let mut app = settings_app(config.clone(), 7, 0);
+        let mut app = settings_app(config.clone(), "Interface", 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "Toggle does not use edit mode");
 
         // EnumCycle field (drilled type numbering).
-        let mut app = settings_app(config, 1, 5);
+        let mut app = settings_app(config, "Document Types", 5);
         app.settings_drill = Some(0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "EnumCycle does not use edit mode");
@@ -7494,7 +7582,7 @@ inverse = "implemented-by"
     // AC1: seeding a Document Type appends a default TypeDef and drills in.
     #[test]
     fn ac1_seed_document_type_appends_default_and_drills() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         let before = app.settings_buffer.documents.types.len();
 
         app.settings_seed_entry();
@@ -7516,7 +7604,7 @@ inverse = "implemented-by"
     // a non-empty key inserts the override (default normalize) and drills in.
     #[test]
     fn ac3_seed_override_prompts_then_inserts_on_confirm() {
-        let mut app = settings_app(Config::default(), 5, 0);
+        let mut app = settings_app(Config::default(), "Certification", 0);
         let before = app.settings_buffer.certification.overrides.len();
 
         app.settings_seed_override();
@@ -7556,7 +7644,7 @@ inverse = "implemented-by"
     // AC3 edge: an empty key on confirm inserts nothing.
     #[test]
     fn ac3_empty_override_key_inserts_nothing() {
-        let mut app = settings_app(Config::default(), 5, 0);
+        let mut app = settings_app(Config::default(), "Certification", 0);
         app.settings_seed_override();
         app.settings_confirm_override();
         assert!(app.settings_buffer.certification.overrides.is_empty());
@@ -7566,7 +7654,7 @@ inverse = "implemented-by"
     // the buffer; confirming removes it and dirties.
     #[test]
     fn ac4_delete_confirm_targets_then_removes_on_confirm() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         app.settings_entry = 0;
         let target_name = app.settings_buffer.documents.types[0].name.clone();
         let before = app.settings_buffer.documents.types.len();
@@ -7599,7 +7687,7 @@ inverse = "implemented-by"
     // AC5: cancelling the delete confirm leaves the buffer intact.
     #[test]
     fn ac5_delete_confirm_cancel_leaves_buffer_intact() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         let before = app.settings_buffer.documents.types.clone();
 
         app.settings_open_delete_confirm();
@@ -7623,7 +7711,7 @@ inverse = "implemented-by"
             }],
             ..Config::default()
         };
-        let mut app = settings_app(config, 2, 0);
+        let mut app = settings_app(config, "Relationships", 0);
         app.settings_entry = 0;
 
         app.settings_open_delete_confirm();
@@ -7655,7 +7743,7 @@ inverse = "implemented-by"
             ],
             ..Config::default()
         };
-        let mut app = settings_app(config, 2, 0);
+        let mut app = settings_app(config, "Relationships", 0);
         app.settings_entry = 0;
         let removed = app.settings_buffer.relationships[0].name.clone();
 
@@ -7761,7 +7849,7 @@ name = "related-to"
     fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.ascii_diagrams = false;
-        let mut app = settings_app(config, 7, 0); // Interface > ascii_diagrams
+        let mut app = settings_app(config, "Interface", 0); // ascii_diagrams
 
         app.settings_space();
         assert!(app.settings_buffer.ui.ascii_diagrams);
@@ -7776,7 +7864,7 @@ name = "related-to"
     #[test]
     fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
         let config = config_one_type(); // [tui.multiline] absent -> default 5
-        let mut app = settings_app(config, 7, 5); // Interface > multiline.max_expanded_height
+        let mut app = settings_app(config, "Interface", 5); // multiline.max_expanded_height
         assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
 
         // Reject "0" (below min 1): prior value retained, error set, still editing.
@@ -7806,7 +7894,7 @@ name = "related-to"
         use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
 
         let config = config_one_type(); // statusbar.left is None
-        let mut app = settings_app(config, 7, 2); // Interface > statusbar.left
+        let mut app = settings_app(config, "Interface", 2); // statusbar.left
 
         // Enter opens the zone editor (routed via start_edit).
         app.settings_start_edit();
@@ -7883,7 +7971,7 @@ left = ["mode"]
 center = ["warnings"]
 "#;
         let (tmp, mut app) = save_app(SRC);
-        app.settings_category = 7;
+        app.settings_category = settings_category_index("Interface");
 
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center

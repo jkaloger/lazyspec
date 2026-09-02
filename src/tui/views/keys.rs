@@ -757,10 +757,10 @@ impl App {
 
     /// True when the current settings view is an entry-LIST (a collection category
     /// that is not drilled). Drilled collections and scalar categories are
-    /// field-views; cat 5 is a hybrid whose not-drilled view is an entry-list of
+    /// field-views; cat 6 is a hybrid whose not-drilled view is an entry-list of
     /// certification overlays below the top `normalize` field, navigated by entry.
     fn settings_in_entry_list(&self) -> bool {
-        const COLLECTIONS: [usize; 3] = [1, 2, 5];
+        const COLLECTIONS: [usize; 4] = [1, 2, 3, 6];
         COLLECTIONS.contains(&self.settings_category) && self.settings_drill.is_none()
     }
 
@@ -775,13 +775,14 @@ impl App {
     }
 
     /// Navigable entry count for the current entry-list collection (from the
-    /// buffer). cat 5's entries are its certification overrides.
+    /// buffer). cat 6's entries are its certification overrides.
     fn settings_entry_count(&self) -> usize {
         let cfg = &self.settings_buffer;
         match self.settings_category {
             1 => cfg.documents.types.len(),
             2 => cfg.relationships.len(),
-            5 => cfg.certification.overrides.len(),
+            3 => cfg.edges.len(),
+            6 => cfg.certification.overrides.len(),
             _ => 0,
         }
     }
@@ -988,16 +989,18 @@ impl App {
             KeyCode::Char('n') if self.settings_drill.is_none() => {
                 // Seed a new entry in the current collection: Vec collections push
                 // a default and drill in; certification overrides open a key prompt.
+                // Edges (cat 3) is read-only until ITERATION-390 seeds a row.
                 match self.settings_category {
                     1..=2 => self.settings_seed_entry(),
-                    5 => self.settings_seed_override(),
+                    6 => self.settings_seed_override(),
                     _ => {}
                 }
             }
+            // Edges (cat 3) is absent: deleting an edge row is ITERATION-390.
             KeyCode::Char('d')
                 if self.settings_drill.is_none()
                     && self.settings_entry_count() > 0
-                    && matches!(self.settings_category, 1 | 2 | 5) =>
+                    && matches!(self.settings_category, 1 | 2 | 6) =>
             {
                 // Delete the selected entry behind a confirm (buffer-only). cat 2
                 // refuses its last relationship inside the open path (ADR-011).

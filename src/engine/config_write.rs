@@ -285,7 +285,11 @@ fn update_relationship_table(entry: &mut Table, def: &RelationshipDef) {
     set_str(entry, "name", &def.name);
     set_opt_str(entry, "inverse", def.inverse.as_deref());
     set_opt_str(entry, "github_native", def.github_native.as_deref());
-    set_opt_str(entry, "traversal", def.traversal.map(traversal_str));
+    set_opt_str(
+        entry,
+        "traversal",
+        def.traversal.as_ref().map(Traversal::as_str),
+    );
 }
 
 fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
@@ -586,8 +590,16 @@ fn update_edge_table(entry: &mut Table, def: &EdgeDef) {
     set_type_selector(entry, "from", &def.from);
     set_type_selector(entry, "to", &def.to);
     set_rel_selector(entry, "via", &def.via);
-    set_opt_str(entry, "required", def.required.as_ref().map(severity_str));
-    set_opt_str(entry, "traversal", def.traversal.map(traversal_str));
+    set_opt_str(
+        entry,
+        "required",
+        def.required.as_ref().map(Severity::as_str),
+    );
+    set_opt_str(
+        entry,
+        "traversal",
+        def.traversal.as_ref().map(Traversal::as_str),
+    );
 }
 
 // A type position spelled the way a human writes it: the wildcard is a bare
@@ -645,13 +657,6 @@ fn set_rel_selector(entry: &mut Table, key: &str, selector: &RelSelector) {
     }
 }
 
-fn traversal_str(traversal: Traversal) -> &'static str {
-    match traversal {
-        Traversal::Chain => "chain",
-        Traversal::Related => "related",
-    }
-}
-
 // Reconcile an `[[...]]` array-of-tables to `buffer` entries by IDENTITY (the
 // entry's `name`, unique per collection). Each surviving source table is updated
 // in place via `update` (preserving its decor/comments); deleted source tables
@@ -698,13 +703,6 @@ fn reserved_format_str(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
         ReservedFormat::Sqids => "sqids",
-    }
-}
-
-fn severity_str(s: &Severity) -> &'static str {
-    match s {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
     }
 }
 
