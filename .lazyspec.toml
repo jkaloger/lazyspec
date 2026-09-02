@@ -128,7 +128,6 @@ clickup_list_id = "901615772121"
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
-traversal = "chain"
 
 [[relationships]]
 name = "supersedes"
@@ -141,13 +140,11 @@ github_native = "dependency"
 
 [[relationships]]
 name = "related-to"
-traversal = "related"
 
 [[relationships]]
 name = "targets"
 inverse = "targeted-by"
 github_native = "milestone"
-traversal = "chain"
 
 [[relationships]]
 name = "member-of"
@@ -170,24 +167,46 @@ pattern = "{type}-{n:03}-{title}.md"
 left = ["mode", "git_branch"]
 right = ["version", "help_hint"]
 
-
-[[rules]]
-shape = "parent-child"
+[[edges]]
 name = "stories-need-rfcs"
-child = "story"
-parent = "rfc"
-severity = "warning"
+from = "story"
+to = "rfc"
+via = ["implements", "targets"]
+required = "warning"
+traversal = "chain"
 
-[[rules]]
-shape = "parent-child"
+[[edges]]
 name = "iterations-need-stories"
-child = "iteration"
-parent = "story"
-severity = "error"
+from = "iteration"
+to = "story"
+via = ["implements", "targets"]
+required = "error"
+traversal = "chain"
 
-[[rules]]
-shape = "relation-existence"
+[[edges]]
 name = "adrs-need-relations"
-type = "adr"
-require = "any-relation"
-severity = "error"
+from = "adr"
+to = "*"
+via = "*"
+required = "error"
+
+[[edges]]
+name = "implements-traversal"
+from = "*"
+to = "*"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "related-to-traversal"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[[edges]]
+name = "targets-traversal"
+from = "*"
+to = "*"
+via = "targets"
+traversal = "chain"

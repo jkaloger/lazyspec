@@ -1,6 +1,21 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{Config, Severity, ValidationRule};
+use lazyspec::engine::config::{
+    starter_hierarchy_edges, Config, EdgeDef, RelSelector, Severity, Traversal, TypeSelector,
+    ValidationRule,
+};
 use lazyspec::engine::validation::ValidationIssue;
+
+/// The starter config with the chain stated in `[[edges]]`. The two findings
+/// that iterate `(parent type, child type)` pairs -- `AllChildrenAccepted` and
+/// `UpwardOrphanedAcceptance` -- enumerate the child types declared beneath a
+/// parent type, and only a row naming concrete endpoints declares one: a global
+/// traversal marker names a relationship and no types at all (ITERATION-380).
+fn config_with_hierarchy_edges() -> Config {
+    Config {
+        edges: starter_hierarchy_edges(),
+        ..Config::default()
+    }
+}
 
 fn setup_with_chain(rfc_status: &str, story_status: &str, iter_status: &str) -> TestFixture {
     let fixture = TestFixture::new();
@@ -135,8 +150,9 @@ fn validate_with_warnings_flag_shows_warnings() {
 #[test]
 fn all_stories_accepted_warns_draft_rfc() {
     let fixture = setup_with_chain("draft", "accepted", "accepted");
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let config = config_with_hierarchy_edges();
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
 
     assert!(
         result.warnings.iter().any(|w| matches!(
@@ -152,8 +168,9 @@ fn all_stories_accepted_warns_draft_rfc() {
 #[test]
 fn all_iterations_accepted_warns_draft_story() {
     let fixture = setup_with_chain("accepted", "draft", "accepted");
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let config = config_with_hierarchy_edges();
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
 
     assert!(
         result.warnings.iter().any(|w| matches!(
@@ -169,8 +186,9 @@ fn all_iterations_accepted_warns_draft_story() {
 #[test]
 fn partial_children_no_all_accepted_warning() {
     let fixture = setup_with_two_stories("draft", "accepted", "draft");
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let config = config_with_hierarchy_edges();
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
 
     assert!(
         !result.warnings.iter().any(|w| matches!(
@@ -186,8 +204,9 @@ fn partial_children_no_all_accepted_warning() {
 #[test]
 fn accepted_story_draft_rfc_orphaned() {
     let fixture = setup_with_two_stories("draft", "accepted", "draft");
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let config = config_with_hierarchy_edges();
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
 
     assert!(
         result.warnings.iter().any(|w| matches!(
@@ -203,8 +222,9 @@ fn accepted_story_draft_rfc_orphaned() {
 #[test]
 fn all_children_accepted_json_output() {
     let fixture = setup_with_chain("draft", "accepted", "accepted");
-    let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
+    let config = config_with_hierarchy_edges();
+    let store = fixture.store_with(&config);
+    let output = lazyspec::cli::validate::run_json(&store, &config, &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let warnings = parsed["warnings"]
@@ -357,6 +377,25 @@ fn custom_rules_replace_defaults_so_default_checks_do_not_fire() {
     );
 }
 
+/// A config whose only declaration of hierarchy is one row: `story
+/// -implements-> rfc`, with no `[[rules]]` block behind it. The row states a
+/// traversal for `implements`, which suppresses the starter global marker
+/// (ADR-035), so the row is the whole story.
+fn config_with_one_chain_row() -> Config {
+    Config {
+        rules: Vec::new(),
+        edges: vec![EdgeDef {
+            name: "stories-implement-rfcs".to_string(),
+            from: TypeSelector::Types(vec!["story".to_string()]),
+            to: TypeSelector::Types(vec!["rfc".to_string()]),
+            via: RelSelector::Named(vec!["implements".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        }],
+        ..Config::default()
+    }
+}
+
 #[test]
 fn status_based_checks_work_with_custom_hierarchy() {
     let fixture = TestFixture::new();
@@ -373,14 +412,8 @@ fn status_based_checks_work_with_custom_hierarchy() {
         Some("docs/rfcs/RFC-001.md"),
     );
 
-    let config = config_with_rules(vec![ValidationRule::ParentChild {
-        name: "stories-need-rfcs".to_string(),
-        child: "story".to_string(),
-        parent: "rfc".to_string(),
-        severity: Severity::Warning,
-    }]);
-
-    let store = fixture.store();
+    let config = config_with_one_chain_row();
+    let store = fixture.store_with(&config);
     let result = store.validate_full(&config);
 
     // RejectedParent should fire from status-based check inferred from custom hierarchy
@@ -409,15 +442,9 @@ fn all_children_accepted_fires_with_custom_hierarchy() {
         Some("docs/rfcs/RFC-001.md"),
     );
 
-    // Only custom rule, no defaults
-    let config = config_with_rules(vec![ValidationRule::ParentChild {
-        name: "stories-need-rfcs".to_string(),
-        child: "story".to_string(),
-        parent: "rfc".to_string(),
-        severity: Severity::Warning,
-    }]);
-
-    let store = fixture.store();
+    // Only the custom row, no rules and no global marker in play
+    let config = config_with_one_chain_row();
+    let store = fixture.store_with(&config);
     let result = store.validate_full(&config);
 
     assert!(

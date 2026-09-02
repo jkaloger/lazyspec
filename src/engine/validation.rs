@@ -436,26 +436,14 @@ pub trait Checker {
     ) -> Vec<(Severity, ValidationIssue)>;
 }
 
-fn hierarchy_from_config(config: &Config) -> Vec<(String, String)> {
-    config
-        .rules
-        .iter()
-        .filter_map(|rule| match rule {
-            ConfigRule::ParentChild { parent, child, .. } => Some((parent.clone(), child.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
 pub struct BrokenLinkRule;
 
 impl Checker for BrokenLinkRule {
     fn check(
         &self,
         store: &super::store::Store,
-        config: &Config,
+        _config: &Config,
     ) -> Vec<(Severity, ValidationIssue)> {
-        let hierarchy = hierarchy_from_config(config);
         let mut issues = Vec::new();
 
         let id_to_path: HashMap<String, PathBuf> = store
@@ -490,17 +478,26 @@ impl Checker for BrokenLinkRule {
                     continue;
                 };
 
-                let is_hierarchy_link = store
-                    .chain_relationships
-                    .iter()
-                    .any(|r| r == rel.rel_type.as_str());
-                if !is_hierarchy_link {
-                    continue;
-                }
-
                 let Some(parent_doc) = store.docs.get(&target) else {
                     continue;
                 };
+
+                // The whole triple, endpoint types included, where the old
+                // reading asked only "is this relationship chain anywhere?".
+                // That narrows these two findings wherever a row names concrete
+                // endpoints, and the narrowing is the point: after STORY-259 a
+                // chain row is the only declaration of hierarchy a config has,
+                // so "any chain relationship, whatever its endpoints" has
+                // nothing left to read. A config that means the broad reading
+                // spells it with a wildcard row, which is exactly what
+                // `fix --config` writes for a global traversal marker.
+                if !store.traversal_walk.walks_chain(
+                    meta.doc_type.as_str(),
+                    rel.rel_type.as_str(),
+                    parent_doc.doc_type.as_str(),
+                ) {
+                    continue;
+                }
 
                 if parent_doc.status == Status::new("rejected") {
                     issues.push((
@@ -522,16 +519,16 @@ impl Checker for BrokenLinkRule {
                     ));
                 }
 
-                let is_child_in_hierarchy = hierarchy.iter().any(|(pt, ct)| {
-                    meta.doc_type == DocType::new(ct)
-                        && parent_doc.doc_type == DocType::new(pt)
-                        && store
-                            .chain_relationships
-                            .iter()
-                            .any(|r| r == rel.rel_type.as_str())
-                });
-                if is_child_in_hierarchy
-                    && meta.status == Status::new("accepted")
+                // No second lookup for "is this pair hierarchy": the row that
+                // admitted the triple above said both, so the type-pair test
+                // and the relationship test have collapsed into one call. Under
+                // a wildcard chain row that widens this finding to pairs the
+                // rules table never listed -- an accepted document hanging off
+                // a draft parent of any type -- and it should: the row says
+                // every such link is the chain, and the walk has always agreed.
+                // Exempting the unlisted pairs was the two-declarations defect
+                // RFC-067 §Problem.1 names, not a rule anyone wrote.
+                if meta.status == Status::new("accepted")
                     && parent_doc.status != Status::new("accepted")
                 {
                     issues.push((
@@ -739,34 +736,33 @@ impl Checker for StatusConsistencyRule {
     fn check(
         &self,
         store: &super::store::Store,
-        config: &Config,
+        _config: &Config,
     ) -> Vec<(Severity, ValidationIssue)> {
-        let hierarchy = hierarchy_from_config(config);
         let mut issues = Vec::new();
 
-        for (parent_type, child_type) in &hierarchy {
-            for (parent_path, meta) in &store.docs {
-                if meta.doc_type != DocType::new(parent_type) {
-                    continue;
-                }
-
+        for (parent_path, meta) in &store.docs {
+            // One child type at a time, as the rules table's parent/child pairs
+            // made it: `AllChildrenAccepted` counts over a single type's
+            // children, so a parent whose stories are all accepted and whose
+            // bugs are not still carries the finding for its stories. The pairs
+            // now come from the edge table's reverse index (STORY-257), the same
+            // one the chain walk and the prompt context read.
+            for child_type in store.traversal_walk.child_types_for(meta.doc_type.as_str()) {
                 let children: Vec<PathBuf> = store
                     .reverse_links
                     .get(parent_path)
                     .into_iter()
                     .flatten()
                     .filter(|link| {
-                        store
-                            .chain_relationships
-                            .iter()
-                            .any(|c| c == link.rel_type.as_str())
-                            && store
-                                .docs
-                                .get(&link.endpoint)
-                                .map(|d| {
-                                    d.doc_type == DocType::new(child_type) && !d.validate_ignore
-                                })
-                                .unwrap_or(false)
+                        store.docs.get(&link.endpoint).is_some_and(|child| {
+                            child.doc_type.as_str() == child_type
+                                && !child.validate_ignore
+                                && store.traversal_walk.walks_chain(
+                                    child.doc_type.as_str(),
+                                    link.rel_type.as_str(),
+                                    meta.doc_type.as_str(),
+                                )
+                        })
                     })
                     .map(|link| link.endpoint.clone())
                     .collect();
@@ -805,9 +801,7 @@ impl Checker for StatusConsistencyRule {
                     let Some(child) = store.docs.get(child_path) else {
                         continue;
                     };
-                    if child.status == Status::new("accepted")
-                        && child.doc_type == DocType::new(child_type)
-                    {
+                    if child.status == Status::new("accepted") {
                         issues.push((
                             Severity::Warning,
                             ValidationIssue::UpwardOrphanedAcceptance {
@@ -1528,7 +1522,9 @@ mod attr_schema_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
+            // No hierarchy declared, in either place that declares one: every
+            // assertion in this module is about one document's attributes.
+            chain_relationships: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
@@ -1624,7 +1620,8 @@ mod attr_schema_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
+            // As `store_with` above: no hierarchy, none read.
+            chain_relationships: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
@@ -1773,7 +1770,10 @@ mod unknown_relationship_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
+            // No hierarchy declared: this module asserts only on the
+            // relationship vocabulary a document's `related` keys are checked
+            // against, which no traversal role takes part in.
+            chain_relationships: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
@@ -2179,8 +2179,10 @@ mod edge_tests {
         }
     }
 
-    /// Both `implements` and `targets` walk the chain, as they do in this
-    /// project's own config -- the arrangement RFC-067 §Problem.1 names.
+    /// No hierarchy declared, in either place that declares one. Every
+    /// assertion here is about `UnsatisfiedEdge`, which reads a row's own `via`
+    /// and `to` and asks nothing of the traversal table -- and the configs these
+    /// tests build carry no `[[rules]]`, so nothing else reads a chain either.
     fn store_from(docs: Vec<DocMeta>) -> super::super::store::Store {
         let mut map = HashMap::new();
         for d in docs {
@@ -2194,7 +2196,7 @@ mod edge_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string(), "targets".to_string()],
+            chain_relationships: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         }
@@ -2928,6 +2930,111 @@ mod edge_tests {
             "got errors {:?} warnings {:?}",
             result.errors,
             result.warnings
+        );
+    }
+}
+
+/// The five findings that outlive `[[rules]]`, read off a config whose ONLY
+/// declaration of hierarchy is an `[[edges]]` row: no `[[rules]]` block and no
+/// `RelationshipDef.traversal` marker anywhere. Before ITERATION-380 every one
+/// of these needed a `parent-child` rule plus a global chain marker to fire.
+#[cfg(test)]
+mod hierarchy_from_edges_tests {
+    use super::*;
+    use crate::engine::config::{EdgeDef, RelSelector, RelationshipDef, Traversal, TypeSelector};
+    use crate::engine::store::test_support::store_from_with_config;
+    use crate::engine::store::Store;
+    use tempfile::TempDir;
+
+    fn doc_md(title: &str, doc_type: &str, status: &str, related: &str) -> String {
+        let related_block = if related == "[]" {
+            "related: []".to_string()
+        } else {
+            format!("related:\n{related}")
+        };
+        format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: {status}\nauthor: t\ndate: 2026-09-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
+        )
+    }
+
+    /// `implements` and `blocks` declared with no traversal marker of their own,
+    /// so nothing but a row can make a relation hierarchy.
+    fn unmarked_relationships() -> Vec<RelationshipDef> {
+        ["implements", "blocks"]
+            .into_iter()
+            .map(|name| RelationshipDef {
+                name: name.to_string(),
+                inverse: None,
+                github_native: None,
+                traversal: None,
+            })
+            .collect()
+    }
+
+    /// One chain row, `story -implements-> rfc`, and no rules at all.
+    fn stories_implement_rfcs() -> Config {
+        Config {
+            rules: Vec::new(),
+            relationships: unmarked_relationships(),
+            edges: vec![EdgeDef {
+                name: "stories-implement-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: None,
+                traversal: Some(Traversal::Chain),
+            }],
+            ..Config::default()
+        }
+    }
+
+    /// A `rejected` rfc and a story linked to it by `rel`.
+    fn story_linked_to_rejected_rfc(rel: &str) -> (TempDir, Store) {
+        store_from_with_config(
+            &[
+                (
+                    "docs/rfcs/RFC-001-dead.md",
+                    &doc_md("Dead", "rfc", "rejected", "[]"),
+                ),
+                (
+                    "docs/stories/STORY-001-live.md",
+                    &doc_md("Live", "story", "draft", &format!("- {rel}: RFC-001")),
+                ),
+            ],
+            &stories_implement_rfcs(),
+        )
+    }
+
+    #[test]
+    fn a_chain_edge_row_alone_reports_a_rejected_parent() {
+        let (_tmp, store) = story_linked_to_rejected_rfc("implements");
+
+        let result = validate_full(&store, &stories_implement_rfcs());
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationIssue::RejectedParent { .. })),
+            "the row is the whole declaration of hierarchy, got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_relation_no_chain_row_covers_is_not_a_parent_link() {
+        let (_tmp, store) = story_linked_to_rejected_rfc("blocks");
+
+        let result = validate_full(&store, &stories_implement_rfcs());
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationIssue::RejectedParent { .. })),
+            "`blocks` is hierarchy nowhere in this config, got errors {:?}",
+            result.errors
         );
     }
 }

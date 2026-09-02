@@ -1329,6 +1329,41 @@ pub fn default_rules() -> Vec<ValidationRule> {
     ]
 }
 
+/// The starter hierarchy stated the way ITERATION-380 made the five surviving
+/// hierarchy findings read it: as `[[edges]]` rows. This is what `fix --config`
+/// writes when it migrates [`default_rules`] and the starter `implements`
+/// marker (ADR-032), minus `required` -- the rules table still raises the
+/// missing-link findings, and a demanding row would raise them twice.
+///
+/// A fixture opts in rather than getting this from `Config::default()`: the
+/// blanket row suppresses `implements`'s global marker (ADR-035), so handing it
+/// to every test would silently retire the marker path those tests exercise.
+///
+/// The blanket row is what keeps `implements` hierarchy between any pair of
+/// types, as its global marker did. The concrete rows are the pairs
+/// `child_types_for` enumerates for `StatusConsistencyRule`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn starter_hierarchy_edges() -> Vec<EdgeDef> {
+    let chain_row = |name: &str, from: TypeSelector, to: TypeSelector| EdgeDef {
+        name: name.to_string(),
+        from,
+        to,
+        via: RelSelector::Named(vec!["implements".to_string()]),
+        required: None,
+        traversal: Some(Traversal::Chain),
+    };
+    let one = |name: &str| TypeSelector::Types(vec![name.to_string()]);
+    vec![
+        chain_row("implements-traversal", TypeSelector::Any, TypeSelector::Any),
+        chain_row("stories-implement-rfcs", one("story"), one("rfc")),
+        chain_row(
+            "iterations-implement-stories",
+            one("iteration"),
+            one("story"),
+        ),
+    ]
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl Default for Config {
     fn default() -> Self {

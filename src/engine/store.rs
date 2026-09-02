@@ -38,12 +38,13 @@ pub struct Store {
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
     /// The relationship names whose `traversal == Some(Traversal::Chain)`,
-    /// sourced from `config.relationships`. Serves `[[rules]]` only: the
-    /// `parent-child` and `relation-existence` checkers in
-    /// [`validation`](crate::engine::validation) ask "is this ANY chain
-    /// relationship", which is exactly the defect RFC-067 §Problem.1 describes
-    /// and STORY-259 deletes along with the rules. The walk asks the triple
-    /// instead, via `traversal_walk` below.
+    /// sourced from `config.relationships`. One reader is left: the
+    /// `MissingParentLink` half of `ParentLinkRule`
+    /// ([`validation`](crate::engine::validation)), which asks "is this ANY
+    /// chain relationship" -- exactly the defect RFC-067 §Problem.1 describes.
+    /// ITERATION-384 stops `[[rules]]` loading and takes that checker, this
+    /// field and the filter that fills it. Everything else already asks the
+    /// triple, via `traversal_walk` below.
     pub(crate) chain_relationships: Vec<String>,
     /// Which (source type, relationship, target type) triples form the
     /// parent-child DAG walked by

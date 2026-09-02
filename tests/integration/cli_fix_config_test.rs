@@ -80,10 +80,10 @@ impl ConfigFixture {
     /// Write a `draft` document carrying the given relations.
     ///
     /// Draft on purpose, and every fixture document alike. The
-    /// status-consistency checkers fire on `accepted` documents and read
-    /// `store.chain_relationships`, which the migration empties along with the
-    /// `traversal` keys it deletes — a separate question from whether a rule
-    /// survives translation, and one that would land in the same finding set.
+    /// status-consistency checkers fire on `accepted` documents and read the
+    /// traversal declaration this migration rewrites — a separate question from
+    /// whether a rule survives translation, and one that would land in the same
+    /// finding set.
     fn write_doc(&self, path: &str, doc_type: &str, related: &[(&str, &str)]) {
         let links: String = related
             .iter()

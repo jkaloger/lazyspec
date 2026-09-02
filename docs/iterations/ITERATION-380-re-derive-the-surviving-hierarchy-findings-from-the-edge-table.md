@@ -1,7 +1,7 @@
 ---
 title: Re-derive the surviving hierarchy findings from the edge table
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
