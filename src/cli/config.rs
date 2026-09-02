@@ -217,6 +217,34 @@ pub fn run_schema_json() -> Result<String> {
     Ok(serde_json::to_string_pretty(&schema)?)
 }
 
+/// Render `buffer` into `src`'s bytes and write them to `path` -- but only once
+/// they have been read back by the loader. The parse is the guard: dictum 3
+/// puts every field-level and cross-field constraint in `Config::parse`, so
+/// re-reading the exact bytes destined for disk is what keeps a mutation from
+/// leaving a file the next command refuses to load (STORY-261 AC5). It catches
+/// any `toml_edit` slip in the writer for the same money.
+///
+/// This is the protocol the TUI settings screen already runs on every save
+/// (`AppState::settings_commit_write`); one surface over, the same three steps,
+/// so the two cannot answer differently. Nothing is reformatted or rewritten on
+/// the way out: the loader's message is what a refused mutation reports,
+/// because a second spelling of it here is exactly the drift AC5 forbids.
+///
+/// A config still carrying a `[[rules]]` table is refused by the loader too,
+/// but never by this guard: every mutator parses on the *read*, so an obsolete
+/// config fails there and never reaches a render. No second check for it here.
+fn write_validated_config(
+    fs: &dyn FileSystem,
+    path: &Path,
+    src: &str,
+    buffer: &Config,
+) -> Result<()> {
+    let out = write_config_in_place(src, buffer)?;
+    Config::parse(&out)?;
+    fs.write(path, &out)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_add_type(
     root: &Path,
@@ -283,9 +311,7 @@ pub fn run_add_type(
         attributes,
     ));
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    write_validated_config(fs, &path, &src, &config)
 }
 
 /// Assemble a `TypeDef` from already-parsed pieces. Shared by the flag path
@@ -705,19 +731,18 @@ pub fn run_set_lifecycle(
     };
     type_def.lifecycle = lifecycle;
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    write_validated_config(fs, &path, &src, &config)
 }
 
 /// Append one `[[edges]]` row from the flags as given and return it, so the
 /// caller can report what landed without re-reading the config.
 ///
-/// Whether the row makes sense is the loader's question, and it is asked on the
-/// next command rather than here (STORY-261 AC5). The two things checked are the
-/// ones no later load can recover from: a name already in the table, which the
-/// writer reconciles by and would silently rewrite, and a wildcard mixed with
-/// names, which is neither selector.
+/// Whether the row makes sense stays the loader's question, but it is asked
+/// before the write rather than on the next command: [`write_validated_config`]
+/// reads back the bytes destined for disk (STORY-261 AC5). Two things are
+/// checked here, ahead of the render, because neither survives it -- a name
+/// already in the table, which the writer reconciles by and would silently
+/// rewrite, and a wildcard mixed with names, which is neither selector.
 #[allow(clippy::too_many_arguments)]
 pub fn run_add_edge(
     root: &Path,
@@ -747,8 +772,7 @@ pub fn run_add_edge(
     };
 
     config.edges.push(edge.clone());
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
+    write_validated_config(fs, &path, &src, &config)?;
     Ok(edge)
 }
 
@@ -786,8 +810,9 @@ pub fn run_add_edge_json(edge: &EdgeDef) -> Result<String> {
 /// not for an edited one (ITERATION-388) -- so there is no `--name`, and a
 /// rename is an edit to the file, where the decor at stake is visible.
 ///
-/// Whether the edited row makes sense stays the loader's question, asked on the
-/// next command (STORY-261 AC5), exactly as it is for `add-edge`.
+/// Whether the edited row makes sense stays the loader's question, asked by
+/// [`write_validated_config`] before the write (STORY-261 AC5), exactly as it
+/// is for `add-edge`.
 pub fn run_set_edge(
     root: &Path,
     fs: &dyn FileSystem,
@@ -823,8 +848,7 @@ pub fn run_set_edge(
     }
     let edited = edge.clone();
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
+    write_validated_config(fs, &path, &src, &config)?;
     Ok(edited)
 }
 
@@ -869,8 +893,7 @@ pub fn run_remove_edge(root: &Path, fs: &dyn FileSystem, name: &str) -> Result<E
     };
     config.edges.retain(|edge| edge.name != name);
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
+    write_validated_config(fs, &path, &src, &config)?;
     Ok(removed)
 }
 
@@ -1848,8 +1871,12 @@ traversal = "related"
         run_set_edge(root, fs, "stories-implement-rfcs", &edit)
     }
 
+    fn owned(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
     fn names(values: &[&str]) -> Option<Vec<String>> {
-        Some(values.iter().map(|v| v.to_string()).collect())
+        Some(owned(values))
     }
 
     // The lines that differ between two renderings of one file, paired
@@ -2225,6 +2252,309 @@ traversal = "related"
         run_remove_edge(root, &fs, "stories-implement-rfcs").unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    /// One `[[edges]]` row named `x`, spelled out rather than rendered. The
+    /// refusal table parses a config built from these to learn the message it
+    /// expects, so the expectation cannot agree with a mistake in the writer.
+    fn appended_row(keys: &[&str]) -> String {
+        format!("\n[[edges]]\nname = \"x\"\n{}\n", keys.join("\n"))
+    }
+
+    // STORY-261 AC5: an edge mutation whose result would not load is refused
+    // with the loader's own message, and the file it would have written is left
+    // byte-identical.
+    //
+    // The message is never spelled here. Each case asserts against
+    // `Config::parse`'s error for a config this test wrote out by hand, because
+    // a literal in the test would be the second spelling of the message that
+    // the guard exists to stop the CLI from growing.
+    //
+    // `remove-edge` has no case in this table and can have none: dropping a row
+    // takes constraints and overlaps away, so no removal can introduce a
+    // violation for the guard to catch. Nor can `via` absent (the loader error
+    // ITERATION-395 names alongside these) be reached -- `--via` is
+    // `required = true` on `add-edge`, and a config already missing it fails the
+    // `Config::parse` every mutator runs on the read.
+    #[test]
+    fn an_edge_mutation_that_would_not_load_is_refused_with_the_loaders_message() {
+        type Mutate = fn(&Path, &dyn FileSystem) -> Result<()>;
+
+        let base = three_edged_src();
+        let cases: [(&str, Mutate, String); 5] = [
+            (
+                "a `to` naming a type no `[[types]]` block declares",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["nonsense"]),
+                        &owned(&["implements"]),
+                        None,
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "story""#,
+                        r#"to = "nonsense""#,
+                        r#"via = "implements""#,
+                    ])
+                ),
+            ),
+            (
+                "a `via` naming a relationship no `[[relationships]]` block declares",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["rfc"]),
+                        &owned(&["nonsense"]),
+                        None,
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[r#"from = "story""#, r#"to = "rfc""#, r#"via = "nonsense""#,])
+                ),
+            ),
+            (
+                "`required` on a wildcard `from`",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["*"]),
+                        &owned(&["rfc"]),
+                        &owned(&["implements"]),
+                        Some("error"),
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "*""#,
+                        r#"to = "rfc""#,
+                        r#"via = "implements""#,
+                        r#"required = "error""#,
+                    ])
+                ),
+            ),
+            (
+                "two equally specific rows demanding the same edge at different severities",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["rfc"]),
+                        &owned(&["implements"]),
+                        Some("warning"),
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "story""#,
+                        r#"to = "rfc""#,
+                        r#"via = "implements""#,
+                        r#"required = "warning""#,
+                    ])
+                ),
+            ),
+            (
+                "an edit that moves one row onto another and disagrees about traversal",
+                |root, fs| {
+                    run_set_edge(
+                        root,
+                        fs,
+                        "bugs-implement-stories",
+                        &EdgeEdit {
+                            from: names(&["story"]),
+                            to: names(&["rfc"]),
+                            ..EdgeEdit::default()
+                        },
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK}{}",
+                    EDGE_BLOCK_AFTER
+                        .replace(r#"from = "bug""#, r#"from = "story""#)
+                        .replace(r#"to = "story""#, r#"to = "rfc""#)
+                ),
+            ),
+        ];
+
+        for (case, mutate, equivalent) in cases {
+            let (_dir, path, fs) = fixture(&base);
+
+            let err = mutate(path.parent().unwrap(), &fs)
+                .expect_err(case)
+                .to_string();
+
+            let expected = Config::parse(&equivalent).expect_err(case).to_string();
+            assert_eq!(err, expected, "{case}: the loader's own message");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                base,
+                "{case}: a refused mutation leaves the file alone"
+            );
+        }
+    }
+
+    // The counterweight to the refusal table: a guard that refused everything
+    // would satisfy every case above. Each mutator makes one valid change to the
+    // same file in turn, so a guard that rejected any of them would fail here,
+    // and the file is read back through the loader at the end.
+    #[test]
+    fn a_valid_change_still_writes_on_every_mutator() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let root = path.parent().unwrap();
+
+        add_note_type(root, &fs, None).unwrap();
+        run_set_lifecycle(
+            root,
+            &fs,
+            "note",
+            &owned(&["draft", "done"]),
+            &owned(&["draft:done"]),
+        )
+        .unwrap();
+        run_add_edge(
+            root,
+            &fs,
+            "notes-implement-rfcs",
+            &owned(&["note"]),
+            &owned(&["rfc"]),
+            &owned(&["implements"]),
+            None,
+            None,
+        )
+        .unwrap();
+        run_set_edge(
+            root,
+            &fs,
+            "notes-implement-rfcs",
+            &EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+        run_remove_edge(root, &fs, "stories-implement-rfcs").unwrap();
+
+        let loaded = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let note = loaded
+            .type_by_name("note")
+            .expect("add-type wrote the type");
+        assert_eq!(note.lifecycle.states, ["draft", "done"]);
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["notes-implement-rfcs"]);
+        assert_eq!(loaded.edges[0].required, Some(Severity::Warning));
+    }
+
+    /// `config add-type note notes docs/notes NOTE [--numbering N]`, the only
+    /// two shapes the guard tests need.
+    fn add_note_type(root: &Path, fs: &dyn FileSystem, numbering: Option<&str>) -> Result<()> {
+        run_add_type(
+            root,
+            fs,
+            "note",
+            "notes",
+            "docs/notes",
+            "NOTE",
+            None,
+            None,
+            false,
+            None,
+            numbering,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+    }
+
+    // `add-type` writes through the same guard, which is the half of the hole
+    // that predates STORY-261: it too rendered and wrote with nothing between.
+    //
+    // `--parent-type nonsense` -- the case ITERATION-395 names -- is *not*
+    // refused, and this guard cannot refuse it: nothing in `Config::parse` reads
+    // `parent_type` against the declared types, so there is no loader message to
+    // surface. A missing check is a missing loader error, not a hole in the
+    // guard, and giving the loader one is not this slice's work.
+    #[test]
+    fn add_type_that_would_not_load_is_refused_with_the_loaders_message() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = add_note_type(path.parent().unwrap(), &fs, Some("sqids"))
+            .unwrap_err()
+            .to_string();
+
+        let equivalent = format!(
+            "{src}\n[[types]]\nname = \"note\"\nplural = \"notes\"\ndir = \"docs/notes\"\nprefix = \"NOTE\"\nnumbering = \"sqids\"\n"
+        );
+        assert_eq!(err, Config::parse(&equivalent).unwrap_err().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            src,
+            "a refused add-type leaves the file alone"
+        );
+    }
+
+    // The wildcard `parent_type` half of the note above, pinned so the day the
+    // loader grows the check, this test is the one that says the guard now
+    // surfaces it.
+    #[test]
+    fn an_unknown_parent_type_is_written_because_the_loader_has_no_check_for_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "note",
+            "notes",
+            "docs/notes",
+            "NOTE",
+            None,
+            Some("nonsense"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let loaded = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.type_by_name("note").unwrap().parent_type.as_deref(),
+            Some("nonsense")
+        );
     }
 
     // AC6: each mutator preserves comments and the section order of untouched

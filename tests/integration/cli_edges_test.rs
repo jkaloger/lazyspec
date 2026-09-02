@@ -281,3 +281,67 @@ via = "implements"
         "the error must not send the reader to [[types]], got: {err}"
     );
 }
+
+/// The row `a_refused_edge_mutation_under_json_...` asks for, written out so the
+/// message it expects comes from the loader rather than from the writer.
+const UNDECLARED_TARGET_ROW: &str = r#"
+[[edges]]
+name = "x"
+from = "story"
+to = "nonsense"
+via = "implements"
+"#;
+
+// STORY-261 AC5 under `--json`. No command in the binary has a JSON error
+// envelope, so a refused mutation reports failure the way every other `--json`
+// command does: non-zero exit, the loader's message on stderr, and nothing at
+// all on stdout. That shape is the contract an agent reads -- empty stdout with
+// a non-zero status is the refusal -- so it is pinned here rather than left to
+// whichever error happens to be raised.
+#[test]
+fn a_refused_edge_mutation_under_json_leaves_stdout_empty_and_the_file_alone() {
+    let fixture = crate::common::TestFixture::new();
+    let path = fixture.write_doc(".lazyspec.toml", PREAMBLE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args([
+            "config",
+            "add-edge",
+            "x",
+            "--from",
+            "story",
+            "--to",
+            "nonsense",
+            "--via",
+            "implements",
+            "--json",
+        ])
+        .current_dir(fixture.root())
+        .output()
+        .expect("the lazyspec binary runs");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a refused mutation exits non-zero, stderr: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "",
+        "the success envelope is never printed, so stdout stays empty"
+    );
+
+    let expected = Config::parse(&format!("{PREAMBLE}{UNDECLARED_TARGET_ROW}"))
+        .expect_err("a row naming an undeclared type does not load")
+        .to_string();
+    assert!(
+        stderr.contains(&expected),
+        "the loader's own message reaches stderr, got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "the config is left as it was"
+    );
+}
