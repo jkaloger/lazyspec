@@ -187,7 +187,7 @@ Approval of the work is not approval of this plan. "Go ahead", "use /lazy", or t
 
 When the only remaining next step would cross into a **different type** -- traversing a type-boundary edge (a `chain` row in `edges`, per the HARD-GATE) -- `/lazy` **STOPS.** The boundary is the edge, not one type: a row's far side is a set of types, and any one member satisfies the row. So the report names every type the edge admits and leaves the choice among them to the human; `/lazy` never auto-runs `create <child-type>` for a member of that set.
 
-This holds **whatever `validate` reports about the edge.** No edge condition refuses a `create`, so nothing has to clear first and there is no moment at which the crossing becomes automatic: this stop is the only thing between the agent and a create, not a second check after a first one passed. Crossing a type boundary is always human-initiated. A ceiling belongs to the type, not to the edge, so a three-member set can carry three ceilings and therefore three different verbs (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate). That is why the report is a list: one line per type, carrying that type's own verb.
+This holds **whatever `validate` reports about the edge** -- the HARD-GATE already settles that no edge condition withholds or releases the crossing, so nothing has to clear first and the crossing stays human-initiated. A ceiling belongs to the type, not to the edge, so a three-member set can carry three ceilings and therefore three different verbs (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate). That is why the report is a list: one line per type, carrying that type's own verb.
 
 **An unsatisfied edge is a finding, not a refusal.** When the edge the crossing would satisfy is one `validate --json` already reports as unsatisfied, report it as what it is: the edge, the types that satisfy it, and the severity the row's `required` value gives it. Never report it as a reason a `create` would be refused, and never name a status a parent must reach -- no such condition exists to report. (`create --parent` is refused when parent and child sit in different store backends. That is the one refusal, and it is not a DAG matter.) The create was always legal; what it waits on is the human.
 
@@ -195,19 +195,19 @@ This holds **whatever `validate` reports about the edge.** No edge condition ref
 
 When the row names its types:
 
-> `<doc>` (type `<type>`) is at status `<status>`; edge `<edge-name>` is now eligible to cross. Any one of these satisfies it -- crossing types is human-initiated, so pick one and run its verb:
+> `<doc>` (type `<type>`) is at status `<status>`; edge `<edge-name>` is the next crossing. Any one of these satisfies it -- crossing types is human-initiated, so pick one and run its verb:
 > - `<type-a>` -- run <ceiling-verb-a>
 > - `<type-b>` -- run <ceiling-verb-b>
 
-When the far side is `"*"` there is no list to name, because the row declined to name one:
+When the crossing goes up and the row's `to` is `"*"`, there is no list to name, because the row declined to name one. (A row whose `from` is `"*"` is the other case entirely: it names no type on the child side, so it is not a crossing and gets no report.)
 
 > `<doc>` (type `<type>`) is at status `<status>`; edge `<edge-name>` goes `to a document of any type`. Pick the type from `types` in `config --json`, then run that type's ceiling verb.
+
+Fill either report with every value read from `config` + `status` for that run.
 
 Never expand a `"*"` into the type vocabulary. Eleven names offered as equal options claim a choice the config did not make.
 
 **Multi-hop:** when the type at the far side has no document to link to either, report the whole chain the human must author, nearest hop first -- each hop is a separate human-initiated crossing. **Enumerate at the nearest hop only.** The hop being crossed now gets one line per type; each hop beyond it gets a single line naming its edge and its set in the finding's own wording -- `to one of: spike, story, bug`, or `to a document of any type` for a `"*"` row -- and no lines of its own. The choice at a later hop is not live until the earlier one is made, and three types at this hop against two at the next is six chains nobody asked to read.
-
-with every value read from config + status for that run.
 
 ## Validate after each mutation
 

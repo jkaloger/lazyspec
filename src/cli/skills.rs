@@ -207,9 +207,15 @@ mod tests {
         run_install(root, None).unwrap();
 
         let router = fs::read_to_string(root.join(".claude/skills/lazy/SKILL.md")).unwrap();
-        let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-        for (surface, prose) in [("router skill", &router), ("AGENTS.md", &agents)] {
-            for retired in ["UNION", "parent-child rule"] {
+        let mut surfaces: Vec<(String, String)> = embedded_skill_set()
+            .map(|(path, contents)| (path.to_string_lossy().into_owned(), contents.to_string()))
+            .collect();
+        surfaces.push((
+            "AGENTS.md".to_string(),
+            fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+        ));
+        for (surface, prose) in &surfaces {
+            for retired in ["UNION", "parent-child rule", "`rules`"] {
                 assert!(
                     !prose.contains(retired),
                     "{surface} still derives boundaries from `{retired}`"
@@ -272,7 +278,7 @@ mod tests {
     #[test]
     fn embedded_skills_promise_no_status_conditioned_create_gate() {
         for (path, contents) in embedded_skill_set() {
-            for withdrawn in ["require_parent_status", "add-gate"] {
+            for withdrawn in ["require_parent_status", "add-gate", "gate facts"] {
                 assert!(
                     !contents.contains(withdrawn),
                     "{} names `{withdrawn}`; an unsatisfied edge is a validation finding, not a gate on `create`",
@@ -282,10 +288,15 @@ mod tests {
         }
     }
 
+    /// `configure-type` ships from `skills/` on disk only, so `embedded_skill_set()`
+    /// never reaches it -- yet it is where the user first meets `--parent-type`.
+    const CONFIGURE_TYPE: &str = include_str!("../../skills/configure-type/SKILL.md");
+
     /// `parent_type` is containment. The authoring skills read it in preflight,
     /// and the one sentence they read it with is the only thing any embedded
     /// skill says about it -- nothing turns it into a link, a create or a
-    /// constraint.
+    /// constraint. `configure-type` interviews for the same field, so it is held
+    /// to the same account even though it is not embedded.
     #[test]
     fn embedded_skills_describe_parent_type_only_as_containment() {
         const CONTAINMENT: &str = "`parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.";
@@ -317,6 +328,24 @@ mod tests {
         assert_eq!(
             readers, READERS,
             "the set of skills describing `parent_type` changed; each must carry the containment sentence"
+        );
+
+        for containment in [
+            "Containment, not linkage",
+            "It creates no edge and constrains no link",
+        ] {
+            assert!(
+                CONFIGURE_TYPE.contains(containment),
+                "configure-type stopped saying `--parent-type` is {containment}"
+            );
+        }
+        assert!(
+            !CONFIGURE_TYPE.contains("parent relation"),
+            "configure-type calls `--parent-type` a relation; a relation comes from an `[[edges]]` row's `via`"
+        );
+        assert!(
+            CONFIGURE_TYPE.contains("from the `via` of an `[[edges]]` row"),
+            "configure-type must say where a relation does come from"
         );
     }
 
@@ -353,8 +382,20 @@ mod tests {
             "router reports one arbitrary member where the crossing admits a set"
         );
         assert!(
+            !router.contains("eligible to cross"),
+            "router calls a crossing eligible; nothing gates it, so eligibility is not the fact to report"
+        );
+        assert!(
             router.contains("one line per type"),
             "router must say the report is a list, since the ceiling verb is per type"
+        );
+        assert!(
+            router.contains("the severity the row's `required` value gives it"),
+            "router must report an unsatisfied edge at the severity `required` gave it"
+        );
+        assert!(
+            router.contains("it is not a crossing and gets no report"),
+            "router must say a row whose `from` is a wildcard is not a crossing to report"
         );
         for source in ["`validate --json`", "`edges[].to`"] {
             assert!(

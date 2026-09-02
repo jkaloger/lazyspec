@@ -41,7 +41,7 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 
 Two-stage critique:
 
-**Stage 1 -- Conformance.** Does the document satisfy its declared intent and its acceptance criteria? Does it satisfy the relation `rules` its type carries? Block on any conformance failure.
+**Stage 1 -- Conformance.** Does the document satisfy its declared intent and its acceptance criteria? Does it satisfy the `edges` its type sits on -- the rows whose `from` admits it, at the `required` severity each carries? Block on any conformance failure.
 
 **Stage 2 -- Quality.** Only after conformance passes: critique quality -- clarity, correctness, cohesion, whether the acceptance criteria are actually checkable, whether a delivery document's task breakdown is sized for one agent pass. Flag unjustified tradeoffs.
 

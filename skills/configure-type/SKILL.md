@@ -83,7 +83,7 @@ Resolve them roughly in this order; later fields depend on earlier ones.
 | lifecycle `states` | yes | list of statuses, e.g. `draft`,`review`,`done` | Per-type DAG (ADR-021). Recommend a minimal set. |
 | lifecycle `edges` | yes | `FROM:TO`; `*` as source = "from any state" | Minimal DAG connecting the states, plus a `*` edge to any terminal state (`rejected`/`superseded`). |
 | `--parent-type` | no | an existing **singleton** type name | Containment, not linkage: this type's documents live inside the parent type's `dir` and share its store backend. The parent MUST be a singleton -- `validate` reports `ParentTypeNotSingleton` at error severity otherwise -- so this serves the umbrella case (dictums under a project convention), NOT ordinary parent/child modelling like iteration-under-story. Leave it unset for that. It creates no edge and constrains no link; a DAG constraint between two types is a separate `[[edges]]` row. |
-| relations | no | a verb from `config --json` `.relationships[].name` | Do NOT invent verbs. The parent relation is `--parent-type`; other relations are applied at authoring time, not baked per-type -- note any the user wants so the template guidance mentions them. |
+| relations | no | a verb from `config --json` `.relationships[].name` | Do NOT invent verbs. Relations are applied at authoring time from the `via` of an `[[edges]]` row, not baked per-type -- note any the user wants so the template guidance mentions them. |
 
 End the interview by reading back a one-screen summary of every field and getting
 explicit confirmation before writing anything.

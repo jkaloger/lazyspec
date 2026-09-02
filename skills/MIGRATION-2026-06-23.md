@@ -35,9 +35,9 @@ write-rfc  create-story  create-iteration  build  review-iteration  plan-work  r
 | `build`            | `/execute`                            | Carry out the work a delivery doc describes against its task breakdown and ACs. No authorship ceiling — this is work, not authoring.   |
 | `review-iteration` | `/review`                             | Two-stage critique: conformance to intent + ACs first, quality second. Type-agnostic.                                                  |
 | `resolve-context`  | _(removed)_                           | Folded into `lazyspec context --json`. `/lazy` reads the chain from the CLI instead of calling a skill.                                |
-| _(none)_           | `/advance`                            | New. Move a doc to its next lifecycle status, checking gates. Status only — never spawns children.                                     |
+| _(none)_           | `/advance`                            | New. Move a doc to its next lifecycle status. Status only — never spawns children.                                                     |
 | `create-audit`     | `create-audit`                        | Unchanged. Still runs independently of the main pipeline.                                                                              |
-| _(none)_           | `/configure-type`                     | New. Grill-me-style interview to author one custom type's intent, authorship, lifecycle, gates, and template via the config-write CLI. |
+| _(none)_           | `/configure-type`                     | New. Grill-me-style interview to author one custom type's intent, authorship, lifecycle, and template via the config-write CLI.        |
 
 ## Behaviour changes to know about
 
@@ -45,7 +45,7 @@ Three shifts come with the new skills, all driven by config rather than baked in
 
 **Authorship is a ceiling.** Each type declares `authorship` in config (`human`, `assisted`, `generated`). It caps the highest authoring verb permitted: `human` → `/scaffold` only, `assisted` → up to `/co-write`, `generated` → up to `/generate`. A verb above the ceiling is refused; anything at or below is always allowed, so you can pick a more manual mode on any type. The old skills had no such ceiling and pushed toward generating.
 
-**The router stops at type boundaries.** `/lazy` advances within the current document automatically, but never auto-creates a child of a different type — even when a gate has cleared. Crossing a type boundary is always human-initiated. This is the planning→delivery handoff the old build-eager skills lacked. A boundary is a `traversal: chain` row in the config's `edges` table and nothing else — `parent_type` declares none.
+**The router stops at type boundaries.** `/lazy` advances within the current document automatically, but never auto-creates a child of a different type. Crossing a type boundary is always human-initiated. This is the planning→delivery handoff the old build-eager skills lacked. A boundary is a `traversal: chain` row in the config's `edges` table and nothing else — `parent_type` declares none.
 
 **Status is a per-type DAG.** Status is now a validated string over each type's declared `lifecycle` (states + edges). `update --status` rejects any transition not on a declared edge. Run `fix --config` on a pre-RFC-048 project to inject the default lifecycle DAG into the existing config.
 
