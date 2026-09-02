@@ -12,9 +12,9 @@ pub use crate::engine::graph::GraphNode;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
-    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy, RelSelector,
-    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
-    Traversal, TypeDef, TypeSelector, WILDCARD,
+    default_normalize, CertificationOverride, Config, EdgeDef, GithubConfig, NumberingStrategy,
+    RelSelector, RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig,
+    StoreBackend, Traversal, TypeDef, TypeSelector, WILDCARD,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -1034,6 +1034,19 @@ impl App {
         ]
     }
 
+    /// The nav index of the category called `name`. Every jump names the
+    /// category it means and resolves it here, because an index literal does
+    /// not fail when a category is inserted above it -- it silently addresses
+    /// the neighbour (STORY-260 put `Edges` at index 3 and moved five
+    /// categories down one). The names are literals in this module, so a
+    /// lookup that misses is a typo, not a state a user can reach.
+    pub(crate) fn settings_category_index(name: &str) -> usize {
+        Self::settings_categories()
+            .iter()
+            .position(|cat| *cat == name)
+            .unwrap_or_else(|| panic!("no settings category named {name}"))
+    }
+
     /// The `EditableField` under the field cursor in the current settings
     /// field-view, read from `settings_buffer`. None for entry-list views or an
     /// out-of-range cursor.
@@ -1631,6 +1644,22 @@ impl App {
     /// failure also jumps focus to the offending field. On success the dirty flag
     /// and footer clear and `config_reload_request` is raised so the run loop
     /// re-loads the config, rebuilds the store, and re-seeds the clean buffer.
+    ///
+    /// This is the one place a buffer meets the loader's judgement, and so the
+    /// answer to which of the panel's two commits STORY-260 AC4 means: the save,
+    /// not the field commit (ITERATION-389). `Config::parse` is whole-config and
+    /// all-or-nothing, and the save is the only whole-config action -- running
+    /// the same check at field-commit time would refuse an edge edit for a
+    /// violation elsewhere in the buffer (a salt the designer has not filled in
+    /// yet), and narrowing it to the edited row would be a second spelling of
+    /// the loader's predicates, which is the drift AC4 exists to prevent. It
+    /// would also refuse legitimate waypoints: widening `from` to `*` before
+    /// clearing `required` is a two-field edit whose intermediate does not load.
+    ///
+    /// So the engine seam ITERATION-389 offered -- lifting `parse_inner`'s
+    /// invariant block into a `Config::check` a live buffer could be handed to
+    /// -- was not taken, and needs no re-litigating on those grounds. What would
+    /// reopen it is a check that is genuinely per-row rather than per-config.
     fn settings_commit_write(&mut self, root: &Path) {
         let path = root.join(".lazyspec.toml");
         let src = match std::fs::read_to_string(&path) {
@@ -1682,9 +1711,20 @@ impl App {
     fn settings_jump_to_violation(&mut self) {
         self.settings_editing = false;
 
+        // 1. An `[[edges]]` row the loader refuses. First, because `parse_inner`
+        // checks the DAG before numbering and stores, and it bails on the first
+        // violation it finds -- so the earliest violation in its order is the one
+        // the footer is talking about.
+        if let Some((row, key)) = self.first_edge_violation() {
+            self.settings_jump_to_field("Edges", Some(row), |f| {
+                f.path == (FieldPath::Edge { index: row, key })
+            });
+            return;
+        }
+
         let buf = &self.settings_buffer;
 
-        // 1. A Sqids type with no valid [numbering.sqids] salt.
+        // 2. A Sqids type with no valid [numbering.sqids] salt.
         let needs_sqids = buf
             .documents
             .types
@@ -1699,11 +1739,11 @@ impl App {
             if !salt_ok {
                 // The salt is a focusable field only when the section exists.
                 if buf.documents.sqids.is_some() {
-                    self.settings_jump_to_field(4, None, |f| {
+                    self.settings_jump_to_field("Numbering", None, |f| {
                         matches!(f.path, FieldPath::SqidsSalt)
                     });
                 } else {
-                    self.settings_jump_to_field(1, Some(type_index), |f| {
+                    self.settings_jump_to_field("Document Types", Some(type_index), |f| {
                         matches!(
                             f.path,
                             FieldPath::Type {
@@ -1717,7 +1757,7 @@ impl App {
             }
         }
 
-        // 2. A GithubIssues type with no [github] section.
+        // 3. A GithubIssues type with no [github] section.
         if buf.documents.github.is_none() {
             let offending = buf
                 .documents
@@ -1725,7 +1765,7 @@ impl App {
                 .iter()
                 .position(|t| t.store == StoreBackend::GithubIssues);
             if let Some(type_index) = offending {
-                self.settings_jump_to_field(1, Some(type_index), |f| {
+                self.settings_jump_to_field("Document Types", Some(type_index), |f| {
                     matches!(
                         f.path,
                         FieldPath::Type {
@@ -1738,9 +1778,94 @@ impl App {
             }
         }
 
-        // 3. Any other constraint (reserved/relationships): best-effort landing on
-        // a relevant category, clamped, never crashing.
-        self.settings_jump_to_field(4, None, |_| false);
+        // 4. Any other constraint (reserved/relationships): best-effort landing on
+        // a relevant category, clamped, never crashing. It must not land on an
+        // edge field -- a violation no arm above claims is not the Edges panel's
+        // to answer for. The retired `[[rules]]` refusal (STORY-259) never
+        // reaches here at all: `write_config_in_place` deletes the table, so the
+        // bytes this jump is explaining cannot still declare one.
+        self.settings_jump_to_field("Numbering", None, |_| false);
+    }
+
+    /// The first `[[edges]]` violation `Config::parse` would bail on, as the row
+    /// index and the field at fault -- attribution only. The *message* is the
+    /// loader's, produced by re-parsing the bytes destined for disk; this walks
+    /// the buffer in the same order `parse_inner` does so the field it names is
+    /// the one that message is about.
+    ///
+    /// Each arm reads a predicate the engine already exposes -- the selectors'
+    /// `names()` and `EdgeDef::overlaps`/`specificity` -- rather than re-deriving
+    /// a check, because a re-derivation here would be the second spelling
+    /// STORY-260 AC4 forbids, merely relocated from the message to the
+    /// attribution. Every arm is tested against a real refused save for that
+    /// reason: a divergence from the loader has to fail, not go unnoticed.
+    fn first_edge_violation(&self) -> Option<(usize, EdgeKey)> {
+        let buf = &self.settings_buffer;
+        let declared_type = |name: &String| buf.type_by_name(name).is_some();
+        let declared_rel = |name: &String| buf.relationship_by_name(name).is_some();
+
+        for (row, edge) in buf.edges.iter().enumerate() {
+            // A wildcard written inside a list and an undeclared name are two
+            // messages but one field, so one arm covers both positions.
+            for (key, names) in [
+                (EdgeKey::From, edge.from.names()),
+                (EdgeKey::To, edge.to.names()),
+            ] {
+                if names
+                    .iter()
+                    .any(|name| name == WILDCARD || !declared_type(name))
+                {
+                    return Some((row, key));
+                }
+            }
+            if edge
+                .via
+                .names()
+                .iter()
+                .any(|via| via == WILDCARD || !declared_rel(via))
+            {
+                return Some((row, EdgeKey::Via));
+            }
+            // `from = "*"` is a legal position on its own; the row is refused
+            // because `required` is set on it, and clearing `required` is the fix
+            // that keeps the position the designer just declared.
+            if edge.required.is_some() && edge.from == TypeSelector::Any {
+                return Some((row, EdgeKey::Required));
+            }
+        }
+
+        // A pairwise refusal has no single culprit -- either row can be narrowed
+        // or changed to agree -- so the cursor goes to the row the loader's
+        // message names first, which is the earlier row whether or not it is the
+        // one just edited.
+        Self::first_pairwise_disagreement(&buf.edges)
+    }
+
+    /// The earlier row of the first pair of `[[edges]]` rows that overlap and
+    /// disagree, and the qualifier they disagree on: a requiredness tie at equal
+    /// specificity, then a traversal disagreement, which is the order
+    /// `parse_inner` asks in. Rows that omit the qualifier state nothing and so
+    /// disagree with nothing.
+    fn first_pairwise_disagreement(edges: &[EdgeDef]) -> Option<(usize, EdgeKey)> {
+        let ties = edges.iter().enumerate().find_map(|(row, edge)| {
+            let severity = edge.required.as_ref()?;
+            edges[row + 1..]
+                .iter()
+                .filter(|other| other.overlaps(edge) && other.specificity() == edge.specificity())
+                .any(|other| other.required.as_ref().is_some_and(|s| s != severity))
+                .then_some((row, EdgeKey::Required))
+        });
+        if ties.is_some() {
+            return ties;
+        }
+        edges.iter().enumerate().find_map(|(row, edge)| {
+            let traversal = edge.traversal?;
+            edges[row + 1..]
+                .iter()
+                .filter(|other| other.overlaps(edge))
+                .any(|other| other.traversal.is_some_and(|t| t != traversal))
+                .then_some((row, EdgeKey::Traversal))
+        })
     }
 
     /// Land the settings nav on the scaffold offer's required-but-empty field
@@ -1749,23 +1874,28 @@ impl App {
     pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
         match path {
             FieldPath::SqidsSalt => {
-                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+                self.settings_jump_to_field("Numbering", None, |f| {
+                    matches!(f.path, FieldPath::SqidsSalt)
+                });
             }
             // No other scaffolded section produces a required-empty field today; a
             // best-effort landing keeps this total without crashing.
-            _ => self.settings_jump_to_field(4, None, |_| false),
+            _ => self.settings_jump_to_field("Numbering", None, |_| false),
         }
     }
 
-    /// Land the settings nav on `category` (optionally drilled into `drill`) and
-    /// set the field cursor to the first field matching `pick`, clamped to the
-    /// field list. With no match the cursor is 0.
+    /// Land the settings nav on the category called `category` (optionally
+    /// drilled into `drill`) and set the field cursor to the first field
+    /// matching `pick`, clamped to the field list. With no match the cursor is
+    /// 0. Callers name the category rather than numbering it; see
+    /// [`App::settings_category_index`].
     fn settings_jump_to_field(
         &mut self,
-        category: usize,
+        category: &str,
         drill: Option<usize>,
         pick: impl Fn(&EditableField) -> bool,
     ) {
+        let category = Self::settings_category_index(category);
         self.settings_category = category;
         self.settings_drill = drill;
         if let Some(d) = drill {
@@ -5911,25 +6041,13 @@ mod tests {
         EdgeDef, GithubConfig, RelSelector, ReservedFormat, SqidsConfig, StoreBackend, TypeSelector,
     };
 
-    /// The index of the settings category called `name`, panicking when there
-    /// is none. Tests address a category by name because an index does not
-    /// fail when a new category is inserted above it -- it silently addresses
-    /// the neighbour, and the assertions go on passing (STORY-260 put `Edges`
-    /// at index 3 and moved five categories down one).
-    fn settings_category_index(name: &str) -> usize {
-        App::settings_categories()
-            .iter()
-            .position(|cat| *cat == name)
-            .unwrap_or_else(|| panic!("no settings category named {name}"))
-    }
-
     /// Build a settings-edit-ready app: set the buffer to `config`, focus the
     /// named category and the field at `field`, leave it clean and not editing.
     fn settings_app(config: Config, category: &str, field: usize) -> App {
         let mut app = make_test_app(0);
         app.settings_buffer = config;
         app.settings_dirty = false;
-        app.settings_category = settings_category_index(category);
+        app.settings_category = App::settings_category_index(category);
         app.settings_entry = 0;
         app.settings_drill = None;
         app.settings_field = field;
@@ -6703,9 +6821,16 @@ mod tests {
     /// way (`settings_app` for buffer-only tests, `save_app` when the save has
     /// to reach a real file).
     fn focus_edge_field(app: &mut App, label: &str) {
-        app.settings_category = settings_category_index("Edges");
-        app.settings_entry = 0;
-        app.settings_drill = Some(0);
+        focus_edge_row_field(app, 0, label);
+    }
+
+    /// [`focus_edge_field`] for a chosen row, so a pairwise refusal can be
+    /// provoked from the row that is not the one the cursor is expected to land
+    /// on.
+    fn focus_edge_row_field(app: &mut App, row: usize, label: &str) {
+        app.settings_category = App::settings_category_index("Edges");
+        app.settings_entry = row;
+        app.settings_drill = Some(row);
         let fields = crate::tui::views::panels::settings_fields(
             app.settings_category,
             app.settings_entry,
@@ -7135,6 +7260,251 @@ repo = "owner/repo"
             .zip(after.lines())
             .filter(|(b, a)| b != a)
             .collect()
+    }
+
+    // --- STORY-260 AC4: an edge edit the loader refuses (ITERATION-389) ---
+
+    /// A save fixture declaring two rows that overlap and agree on both
+    /// qualifiers, so it loads, and an edit to either qualifier produces a
+    /// pairwise refusal -- a requiredness tie, a traversal disagreement -- and
+    /// nothing else.
+    const TWO_EDGES_SAVE_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "warning"
+traversal = "chain"
+
+[[edges]]
+name = "implementers-need-rfcs"
+from = ["story", "rfc"]
+to = "rfc"
+via = "implements"
+required = "warning"
+traversal = "chain"
+"#;
+
+    /// The message `Config::parse` gives for the exact bytes `app`'s buffer
+    /// would write over `src` -- the text the footer has to carry. Derived, not
+    /// spelled: a literal expectation here would be the second spelling AC4
+    /// forbids, written into the assertion meant to forbid it.
+    fn loader_refusal(src: &str, app: &App) -> String {
+        let destined =
+            crate::engine::config_write::write_config_in_place(src, &app.settings_buffer)
+                .expect("the writer renders the buffer");
+        Config::parse(&destined)
+            .expect_err("the bytes destined for disk do not load")
+            .to_string()
+    }
+
+    /// Commit `input` into the labelled field of drilled edge row 0 the way the
+    /// panel does: open the editor, type, confirm.
+    fn commit_edge_edit(app: &mut App, label: &str, input: &str) {
+        focus_edge_field(app, label);
+        app.settings_start_edit();
+        app.settings_edit_input = input.to_string();
+        app.settings_confirm_edit();
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+    }
+
+    /// The buffer path under the settings cursor, read through the same field
+    /// list the render uses. `FieldPath::Edge` carries the drilled row, so the
+    /// path alone pins category, drill and field cursor together.
+    fn focused_path(app: &App) -> FieldPath {
+        app.settings_focused_field()
+            .expect("the cursor is on a field")
+            .path
+    }
+
+    fn save_edges(app: &mut App, tmp: &tempfile::TempDir, src: &str) {
+        app.settings_save(tmp.path(), &Config::parse(src).unwrap());
+    }
+
+    #[test]
+    fn saving_an_edge_naming_an_unknown_type_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_an_edge_naming_an_unknown_relationship_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "via", "nonsense");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_a_required_edge_widened_to_a_wildcard_from_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "*");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_edges_that_disagree_on_traversal_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Traversal, "related");
+        let refusal = loader_refusal(TWO_EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    /// Set a drilled row's `required`/`traversal` through the enum cycler's
+    /// shared write, which reads the focused field, so the focus moves first.
+    fn cycle_edge_qualifier(app: &mut App, row: usize, key: EdgeKey, variant: &str) {
+        let label = match key {
+            EdgeKey::Required => "required",
+            EdgeKey::Traversal => "traversal",
+            other => panic!("{other:?} is not a cycled qualifier"),
+        };
+        focus_edge_row_field(app, row, label);
+        app.settings_set_enum_variant(&FieldPath::Edge { index: row, key }, variant);
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+    }
+
+    // The refusal is the whole outcome: the file keeps its bytes and the buffer
+    // keeps the edit, so the designer corrects it in place rather than retyping
+    // it.
+    #[test]
+    fn a_refused_edge_edit_writes_nothing_and_keeps_the_edit() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(
+            read_config_file(&tmp),
+            EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert!(app.settings_dirty, "the buffer stays dirty");
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["nonsense".to_string()]),
+            "the buffer still holds the refused edit"
+        );
+        assert!(!app.config_reload_request, "no reload on a refusal");
+    }
+
+    // --- ITERATION-389 Task 4: the cursor lands on the edge field at fault ---
+
+    #[test]
+    fn a_refused_unknown_type_on_from_lands_the_cursor_on_from() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::From));
+    }
+
+    #[test]
+    fn a_refused_unknown_type_on_to_lands_the_cursor_on_to() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::To));
+    }
+
+    #[test]
+    fn a_refused_unknown_relationship_lands_the_cursor_on_via() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "via", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Via));
+    }
+
+    // A wildcard `from` is a legal position on its own; the row is refused
+    // because `required` is set on it, and clearing `required` is the fix that
+    // keeps the position the designer just declared.
+    #[test]
+    fn a_refused_required_wildcard_from_lands_the_cursor_on_required() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "*");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Required));
+    }
+
+    // A pairwise refusal has no single culprit -- either row can be narrowed or
+    // changed -- so the cursor goes to the row the message names first, which is
+    // the earlier row whether or not it is the one just edited.
+    #[test]
+    fn a_refused_requiredness_tie_lands_the_cursor_on_the_first_rows_required() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Required, "error");
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Required));
+    }
+
+    #[test]
+    fn a_refused_traversal_disagreement_lands_the_cursor_on_the_first_rows_traversal() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Traversal, "related");
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Traversal));
+    }
+
+    // A violation no edge arm claims must not be attributed to an edge field:
+    // the sqids arm owns it, and the buffer's edges are all sound.
+    #[test]
+    fn a_non_edge_violation_does_not_land_the_cursor_on_an_edge_field() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        app.settings_buffer.documents.types[0].numbering = NumberingStrategy::Sqids;
+        app.settings_buffer.documents.sqids = None;
+        app.settings_dirty = true;
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert!(
+            !matches!(focused_path(&app), FieldPath::Edge { .. }),
+            "landed on {:?}",
+            focused_path(&app)
+        );
     }
 
     // AC9: a save that would violate a cross-field constraint shows the footer,
@@ -8443,7 +8813,7 @@ left = ["mode"]
 center = ["warnings"]
 "#;
         let (tmp, mut app) = save_app(SRC);
-        app.settings_category = settings_category_index("Interface");
+        app.settings_category = App::settings_category_index("Interface");
 
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center
