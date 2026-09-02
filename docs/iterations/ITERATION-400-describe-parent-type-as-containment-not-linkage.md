@@ -1,7 +1,7 @@
 ---
 title: Describe parent_type as containment, not linkage
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
