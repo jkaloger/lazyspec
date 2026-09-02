@@ -173,14 +173,14 @@ If a question can be answered by exploring the codebase, explore the codebase in
 
 ---
 name: advance
-description: Use when moving a document to its next status along the type's lifecycle DAG, maintaining links and checking gates at the transition.
+description: Use when moving a document to its next status along the type's lifecycle DAG, maintaining links across the transition.
 ---
 
 ```
 TRAVERSE ONE OUT-EDGE OF THE LIFECYCLE GRAPH
 ```
 
-A type's lifecycle is a directed graph: the nodes are its statuses, the edges are the transitions config permits. A document sits on one status. Advance reads the out-edges from that status, picks the successor, confirms the gate on that edge holds, and writes the move. One document, one edge.
+A type's lifecycle is a directed graph: the nodes are its statuses, the edges are the transitions config permits. A document sits on one status. Advance reads the out-edges from that status, picks the successor, and writes the move. The edge set is what gates a status move -- `update --status` refuses a pair the lifecycle does not name -- and that refusal lives inside one type's lifecycle. No status a document reaches permits or refuses anything in another type. One document, one edge.
 
 ## The command
 
@@ -194,7 +194,7 @@ lazyspec update <id> --status <next>
 
 <HARD-GATE>
 Propose only a successor: a status the current one has an out-edge to in `lifecycle.edges`. Read the edge set from config. The binary rejects any pair that is not an edge.
-Advance writes status only. It never creates a child document, even when the move satisfies a gate that makes a child creatable.
+Advance writes status only. It never creates a child document. No status makes a child creatable and none withholds one either; crossing into another type is human-initiated, per /lazy's stop-at-boundary rule.
 </HARD-GATE>
 
 <NEVER>
@@ -211,26 +211,18 @@ Documents stored in GitHub Issues (store = "github-issues") are managed through 
 - To modify after creation: `lazyspec update <ID> --body "new content"`.
 </GITHUB-ISSUES-DOCUMENTS>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read lifecycle and gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read lifecycle facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight
 
 1. `lazyspec config --json` gives the type's `lifecycle`: its `states` (the nodes) and `edges` (the transitions). The edge set decides which moves exist. Every status name comes from config; this skill names none.
-2. `lazyspec show <id> --json` gives the document's current status.
-3. `lazyspec context --json` gives the parent and child statuses a gate may depend on.
+2. `lazyspec show <id> --json` gives the document's current status and its `related` links.
 
 ## Workflow
 
 1. Find the successors. Keep the edges in `lifecycle.edges` whose `from` is the current status; their `to` values are the statuses you can move to. An edge with `from: "*"` applies from every status, so the default config's `* -> superseded` is always available.
-2. Test the gate. A gate is a predicate on the target status, such as `require_parent_status`. Read the parent's status from `context --json` and check the predicate. If it fails, stop and report which status the parent must reach first.
-3. Write the move. `lazyspec update <id> --status <next>`. The binary rejects any pair that is not an edge, so offer only successors.
-4. Preserve the links across the move.
-
-## Gates and the type boundary
-
-A gate can make a child of another type creatable once the parent reaches a status. When that happens, advance writes the status move and stops. It does not create the child.
-
-Two conditions separate a move within the lifecycle from crossing into a child type. The gate makes the child creatable; starting it is a second, human step, handled by /lazy's stop-at-boundary rule. Satisfying the gate is necessary, not sufficient.
+2. Write the move. `lazyspec update <id> --status <next>`. The binary rejects any pair that is not an edge, so offer only successors.
+3. Preserve the links across the move.
 
 ---
 
@@ -489,7 +481,7 @@ A command that would run more than about three times with different arguments be
 | **Delivery document** | The build agent, into the work-active status, as /execute's first act | You, to its completion status, after the commit |
 | **Its parent document** | You, into the work-active status, when its first in-batch child starts (if the type's lifecycle has one) | **Not by you.** Advance it to its review status only, never to completion |
 
-Completing a parent is a human or downstream decision. Advance a parent only when all of its in-batch children are done; if it owns children outside this batch, leave it and note that in the report. Order within a unit is commit, then the delivery document, then the parent -- /advance checks each type's gates at every transition.
+Completing a parent is a human or downstream decision. Advance a parent only when all of its in-batch children are done; if it owns children outside this batch, leave it and note that in the report. Order within a unit is commit, then the delivery document, then the parent -- /advance proposes only a status the type's own `lifecycle` edges permit.
 
 ## End of chunk: the comprehensive pass
 
@@ -991,7 +983,7 @@ debug: systematic-debugging {
 
 locate: Locate-in-DAG {
   shape: rectangle
-  tooltip: "current type, status, outgoing edges, gates"
+  tooltip: "current type, status, outgoing edges"
 }
 
 dispatch: Dispatch (computed from config) {
@@ -1018,7 +1010,7 @@ validate: validate touched doc {
 
 boundary: STOP at type boundary {
   shape: hexagon
-  tooltip: "child of a different type -- human-initiated only, even if gate is met"
+  tooltip: "child of a different type -- human-initiated only, whatever validate reports"
 }
 
 preflight -> triage
@@ -1062,7 +1054,7 @@ lazyspec config --json | jq -r --arg t <doc-type> '
 
 What it prints is the far side of the crossing: the child type to create. `$t` is the near side, the document you already have. Read a row the other way and you propose creating the parent that exists.
 `"*"` sits on any position and filters rather than lists. On `to` it admits every type, so such a row applies to whatever document you are on. On `from` it names no type at all, so such a row yields no child type and no crossing to report -- a config that means concrete children names them in `from`. Take the type vocabulary from `types`; never expand a `"*"` into one. A row's `via` is the relation to pass to `lazyspec link`.
-Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
+Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated. No edge condition withholds that create and none releases it, so there is no condition whose clearing turns the crossing automatic. Within-document progression is automatic; crossing a type boundary is not.
 **No work without a reviewed plan -- the PLAN->EXECUTE gate.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document. *Starting the work* is not: it requires an explicit, separate approval of THIS work plan -- which units, in which order, by which route. Present it and STOP. Never begin work off a general go-ahead, and never off a plan that has not been through /review.
 Compute the dispatch table from `lazyspec config --json` at runtime. There is no fixed chain in this prose.
 A reported bug, defect, or unexpected behaviour is investigated to root cause FIRST -- via systematic-debugging -- before any fix document is authored. No fix doc before root cause.
@@ -1084,7 +1076,7 @@ STOP and present the plan for approval if you catch yourself rationalizing past 
 | "User pre-authorized the work" | Authorizing the work is not approving this create+link+parent choice. Present it, get the nod. |
 | "They said use /lazy, so route and go" | Using /lazy includes its stops. Going through a boundary without approval is not using /lazy. |
 | "The fix is named, the plan is obvious" | Obvious to you is not confirmed by them. The parent link and scope are decisions -- surface them. |
-| "Gate is satisfied, so it's automatic" | Gate-clear makes the next step eligible, not approved. Eligibility is not consent. |
+| "Nothing refuses the create, so it's automatic" | Nothing ever refused it. No edge gates a `create`, so the stop at the boundary is the only thing between you and one -- not a second check after a first one cleared. Eligibility is not consent. |
 | "Inline orchestration is exempt" | The gate binds the actor, not the invocation path. Inline does not skip it. |
 </RED-FLAGS>
 
@@ -1093,7 +1085,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"`. Chang
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read DAG/gate/status facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read DAG and status facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight (the routing read)
 
@@ -1115,13 +1107,13 @@ When the user arrives with a **bug, defect, test failure, or unexpected behaviou
 
 ## Locate-in-DAG
 
-From config + status + context, determine which document and type the user is on and where it sits in its lifecycle (current status, outgoing edges, gates).
+From config + status + context, determine which document and type the user is on and where it sits in its lifecycle (current status, outgoing edges).
 
 ## Dispatch (computed from config)
 
 Build the dispatch table at runtime from config. No chain is hardcoded here; the chain is whatever `edges` says at runtime. (The shipped default config happens to define a chain among types named `rfc`, `story`, and `iteration` -- treat that only as the shipped default, never as a routing assumption.)
 
-**Within-document progression is automatic.** If the current document has an eligible outgoing `lifecycle` edge (the edge exists and its gate, if any, is met), dispatch the matching verb WITHOUT asking:
+**Within-document progression is automatic.** If the current document has an outgoing `lifecycle` edge from its current status, dispatch the matching verb WITHOUT asking:
 
 - a status move with no authoring/work needed -> /advance
 - an authoring step appropriate to the type's `authorship` and current status -> the authoring verb at the type's ceiling (/scaffold, /co-write, or /generate)
@@ -1148,7 +1140,9 @@ Approval of the work is not approval of this plan. "Go ahead", "use /lazy", or t
 
 When the only remaining next step would cross into a **different type** -- traversing a type-boundary edge (a `chain` row in `edges`, per the HARD-GATE) -- `/lazy` **STOPS.** The boundary is the edge, not one type: a row's far side is a set of types, and any one member satisfies the row. So the report names every type the edge admits and leaves the choice among them to the human; `/lazy` never auto-runs `create <child-type>` for a member of that set.
 
-This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the crossing _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. A ceiling belongs to the type, not to the edge, so a three-member set can carry three ceilings and therefore three different verbs (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate). That is why the report is a list: one line per type, carrying that type's own verb.
+This holds **whatever `validate` reports about the edge.** No edge condition refuses a `create`, so nothing has to clear first and there is no moment at which the crossing becomes automatic: this stop is the only thing between the agent and a create, not a second check after a first one passed. Crossing a type boundary is always human-initiated. A ceiling belongs to the type, not to the edge, so a three-member set can carry three ceilings and therefore three different verbs (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate). That is why the report is a list: one line per type, carrying that type's own verb.
+
+**An unsatisfied edge is a finding, not a refusal.** When the edge the crossing would satisfy is one `validate --json` already reports as unsatisfied, report it as what it is: the edge, the types that satisfy it, and the severity the row's `required` value gives it. Never report it as a reason a `create` would be refused, and never name a status a parent must reach -- no such condition exists to report. (`create --parent` is refused when parent and child sit in different store backends. That is the one refusal, and it is not a DAG matter.) The create was always legal; what it waits on is the human.
 
 **Two commands assemble it.** `validate --json` says *that* an edge is unsatisfied. `config --json` says *which* types satisfy it. `validate`'s `errors` are flat strings -- one rendered finding each -- so a finding's type set is prose; do not string-parse it back out, however direct a source it looks. Read the set structured, from `config --json`: `edges[].to` when the crossing goes up (the document you hold needs a parent), and the `from` sides of the rows admitting this type when it goes down (the HARD-GATE's reverse lookup, which already collects them as a set).
 

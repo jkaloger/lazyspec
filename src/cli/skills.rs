@@ -263,6 +263,25 @@ mod tests {
         }
     }
 
+    /// ADR-033 withdrew status-conditioned create gating, so `require_parent_status`
+    /// and `config add-gate` name a field and a subcommand the binary does not have. A
+    /// skill mentioning either promises a refusal that will never come; what the agent
+    /// can report is the `UnsatisfiedEdge` finding. `configure-type` is outside
+    /// `EMBEDDED_SKILLS` (`src/engine/skills.rs`), so this assertion does not reach its
+    /// copy of the same prose.
+    #[test]
+    fn embedded_skills_promise_no_status_conditioned_create_gate() {
+        for (path, contents) in embedded_skill_set() {
+            for withdrawn in ["require_parent_status", "add-gate"] {
+                assert!(
+                    !contents.contains(withdrawn),
+                    "{} names `{withdrawn}`; an unsatisfied edge is a validation finding, not a gate on `create`",
+                    path.display()
+                );
+            }
+        }
+    }
+
     /// `parent_type` is containment. The authoring skills read it in preflight,
     /// and the one sentence they read it with is the only thing any embedded
     /// skill says about it -- nothing turns it into a link, a create or a

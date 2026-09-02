@@ -123,7 +123,7 @@ Lazyspec ships a set of config-driven generic verb skills that enforce its workf
 | `scaffold` | Create a new document's file and frontmatter, hand the body back to the human     |
 | `co-write` | Collaboratively draft a document body: AI proposes, human edits, iterate          |
 | `generate` | Author a full document body from context (only when the type's ceiling allows it) |
-| `advance`  | Move a document to its next status along the type's lifecycle DAG, checking gates |
+| `advance`  | Move a document to its next status along the type's lifecycle DAG, maintaining links across the transition |
 | `review`   | Critique a *document* against its intent and acceptance criteria before advancing |
 | `execute`  | Build one delivery document's task breakdown in a single agent pass, then report  |
 | `orchestrate` | Drive a batch of delivery documents to done: order, dispatch, review, commit, close |

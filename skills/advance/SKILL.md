@@ -1,13 +1,13 @@
 ---
 name: advance
-description: Use when moving a document to its next status along the type's lifecycle DAG, maintaining links and checking gates at the transition.
+description: Use when moving a document to its next status along the type's lifecycle DAG, maintaining links across the transition.
 ---
 
 ```
 TRAVERSE ONE OUT-EDGE OF THE LIFECYCLE GRAPH
 ```
 
-A type's lifecycle is a directed graph: the nodes are its statuses, the edges are the transitions config permits. A document sits on one status. Advance reads the out-edges from that status, picks the successor, confirms the gate on that edge holds, and writes the move. One document, one edge.
+A type's lifecycle is a directed graph: the nodes are its statuses, the edges are the transitions config permits. A document sits on one status. Advance reads the out-edges from that status, picks the successor, and writes the move. The edge set is what gates a status move -- `update --status` refuses a pair the lifecycle does not name -- and that refusal lives inside one type's lifecycle. No status a document reaches permits or refuses anything in another type. One document, one edge.
 
 ## The command
 
@@ -21,7 +21,7 @@ lazyspec update <id> --status <next>
 
 <HARD-GATE>
 Propose only a successor: a status the current one has an out-edge to in `lifecycle.edges`. Read the edge set from config. The binary rejects any pair that is not an edge.
-Advance writes status only. It never creates a child document, even when the move satisfies a gate that makes a child creatable.
+Advance writes status only. It never creates a child document. No status makes a child creatable and none withholds one either; crossing into another type is human-initiated, per /lazy's stop-at-boundary rule.
 </HARD-GATE>
 
 <NEVER>
@@ -38,23 +38,15 @@ Documents stored in GitHub Issues (store = "github-issues") are managed through 
 - To modify after creation: `lazyspec update <ID> --body "new content"`.
 </GITHUB-ISSUES-DOCUMENTS>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read lifecycle and gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read lifecycle facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Preflight
 
 1. `lazyspec config --json` gives the type's `lifecycle`: its `states` (the nodes) and `edges` (the transitions). The edge set decides which moves exist. Every status name comes from config; this skill names none.
-2. `lazyspec show <id> --json` gives the document's current status.
-3. `lazyspec context --json` gives the parent and child statuses a gate may depend on.
+2. `lazyspec show <id> --json` gives the document's current status and its `related` links.
 
 ## Workflow
 
 1. Find the successors. Keep the edges in `lifecycle.edges` whose `from` is the current status; their `to` values are the statuses you can move to. An edge with `from: "*"` applies from every status, so the default config's `* -> superseded` is always available.
-2. Test the gate. A gate is a predicate on the target status, such as `require_parent_status`. Read the parent's status from `context --json` and check the predicate. If it fails, stop and report which status the parent must reach first.
-3. Write the move. `lazyspec update <id> --status <next>`. The binary rejects any pair that is not an edge, so offer only successors.
-4. Preserve the links across the move.
-
-## Gates and the type boundary
-
-A gate can make a child of another type creatable once the parent reaches a status. When that happens, advance writes the status move and stops. It does not create the child.
-
-Two conditions separate a move within the lifecycle from crossing into a child type. The gate makes the child creatable; starting it is a second, human step, handled by /lazy's stop-at-boundary rule. Satisfying the gate is necessary, not sufficient.
+2. Write the move. `lazyspec update <id> --status <next>`. The binary rejects any pair that is not an edge, so offer only successors.
+3. Preserve the links across the move.

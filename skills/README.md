@@ -6,7 +6,7 @@ These skills can complement AI driven workflows using lazyspec. They guide an AI
 
 The verbs are **DAG-agnostic**: each one acts on a document *type* passed as a parameter and read from `lazyspec config --json` at runtime. None of them bake in a specific type name. The same prose works for any configured DAG -- the shipped default (a chain among types named `rfc`, `story`, `iteration`) is just one config among many.
 
-`/lazy` is the entry router. It reads the configured DAG (`config --json`), what exists (`status --json`), and the chain around your position (`context --json`), then dispatches the right verb. It advances within the current document automatically, but **stops at type boundaries** -- it never auto-creates a child of a different type, even when a gate has cleared. Crossing a type boundary is always human-initiated.
+`/lazy` is the entry router. It reads the configured DAG (`config --json`), what exists (`status --json`), and the chain around your position (`context --json`), then dispatches the right verb. It advances within the current document automatically, but **stops at type boundaries** -- it never auto-creates a child of a different type. No edge condition refuses a `create`, so there is nothing whose clearing makes the crossing automatic; an unsatisfied edge is a validation finding, and crossing a type boundary is always human-initiated.
 
 A **type boundary** is a `traversal: chain` row in `config --json`'s `edges` table and nothing else -- a type's `parent_type` declares none, and no other key does either. A row reads child-to-parent, so the child types of the document you are on are the `from` values of the rows whose `to` admits its type.
 
@@ -16,7 +16,7 @@ From there `/lazy` dispatches:
   - `/scaffold` -- AI creates the file, frontmatter, and links; the human writes the body. Never refuses on ceiling grounds (it is the floor).
   - `/co-write` -- AI proposes a draft body, the human edits, iterate. Refuses when the type's ceiling is `human`.
   - `/generate` -- AI writes the full body from context, then asks for review. Permitted only when the type's ceiling is `generated`.
-- **`/advance`** -- move a document to its next status along the type's `lifecycle` edges, checking gates. Status only; never spawns children.
+- **`/advance`** -- move a document to its next status along the type's `lifecycle` edges, which are what gate a status move. Status only; never spawns children.
 - **`/review`** -- two-stage critique of a **document** (conformance to intent + ACs first, quality second) before advancing.
 
 When the next step is the work itself, `/lazy` presents the work plan -- which delivery documents are ready, the order their dependency edges imply, the route -- and stops for explicit approval. On approval it dispatches by count:
@@ -46,7 +46,7 @@ Two lines keep the work verbs from overlapping:
 | `scaffold`    | Create a document's file, frontmatter, and links; hand the body back to the human (authorship floor) |
 | `co-write`    | Propose a draft body, the human edits, iterate; refuses for `human`-ceiling types                 |
 | `generate`    | Write the full body from context, then request review; permitted only for `generated`-ceiling types |
-| `advance`     | Move a document to its next lifecycle status, checking gates; status only, no child spawning      |
+| `advance`     | Move a document to its next lifecycle status along the type's `lifecycle` edges; status only, no child spawning |
 | `execute`     | Build one delivery document's breakdown in a single agent pass; terminal, reports and stops       |
 | `orchestrate` | Drive a batch of delivery documents to done: order, dispatch, review, commit, close, chunk pass   |
 | `review`      | Two-stage critique of a document: conformance to intent + ACs first, quality second               |

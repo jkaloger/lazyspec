@@ -147,7 +147,7 @@ A command that would run more than about three times with different arguments be
 | **Delivery document** | The build agent, into the work-active status, as /execute's first act | You, to its completion status, after the commit |
 | **Its parent document** | You, into the work-active status, when its first in-batch child starts (if the type's lifecycle has one) | **Not by you.** Advance it to its review status only, never to completion |
 
-Completing a parent is a human or downstream decision. Advance a parent only when all of its in-batch children are done; if it owns children outside this batch, leave it and note that in the report. Order within a unit is commit, then the delivery document, then the parent -- /advance checks each type's gates at every transition.
+Completing a parent is a human or downstream decision. Advance a parent only when all of its in-batch children are done; if it owns children outside this batch, leave it and note that in the report. Order within a unit is commit, then the delivery document, then the parent -- /advance proposes only a status the type's own `lifecycle` edges permit.
 
 ## End of chunk: the comprehensive pass
 
