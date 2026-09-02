@@ -259,20 +259,27 @@ impl TypeSelector {
     }
 }
 
-/// The `via` position on an `[[edges]]` row. A relationship is one name or any;
-/// unlike a type position it is never a set.
+/// The `via` position on an `[[edges]]` row. `"*"` is [`Any`]; a bare
+/// relationship name and a one-element list are the same selector, so the pair
+/// re-emits as the bare name. A set is a disjunction over its members (ADR-032),
+/// exactly as a type position is.
+///
+/// [`Any`]: RelSelector::Any
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelSelector {
     Any,
-    Named(String),
+    Named(Vec<String>),
 }
 
 impl RelSelector {
-    /// The declared relationship name, or `None` for [`RelSelector::Any`].
-    pub fn name(&self) -> Option<&str> {
+    /// The declared relationship names this selector spells out.
+    /// [`RelSelector::Any`] spells out none: it matches by wildcard rather than
+    /// by naming a relationship, so the declared-relationship check has nothing
+    /// to look up.
+    pub fn names(&self) -> &[String] {
         match self {
-            RelSelector::Any => None,
-            RelSelector::Named(name) => Some(name),
+            RelSelector::Any => &[],
+            RelSelector::Named(names) => names,
         }
     }
 
@@ -280,7 +287,7 @@ impl RelSelector {
     pub(crate) fn matches(&self, rel_name: &str) -> bool {
         match self {
             RelSelector::Any => true,
-            RelSelector::Named(name) => name == rel_name,
+            RelSelector::Named(names) => names.iter().any(|name| name == rel_name),
         }
     }
 
@@ -297,7 +304,9 @@ impl RelSelector {
     fn intersects(&self, other: &Self) -> bool {
         match (self, other) {
             (RelSelector::Any, _) | (_, RelSelector::Any) => true,
-            (RelSelector::Named(ours), RelSelector::Named(theirs)) => ours == theirs,
+            (RelSelector::Named(ours), RelSelector::Named(theirs)) => {
+                ours.iter().any(|name| theirs.contains(name))
+            }
         }
     }
 }
@@ -313,11 +322,16 @@ enum TypeSelectorRepr {
     Many(Vec<String>),
 }
 
-/// The TOML spelling of the `via` position: a declared relationship name, or
-/// `"*"` for any relationship.
-// Carries the schema shape for `RelSelector`.
+/// The TOML spellings of the `via` position: `"*"`, a bare relationship name, or
+/// a list of relationship names.
+// Carries the serde and schema shape for `RelSelector`; the doc comment above is
+// the `description` the emitted JSON schema carries.
 #[derive(Serialize, Deserialize, JsonSchema)]
-struct RelSelectorRepr(String);
+#[serde(untagged)]
+enum RelSelectorRepr {
+    One(String),
+    Many(Vec<String>),
+}
 
 impl Serialize for TypeSelector {
     fn serialize<S: serde::Serializer>(
@@ -354,7 +368,10 @@ impl Serialize for RelSelector {
     ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             RelSelector::Any => WILDCARD.serialize(serializer),
-            RelSelector::Named(name) => name.serialize(serializer),
+            RelSelector::Named(names) => match names.as_slice() {
+                [only] => only.serialize(serializer),
+                many => many.serialize(serializer),
+            },
         }
     }
 }
@@ -364,11 +381,10 @@ impl<'de> Deserialize<'de> for RelSelector {
     where
         D: serde::Deserializer<'de>,
     {
-        let name = String::deserialize(deserializer)?;
-        Ok(if name == WILDCARD {
-            RelSelector::Any
-        } else {
-            RelSelector::Named(name)
+        Ok(match RelSelectorRepr::deserialize(deserializer)? {
+            RelSelectorRepr::One(name) if name == WILDCARD => RelSelector::Any,
+            RelSelectorRepr::One(name) => RelSelector::Named(vec![name]),
+            RelSelectorRepr::Many(names) => RelSelector::Named(names),
         })
     }
 }
@@ -1505,8 +1521,18 @@ impl Config {
                     }
                 }
             }
-            if let Some(via) = edge.via.name() {
-                if !relationships.iter().any(|r| r.name == via) {
+            for via in edge.via.names() {
+                // As on a type position, a list is a set of names, so a wildcard
+                // written inside one would be reported as a relationship the
+                // reader never meant to name.
+                if via == WILDCARD {
+                    bail!(
+                        "edge \"{}\" writes the wildcard inside a list on `via`; a wildcard is a \
+                         bare string, not a member of a set: write `via = \"*\"`",
+                        edge.name
+                    );
+                }
+                if !relationships.iter().any(|r| &r.name == via) {
                     bail!(
                         "edge \"{}\" names unknown relationship \"{}\" (not declared in [[relationships]])",
                         edge.name,
@@ -1914,6 +1940,10 @@ name = "related-to"
 
         let rel_selector = json["$defs"]["RelSelectorRepr"].to_string();
         assert!(
+            json["$defs"]["RelSelectorRepr"]["anyOf"].is_array(),
+            "`via` must document both the scalar and the list form, got {rel_selector}"
+        );
+        assert!(
             rel_selector.contains('*'),
             "`via` must document the wildcard spelling, got {rel_selector}"
         );
@@ -1991,6 +2021,103 @@ via = "implements"
 
     // An absent `via` must not be read as "any relationship" (ADR-031): the
     // wildcard is explicit, so the omission is an error that has to point at it.
+    #[test]
+    fn edge_via_reads_a_scalar_as_a_single_element_set() {
+        let with_via = |via: &str| {
+            format!(
+                "{EDGE_PREAMBLE}
+[[edges]]
+name = \"stories-implement-rfcs\"
+from = \"story\"
+to = \"rfc\"
+via = {via}
+"
+            )
+        };
+
+        let scalar = Config::parse(&with_via("\"implements\"")).unwrap();
+        let list = Config::parse(&with_via("[\"implements\"]")).unwrap();
+
+        assert_eq!(scalar.edges, list.edges);
+        assert_eq!(
+            scalar.edges[0].via,
+            RelSelector::Named(vec!["implements".to_string()])
+        );
+    }
+
+    // ADR-032: a set in `via` is a disjunction over its members, so a row naming
+    // two relationships is satisfied by either.
+    #[test]
+    fn edge_via_reads_a_list_as_the_declared_relationship_set() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = "rfc"
+via = ["implements", "related-to"]
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert_eq!(
+            edge.via,
+            RelSelector::Named(vec!["implements".to_string(), "related-to".to_string()])
+        );
+        assert!(covers(edge, "story", "implements", "rfc"));
+        assert!(covers(edge, "story", "related-to", "rfc"));
+    }
+
+    // A one-element set and the bare name are the same selector, so the pair
+    // must re-emit as the spelling a human writes.
+    #[test]
+    fn edge_via_re_emits_a_one_element_set_as_a_bare_name() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = ["implements"]
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+
+        let emitted: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+
+        assert_eq!(
+            emitted["edges"].as_array().unwrap()[0]["via"],
+            toml::Value::from("implements")
+        );
+    }
+
+    #[test]
+    fn edge_via_a_set_holding_an_undeclared_relationship_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-supersede-rfcs"
+from = "story"
+to = ["rfc"]
+via = ["implements", "supersedes"]
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("supersedes"),
+            "names the offending member: {err}"
+        );
+        assert!(
+            err.contains("stories-supersede-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
     #[test]
     fn edge_without_via_fails_load_naming_the_edge_and_the_wildcard() {
         let toml_str = format!(
@@ -2137,6 +2264,12 @@ name = "stories-implement-work"
 from = "story"
 to = ["story", "rfc"]
 via = "implements"
+
+[[edges]]
+name = "stories-reach-rfcs-either-way"
+from = "story"
+to = "rfc"
+via = ["implements", "related-to"]
 "#
         )
     }
@@ -2156,6 +2289,10 @@ via = "implements"
         assert_eq!(edges[1]["from"], toml::Value::from("story"));
         assert_eq!(edges[1]["to"], toml::Value::from(vec!["story", "rfc"]));
         assert_eq!(edges[1]["via"], toml::Value::from("implements"));
+        assert_eq!(
+            edges[2]["via"],
+            toml::Value::from(vec!["implements", "related-to"])
+        );
     }
 
     #[test]
@@ -2306,6 +2443,37 @@ via = \"implements\"
                 "must not send the reader to [[types]]: {err}"
             );
         }
+    }
+
+    // `via` is a set of relationship names on the same terms `to` is a set of
+    // type names, so a wildcard written inside one misdirects the same way.
+    #[test]
+    fn edge_with_a_wildcard_inside_a_via_list_says_how_to_spell_a_wildcard() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "listed-wildcard-via"
+from = "story"
+to = "rfc"
+via = ["*"]
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("listed-wildcard-via"),
+            "names the offending edge: {err}"
+        );
+        assert!(
+            err.contains(r#"via = "*""#),
+            "shows the bare-string spelling: {err}"
+        );
+        assert!(
+            !err.contains("not declared in [[relationships]]"),
+            "must not send the reader to [[relationships]]: {err}"
+        );
     }
 
     #[test]

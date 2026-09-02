@@ -659,20 +659,20 @@ severity = "error"
 
 ### Edges
 
-An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationship that realizes the edge. Where a `parent-child` rule is satisfied by any chain relationship, an edge is satisfied only by the relationship named in `via`.
+An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. Where a `parent-child` rule is satisfied by any chain relationship, an edge is satisfied only by a relationship its `via` names.
 
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `name`     | Identifies the edge in validation findings                                                                                 |
 | `from`     | The types of the document that declares the relation, written as one type name, a list of them, or `"*"` for any type       |
 | `to`       | The permitted target types, written the same way. `to = "story"` and `to = ["story"]` are identical, as are the `from` equivalents |
-| `via`      | The relationship that realizes the edge, or `"*"` for any relationship. Required — omitting it is an error, not a shorthand for `"*"` |
+| `via`      | The relationships that realize the edge, written as one relationship name, a list of them, or `"*"` for any relationship. `via = "implements"` and `via = ["implements"]` are identical, as for `from` and `to`. Required — omitting it is an error, not a shorthand for `"*"` |
 | `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
 | `traversal` | `"chain"` or `"related"`: the walk this edge joins. Omit it and this row names no role. Another matching row may still give the edge one. |
 
 A row is asked in the direction the relation was declared, both for findings and for the walks. `from` is the type of the document whose frontmatter carries the relation, and `to` the type at the far end of that same declaration. Reading a link from its far end asks the same triple rather than the reverse of it. A nested child document inherits its parent's links, and such a link asks the parent's type as `from`. A row whose `from` names the inheriting type admits neither end of it. `validate` reports its finding against the declaring document, and both ends of one declared link join the related neighbourhood or neither does.
 
-`validate` reports one finding per document whose type is listed in `from` and which carries no `via` relation to a document of any type listed in `to`. Both lists are disjunctions. The edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge, the type of the document it is about, and every permitted target type.
+`validate` reports one finding per document whose type is listed in `from` and which carries no relation named in `via` to a document of any type listed in `to`. All three lists are disjunctions. The edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge, the type of the document it is about, and every permitted target type.
 
 ```toml
 [[edges]]
@@ -701,6 +701,17 @@ via = "implements"
 required = "error"
 ```
 
+A list on `via` names the relationships any one of which realizes the edge, rather than repeating the row per relationship. The row below is satisfied by a story that implements an RFC and by one that targets an RFC; a story that does neither is reported once, and the finding names both relationships:
+
+```toml
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = ["implements", "targets"]
+required = "warning"
+```
+
 Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship. Each position takes `"*"` independently of the others:
 
 ```toml
@@ -726,7 +737,7 @@ required = "error"
 
 A finding names what a wildcard position matches rather than the spelling `"*"`: `iteration needs any relationship to a document of any type`.
 
-Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or six, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific.
+Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or relationship or six of them, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific, and so are `via = "implements"` and `via = ["implements", "targets"]`.
 
 Specificity resolves requiredness and nothing else, and it ranges only over the rows that state `required`. A row that omits it declares the edge legal and takes no part: it neither conflicts with a demand nor cancels one, however specific it is.
 
@@ -740,7 +751,7 @@ There is no spelling for "legal here, and stop demanding the broader edge". Narr
 
 Traversal composes: an edge joins a walk when any matching row gives it a role. Two rows that can both cover one concrete edge and name different roles fail config load, naming both rows and the `traversal` each writes. Specificity does not resolve such a disagreement, so a concrete row contradicting a wildcard row fails the same way an equally specific pair does. A row that omits `traversal` names no role: it joins no walk and contradicts nothing, however specific it is.
 
-Both walks read these rows, and one engine walk over them produces the chain and the neighbourhood every surface renders: `context`, the TUI Graph view and Relations tab, and the web view. No surface derives the walk for itself, so a row changes what all three show at once. Chain membership is asymmetric for a nested child document that inherits its parent's chain relation: it is a chain descendant of the document its parent links to, and at the same time a root of the forest the Graph view and `context` without an id render. The forest's parent edges read each document's own frontmatter, and such a child declares no chain parent there. A row carrying `traversal = "chain"` makes the edge walk the chain for the triple it names: a source type from `from`, the relationship in `via`, a target type from `to`. No other triple walks on account of that row.
+Both walks read these rows, and one engine walk over them produces the chain and the neighbourhood every surface renders: `context`, the TUI Graph view and Relations tab, and the web view. No surface derives the walk for itself, so a row changes what all three show at once. Chain membership is asymmetric for a nested child document that inherits its parent's chain relation: it is a chain descendant of the document its parent links to, and at the same time a root of the forest the Graph view and `context` without an id render. The forest's parent edges read each document's own frontmatter, and such a child declares no chain parent there. A row carrying `traversal = "chain"` makes the edge walk the chain for the triples it names: a source type from `from`, a relationship from `via`, a target type from `to`. No other triple walks on account of that row.
 
 A row carrying `traversal = "related"` scopes the related neighbourhood to the triple it names in the same way. `context` follows those rows when it walks out from the chain, and the Graph view's `related` column, the TUI Relations tab and the web document page read the same declaration, so all of them follow whatever relationships the config gives the related role rather than a fixed `related-to`. A relation whose target resolves to no document in the store joins neither walk. It has no type for a row to admit, so it appears in no chain and no neighbourhood on any surface, and carries its own broken-link finding instead. A single row with `from = "*"`, `to = "*"`, `via = "related-to"` and `traversal = "related"` gives that relationship the role between every pair of declared types, which is what a blanket `traversal = "related"` on `[[relationships]]` means.
 
@@ -762,13 +773,13 @@ via = "targets"
 traversal = "chain"
 ```
 
-Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. Suppression is also blind to which role the row names: a row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`, and a row with `traversal = "chain"` suppresses its global `traversal = "related"`. The row has assigned that relationship a role, and the two declarations do not combine.
+Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row suppresses the global marker of every relationship its `via` names, and a row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. Suppression is also blind to which role the row names: a row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`, and a row with `traversal = "chain"` suppresses its global `traversal = "related"`. The row has assigned that relationship a role, and the two declarations do not combine.
 
 A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them, plus the `child` of each `parent-child` rule whose `parent` matches. Only a row that names its source types contributes a concrete child type.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 
-The wildcard also has one spelling: the bare string. A list is read as type names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story".
+The wildcard also has one spelling: the bare string. A list is read as names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story", and `via = ["*"]` fails as `to` does.
 
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
 

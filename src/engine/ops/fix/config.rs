@@ -121,7 +121,7 @@ fn translate_to_edges(config: &Config) -> anyhow::Result<Vec<EdgeDef>> {
             name,
             from: TypeSelector::Any,
             to: TypeSelector::Any,
-            via: RelSelector::Named(relationship.name.clone()),
+            via: RelSelector::Named(vec![relationship.name.clone()]),
             required: None,
             traversal: Some(traversal),
         });
@@ -168,7 +168,7 @@ fn edges_from_rule(rule: &ValidationRule, chain: &[&str]) -> Vec<EdgeDef> {
                 name: parent_child_edge_name(name, chain, via),
                 from: TypeSelector::Types(vec![child.clone()]),
                 to: TypeSelector::Types(vec![parent.clone()]),
-                via: RelSelector::Named((*via).to_string()),
+                via: RelSelector::Named(vec![(*via).to_string()]),
                 required: Some(severity.clone()),
                 traversal: Some(Traversal::Chain),
             })
@@ -189,10 +189,12 @@ fn edges_from_rule(rule: &ValidationRule, chain: &[&str]) -> Vec<EdgeDef> {
     }
 }
 
-/// `via` holds one relationship name and never a set, so a rule translated
-/// against two chain relationships becomes two rows, and two rows may not share
-/// a name. A rule that becomes exactly one row keeps its own name, so the
-/// ordinary config's findings go on naming what they named before.
+/// The translation still emits one row per chain relationship, so a rule
+/// translated against two of them becomes two rows, and two rows may not share a
+/// name. A rule that becomes exactly one row keeps its own name, so the ordinary
+/// config's findings go on naming what they named before. (`via` is set-valued
+/// as of ADR-032's second amendment; folding the fan-out into one row that names
+/// the whole set is ITERATION-404's job, and retires this name suffix with it.)
 fn parent_child_edge_name(rule: &str, chain: &[&str], via: &str) -> String {
     match chain {
         [_] => rule.to_string(),
@@ -442,7 +444,7 @@ mod tests {
                 name: "iteration-implements-story".to_string(),
                 from: TypeSelector::Types(vec!["iteration".to_string()]),
                 to: TypeSelector::Types(vec!["story".to_string()]),
-                via: RelSelector::Named("implements".to_string()),
+                via: RelSelector::Named(vec!["implements".to_string()]),
                 required: Some(Severity::Error),
                 traversal: Some(Traversal::Chain),
             }
@@ -469,7 +471,10 @@ mod tests {
 
         let edges = translate_to_edges(&config).expect("translation succeeds");
 
-        assert_eq!(edges[0].via, RelSelector::Named("implements".to_string()));
+        assert_eq!(
+            edges[0].via,
+            RelSelector::Named(vec!["implements".to_string()])
+        );
         assert_eq!(edges[0].required, Some(Severity::Warning));
     }
 
@@ -502,11 +507,11 @@ mod tests {
             vec![
                 (
                     "story-parent-via-implements",
-                    &RelSelector::Named("implements".to_string())
+                    &RelSelector::Named(vec!["implements".to_string()])
                 ),
                 (
                     "story-parent-via-targets",
-                    &RelSelector::Named("targets".to_string())
+                    &RelSelector::Named(vec!["targets".to_string()])
                 ),
             ]
         );
@@ -610,7 +615,7 @@ mod tests {
                 name: "implements-traversal".to_string(),
                 from: TypeSelector::Any,
                 to: TypeSelector::Any,
-                via: RelSelector::Named("implements".to_string()),
+                via: RelSelector::Named(vec!["implements".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Chain),
             }]
@@ -632,7 +637,7 @@ mod tests {
                 name: "related-to-traversal".to_string(),
                 from: TypeSelector::Any,
                 to: TypeSelector::Any,
-                via: RelSelector::Named("related-to".to_string()),
+                via: RelSelector::Named(vec!["related-to".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Related),
             }]
@@ -658,8 +663,8 @@ mod tests {
         assert_eq!(
             vias,
             vec![
-                &RelSelector::Named("implements".to_string()),
-                &RelSelector::Named("related-to".to_string()),
+                &RelSelector::Named(vec!["implements".to_string()]),
+                &RelSelector::Named(vec!["related-to".to_string()]),
             ]
         );
     }

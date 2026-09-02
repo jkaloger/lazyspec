@@ -856,7 +856,7 @@ mod tests {
             name: "iterations-target-milestones".to_string(),
             from: TypeSelector::Types(vec!["iteration".to_string()]),
             to: TypeSelector::Types(vec!["milestone".to_string()]),
-            via: RelSelector::Named("targets".to_string()),
+            via: RelSelector::Named(vec!["targets".to_string()]),
             required: None,
             traversal: Some(Traversal::Chain),
         });
@@ -941,7 +941,7 @@ mod tests {
                 name: "implements-rfcs".to_string(),
                 from,
                 to: TypeSelector::Types(vec!["rfc".to_string()]),
-                via: RelSelector::Named("implements".to_string()),
+                via: RelSelector::Named(vec!["implements".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Chain),
             }],
@@ -1061,7 +1061,7 @@ mod tests {
             name: "anything-relates-to-anything".to_string(),
             from: TypeSelector::Any,
             to: TypeSelector::Any,
-            via: RelSelector::Named("related-to".to_string()),
+            via: RelSelector::Named(vec!["related-to".to_string()]),
             required: None,
             traversal: Some(Traversal::Related),
         });
@@ -1202,7 +1202,7 @@ mod tests {
             name: "anything-relates-to-anything".to_string(),
             from: TypeSelector::Any,
             to: TypeSelector::Any,
-            via: RelSelector::Named("related-to".to_string()),
+            via: RelSelector::Named(vec!["related-to".to_string()]),
             required: None,
             traversal: Some(Traversal::Related),
         });
@@ -1497,7 +1497,7 @@ mod tests {
             name: "anything-implements-anything".to_string(),
             from: TypeSelector::Any,
             to: TypeSelector::Any,
-            via: RelSelector::Named("implements".to_string()),
+            via: RelSelector::Named(vec!["implements".to_string()]),
             required: None,
             traversal: Some(Traversal::Chain),
         });

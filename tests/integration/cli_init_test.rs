@@ -243,7 +243,7 @@ fn init_config_accepts_an_appended_edges_block() {
         edge.to,
         TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
     );
-    assert_eq!(edge.via, RelSelector::Named("implements".to_string()));
+    assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
 
     // Non-empty edges still round-trip out as an `[[edges]]` block, so a config
     // rewrite (TUI settings editor, web view) cannot silently drop them.

@@ -1,7 +1,7 @@
 ---
 title: Let an edge name a set of relationships in via
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-02
 tags: []

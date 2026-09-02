@@ -54,7 +54,7 @@ fn edge(name: &str, from: &str, to: &str, via: &str, traversal: Traversal) -> Ed
         name: name.to_string(),
         from: one(from),
         to: one(to),
-        via: RelSelector::Named(via.to_string()),
+        via: RelSelector::Named(vec![via.to_string()]),
         required: None,
         traversal: Some(traversal),
     }

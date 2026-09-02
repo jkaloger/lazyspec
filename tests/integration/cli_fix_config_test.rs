@@ -640,7 +640,7 @@ fn fix_config_names_the_chain_relationship_on_a_translated_parent_child_row() {
         .iter()
         .find(|e| e.name == "stories-need-rfcs")
         .expect("the rule's row");
-    assert_eq!(row.via.name(), Some("implements"));
+    assert_eq!(row.via.names(), ["implements"]);
     assert_eq!(row.traversal, Some(Traversal::Chain));
     assert_eq!(row.required, Some(Severity::Warning));
 }
@@ -675,7 +675,7 @@ fn fix_config_injects_relationships_and_rules() {
     let stories = by_name("stories-need-rfcs");
     assert_eq!(stories.from.names(), ["story"]);
     assert_eq!(stories.to.names(), ["rfc"]);
-    assert_eq!(stories.via.name(), Some("implements"));
+    assert_eq!(stories.via.names(), ["implements"]);
     assert_eq!(stories.required, Some(Severity::Warning));
 
     let iterations = by_name("iterations-need-stories");
@@ -686,7 +686,7 @@ fn fix_config_injects_relationships_and_rules() {
     let adrs = by_name("adrs-need-relations");
     assert_eq!(adrs.from.names(), ["adr"]);
     assert!(adrs.to.names().is_empty(), "any target type");
-    assert_eq!(adrs.via.name(), None, "any relationship");
+    assert!(adrs.via.names().is_empty(), "any relationship");
     assert_eq!(adrs.required, Some(Severity::Error));
 
     // Existing [[types]] preserved.
@@ -1171,5 +1171,5 @@ url = "https://example.invalid"
         .iter()
         .find(|e| e.name == "stories-track-rfcs")
         .expect("the user's rule became a row");
-    assert_eq!(tracked.via.name(), Some("tracks"));
+    assert_eq!(tracked.via.names(), ["tracks"]);
 }

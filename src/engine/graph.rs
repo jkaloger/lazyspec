@@ -1180,7 +1180,7 @@ mod tests {
                     name: "anything-relates-to-anything".to_string(),
                     from: TypeSelector::Any,
                     to: TypeSelector::Any,
-                    via: RelSelector::Named("related-to".to_string()),
+                    via: RelSelector::Named(vec!["related-to".to_string()]),
                     required: None,
                     traversal: Some(Traversal::Related),
                 }],

@@ -90,7 +90,7 @@ fn blanket_edge(name: &str, via: &str, traversal: Traversal) -> EdgeDef {
         name: name.to_string(),
         from: TypeSelector::Any,
         to: TypeSelector::Any,
-        via: RelSelector::Named(via.to_string()),
+        via: RelSelector::Named(vec![via.to_string()]),
         required: None,
         traversal: Some(traversal),
     }
@@ -139,7 +139,7 @@ fn concrete_pair_translation() -> Config {
         name: name.to_string(),
         from: TypeSelector::Types(vec![from.to_string()]),
         to: TypeSelector::Types(vec![to.to_string()]),
-        via: RelSelector::Named(via.to_string()),
+        via: RelSelector::Named(vec![via.to_string()]),
         required: None,
         traversal: Some(traversal),
     };

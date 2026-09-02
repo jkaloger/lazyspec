@@ -633,7 +633,7 @@ fn update_edge_table(entry: &mut Table, def: &EdgeDef) {
     set_str(entry, "name", &def.name);
     set_type_selector(entry, "from", &def.from);
     set_type_selector(entry, "to", &def.to);
-    set_str(entry, "via", rel_selector_str(&def.via));
+    set_rel_selector(entry, "via", &def.via);
     set_opt_str(entry, "required", def.required.as_ref().map(severity_str));
     set_opt_str(entry, "traversal", def.traversal.map(traversal_str));
 }
@@ -663,10 +663,29 @@ fn set_type_selector(entry: &mut Table, key: &str, selector: &TypeSelector) {
     }
 }
 
-fn rel_selector_str(via: &RelSelector) -> &str {
-    match via {
-        RelSelector::Any => WILDCARD,
-        RelSelector::Named(name) => name,
+// The `via` position, spelled the way [`set_type_selector`] spells a type
+// position: bare wildcard, bare lone name, array only for a genuine set, and an
+// existing list spelling left as it stands. The two are structurally the same
+// because a `via` is a set of relationship names on the same terms `to` is a set
+// of type names (ADR-032) -- they read different selector enums, so unifying
+// them would cost an abstraction over both.
+fn set_rel_selector(entry: &mut Table, key: &str, selector: &RelSelector) {
+    let names = match selector {
+        RelSelector::Any => {
+            set_str(entry, key, WILDCARD);
+            return;
+        }
+        RelSelector::Named(names) => names,
+    };
+    if array_matches(entry.get(key).and_then(Item::as_array), names) {
+        return;
+    }
+    match names.as_slice() {
+        [only] => set_str(entry, key, only),
+        many => {
+            let array: Array = many.iter().map(|name| name.as_str()).collect();
+            set_value(entry, key, Value::Array(array));
+        }
     }
 }
 
@@ -1802,7 +1821,7 @@ repo = "owner/repo"
                 name: "related-to-traversal".to_string(),
                 from: TypeSelector::Any,
                 to: TypeSelector::Any,
-                via: RelSelector::Named("related-to".to_string()),
+                via: RelSelector::Named(vec!["related-to".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Related),
             },
@@ -1854,7 +1873,7 @@ repo = "owner/repo"
                 name: "story-parent".to_string(),
                 from: TypeSelector::Types(vec!["story".to_string()]),
                 to: TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()]),
-                via: RelSelector::Named("implements".to_string()),
+                via: RelSelector::Named(vec!["implements".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Chain),
             }];
@@ -1870,6 +1889,34 @@ repo = "owner/repo"
             reparsed.edges[0].to,
             TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
         );
+    }
+
+    // ADR-032: a `via` naming two relationships is what the migration writes for
+    // a config marking two of them chain, so the writer has to spell a set and
+    // read its own spelling back.
+    #[test]
+    fn an_edge_naming_several_relationships_is_written_as_a_list_and_round_trips() {
+        let via = RelSelector::Named(vec!["implements".to_string(), "related-to".to_string()]);
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "stories-reach-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: via.clone(),
+                required: None,
+                traversal: None,
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(
+            out.contains(r#"via = ["implements", "related-to"]"#),
+            "got: {out}"
+        );
+        assert_eq!(Config::parse(&out).unwrap().edges[0].via, via);
     }
 
     // AC6 at the writer's level: a config already carrying `[[edges]]` is what a

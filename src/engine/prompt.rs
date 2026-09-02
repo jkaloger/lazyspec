@@ -592,7 +592,7 @@ mod tests {
             name: name.to_string(),
             from: TypeSelector::Types(vec![from.to_string()]),
             to: TypeSelector::Types(vec![to.to_string()]),
-            via: RelSelector::Named(via.to_string()),
+            via: RelSelector::Named(vec![via.to_string()]),
             required: None,
             traversal: Some(Traversal::Chain),
         }

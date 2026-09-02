@@ -143,11 +143,19 @@ impl ValidationResult {
 
 /// How an unsatisfied edge's `via` reads in the finding. A wildcard is a config
 /// spelling, not a relationship name, so quoting it back says nothing about what
-/// the document is missing.
+/// the document is missing. A set is a disjunction (ADR-032), so it reads as the
+/// target set beside it does: any one member satisfies the row.
 fn via_phrase(via: &RelSelector) -> String {
+    let quoted = |name: &String| format!("\"{name}\"");
     match via {
         RelSelector::Any => "any relationship".to_string(),
-        RelSelector::Named(name) => format!("\"{name}\""),
+        RelSelector::Named(names) => match names.as_slice() {
+            [only] => quoted(only),
+            many => format!(
+                "one of: {}",
+                many.iter().map(quoted).collect::<Vec<_>>().join(", ")
+            ),
+        },
     }
 }
 
@@ -2201,7 +2209,7 @@ mod edge_tests {
                 "story".to_string(),
                 "bug".to_string(),
             ]),
-            via: RelSelector::Named("implements".to_string()),
+            via: RelSelector::Named(vec!["implements".to_string()]),
             required,
             traversal: None,
         }
@@ -2572,6 +2580,76 @@ mod edge_tests {
         );
     }
 
+    /// A row reached by either of two relationships (ADR-032): the shape the
+    /// migration gives a rule translated against a config marking two
+    /// relationships chain.
+    fn iterations_reach_stories_either_way() -> EdgeDef {
+        EdgeDef {
+            name: "iterations-implement-work".to_string(),
+            from: TypeSelector::Types(vec!["iteration".to_string()]),
+            to: TypeSelector::Types(vec!["story".to_string()]),
+            via: RelSelector::Named(vec!["implements".to_string(), "targets".to_string()]),
+            required: Some(Severity::Error),
+            traversal: None,
+        }
+    }
+
+    // ADR-032: a `via` set is a disjunction, so either member satisfies the row.
+    // Two rows apiece would have been a conjunction, demanding both links.
+    #[test]
+    fn either_member_of_a_via_set_satisfies_the_row() {
+        for rel_type in ["implements", "targets"] {
+            let store = store_from(vec![
+                doc("docs/stories/STORY-001.md", "story", "STORY-001", vec![]),
+                doc(
+                    "docs/iterations/ITERATION-001.md",
+                    "iteration",
+                    "ITERATION-001",
+                    vec![rel(rel_type, "STORY-001")],
+                ),
+            ]);
+
+            let result = validate_full(
+                &store,
+                &config_with_edge(iterations_reach_stories_either_way()),
+            );
+
+            assert!(
+                unsatisfied_edges(&result).is_empty(),
+                "a {rel_type} link must satisfy the set-valued row, got: {:?}",
+                unsatisfied_edges(&result)
+            );
+        }
+    }
+
+    // The set is one demand, not one per member, so a document carrying neither
+    // relationship is told once.
+    #[test]
+    fn a_document_carrying_no_member_of_a_via_set_is_reported_once() {
+        let store = store_from(vec![
+            doc("docs/stories/STORY-001.md", "story", "STORY-001", vec![]),
+            doc(
+                "docs/iterations/ITERATION-001.md",
+                "iteration",
+                "ITERATION-001",
+                vec![rel("related-to", "STORY-001")],
+            ),
+        ]);
+
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_reach_stories_either_way()),
+        );
+
+        assert_eq!(
+            unsatisfied_edges(&result).len(),
+            1,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+    }
+
     /// The one finding an edge produces against a lone iteration carrying no
     /// relation, rendered.
     fn rendered_finding_for(edge: EdgeDef) -> String {
@@ -2636,6 +2714,21 @@ mod edge_tests {
         );
     }
 
+    // A set-valued `via` is satisfied by any one of its members, so the finding
+    // has to name them all -- naming one would send the reader to add a link the
+    // row does not single out. The target set beside it reads the same way.
+    #[test]
+    fn a_via_set_renders_as_the_disjunction_it_is() {
+        assert_eq!(
+            rendered_finding_for(iterations_reach_stories_either_way()),
+            format!(
+                "unsatisfied edge [iterations-implement-work]: {} \
+                 (iteration needs one of: \"implements\", \"targets\" to one of: story)",
+                iteration_path()
+            )
+        );
+    }
+
     // A finding is about one document, and that document has one type. Naming
     // every type the row's `from` lists would read "iteration, story needs
     // ..." against a file that is only ever one of them.
@@ -2695,14 +2788,14 @@ mod edge_tests {
                 "iterations-implement-something",
                 types(&["iteration"]),
                 TypeSelector::Any,
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 Some(Severity::Warning),
             ),
             edge(
                 "iterations-implement-stories",
                 types(&["iteration"]),
                 types(&["story"]),
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 Some(Severity::Error),
             ),
         ]);
@@ -2745,7 +2838,7 @@ mod edge_tests {
                 "iterations-may-implement-stories",
                 types(&["iteration"]),
                 types(&["story"]),
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 None,
             ),
             edge(
@@ -2783,14 +2876,14 @@ mod edge_tests {
                 "iterations-implement-stories",
                 types(&["iteration"]),
                 types(&["story"]),
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 Some(Severity::Error),
             ),
             edge(
                 "iterations-target-rfcs",
                 types(&["iteration"]),
                 types(&["rfc"]),
-                RelSelector::Named("targets".to_string()),
+                RelSelector::Named(vec!["targets".to_string()]),
                 Some(Severity::Warning),
             ),
         ]);
@@ -2815,14 +2908,14 @@ mod edge_tests {
                 "work-implements-something",
                 types(&["iteration", "adr"]),
                 TypeSelector::Any,
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 Some(Severity::Error),
             ),
             edge(
                 "adrs-implement-rfcs",
                 types(&["adr"]),
                 types(&["rfc"]),
-                RelSelector::Named("implements".to_string()),
+                RelSelector::Named(vec!["implements".to_string()]),
                 Some(Severity::Warning),
             ),
         ]);

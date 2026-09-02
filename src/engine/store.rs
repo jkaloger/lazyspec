@@ -842,7 +842,7 @@ pub(crate) mod test_support {
                 name: "stories-mention-rfcs".to_string(),
                 from: TypeSelector::Types(vec!["story".to_string()]),
                 to: TypeSelector::Types(vec!["rfc".to_string()]),
-                via: RelSelector::Named("mentions".to_string()),
+                via: RelSelector::Named(vec!["mentions".to_string()]),
                 required: None,
                 traversal: Some(Traversal::Related),
             }],
