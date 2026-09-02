@@ -1,7 +1,7 @@
 ---
 title: Reject an edge edit in the loader's own words
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
