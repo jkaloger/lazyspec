@@ -15,7 +15,7 @@ Read the target type's config from `lazyspec config --json` before creating anyt
 <NEVER>
 - Do NOT hand-edit document files to create or link them. Use `lazyspec create` (seed with `--body`) and `lazyspec link`. To change body content, use `lazyspec update <id> --body` -- for EVERY store, filesystem included. (Scaffold itself writes no body; it hands that back to the human.)
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>

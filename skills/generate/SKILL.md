@@ -15,7 +15,7 @@ Generate writes the full body, then routes to /review -- it does not self-approv
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>

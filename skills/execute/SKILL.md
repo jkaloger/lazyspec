@@ -22,7 +22,7 @@ Never `sleep` to wait for anything. If you are waiting, you are doing it wrong.
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create`, `lazyspec link`, `lazyspec update <id> --body`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 - Do NOT do work the document did not ask for. Out-of-scope changes are a review finding against you.
 </NEVER>
 

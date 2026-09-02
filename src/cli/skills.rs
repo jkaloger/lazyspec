@@ -220,6 +220,47 @@ mod tests {
         );
     }
 
+    /// `configure-type` and `create-audit` ship only from `skills/` on disk --
+    /// they are absent from `EMBEDDED_SKILLS`, so nothing here reads them.
+    #[test]
+    fn embedded_skills_state_the_pipeline_rule_identically_and_never_reach_configure_type_or_create_audit(
+    ) {
+        const STANDING_RULE: &str = "- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.";
+        const CARRIERS: [&str; 7] = [
+            "advance/SKILL.md",
+            "co-write/SKILL.md",
+            "execute/SKILL.md",
+            "generate/SKILL.md",
+            "lazy/SKILL.md",
+            "review/SKILL.md",
+            "scaffold/SKILL.md",
+        ];
+
+        let mut carried = Vec::new();
+        let mut embedded = Vec::new();
+        for (path, contents) in embedded_skill_set() {
+            let key = path.to_string_lossy().into_owned();
+            embedded.push(key.clone());
+            if !contents.contains("Do NOT skip the workflow pipeline") {
+                continue;
+            }
+            assert!(
+                contents.contains(STANDING_RULE),
+                "{key} states the pipeline rule in its own words; every copy is the one wording naming `edges`"
+            );
+            carried.push(key);
+        }
+        carried.sort();
+        assert_eq!(carried, CARRIERS, "the set of skills carrying the standing rule changed; the rule must be present in each, not merely consistent");
+
+        for out_of_reach in ["configure-type/SKILL.md", "create-audit/SKILL.md"] {
+            assert!(
+                !embedded.iter().any(|key| key == out_of_reach),
+                "{out_of_reach} is embedded now, so this test's name no longer tells the truth"
+            );
+        }
+    }
+
     #[test]
     fn runtime_claude_skips_agents_md() {
         let dir = tempdir().unwrap();

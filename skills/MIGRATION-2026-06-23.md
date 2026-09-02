@@ -28,7 +28,7 @@ write-rfc  create-story  create-iteration  build  review-iteration  plan-work  r
 
 | Old skill          | New skill                             | Notes                                                                                                                                  |
 | ------------------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `plan-work`        | `/lazy`                               | Entry router. Reads the DAG + your position, dispatches the right verb, stops at type boundaries.                                      |
+| `plan-work`        | `/lazy`                               | Entry router. Reads the DAG + your position, dispatches the right verb, stops at type boundaries (the `chain` rows in `edges`).        |
 | `write-rfc`        | `/scaffold`, `/co-write`, `/generate` | Authoring is now three ceiling-ordered verbs (`scaffold < co-write < generate`); the type (`rfc`) is a parameter.                      |
 | `create-story`     | `/scaffold`, `/co-write`, `/generate` | Same authoring verbs, `type = story`. The per-type intent and section guidance live in the type's template, not the skill.             |
 | `create-iteration` | `/scaffold`, `/co-write`, `/generate` | Same authoring verbs, `type = iteration`.                                                                                              |
@@ -45,7 +45,7 @@ Three shifts come with the new skills, all driven by config rather than baked in
 
 **Authorship is a ceiling.** Each type declares `authorship` in config (`human`, `assisted`, `generated`). It caps the highest authoring verb permitted: `human` → `/scaffold` only, `assisted` → up to `/co-write`, `generated` → up to `/generate`. A verb above the ceiling is refused; anything at or below is always allowed, so you can pick a more manual mode on any type. The old skills had no such ceiling and pushed toward generating.
 
-**The router stops at type boundaries.** `/lazy` advances within the current document automatically, but never auto-creates a child of a different type — even when a gate has cleared. Crossing a type boundary is always human-initiated. This is the planning→delivery handoff the old build-eager skills lacked.
+**The router stops at type boundaries.** `/lazy` advances within the current document automatically, but never auto-creates a child of a different type — even when a gate has cleared. Crossing a type boundary is always human-initiated. This is the planning→delivery handoff the old build-eager skills lacked. A boundary is a `traversal: chain` row in the config's `edges` table and nothing else — `parent_type` declares none.
 
 **Status is a per-type DAG.** Status is now a validated string over each type's declared `lifecycle` (states + edges). `update --status` rejects any transition not on a declared edge. Run `fix --config` on a pre-RFC-048 project to inject the default lifecycle DAG into the existing config.
 

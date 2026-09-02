@@ -15,7 +15,7 @@ Read the target type's config from `lazyspec config --json` before creating anyt
 <NEVER>
 - Do NOT hand-edit document files to create or link them. Use `lazyspec create` (seed with `--body`) and `lazyspec link`. To change body content, use `lazyspec update <id> --body` -- for EVERY store, filesystem included. (Scaffold itself writes no body; it hands that back to the human.)
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>
@@ -63,7 +63,7 @@ Co-write proposes a draft for human editing; it does not finalise a body unilate
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>
@@ -121,7 +121,7 @@ Generate writes the full body, then routes to /review -- it does not self-approv
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>
@@ -200,7 +200,7 @@ Advance writes status only. It never creates a child document, even when the mov
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <GITHUB-ISSUES-DOCUMENTS>
@@ -258,7 +258,7 @@ Never `sleep` to wait for anything. If you are waiting, you are doing it wrong.
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create`, `lazyspec link`, `lazyspec update <id> --body`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 - Do NOT do work the document did not ask for. Out-of-scope changes are a review finding against you.
 </NEVER>
 
@@ -543,7 +543,7 @@ Do NOT review landed code here. Route to /review-work, which carries the convent
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <GITHUB-ISSUES-DOCUMENTS>

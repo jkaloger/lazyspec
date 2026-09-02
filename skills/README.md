@@ -8,6 +8,8 @@ The verbs are **DAG-agnostic**: each one acts on a document *type* passed as a p
 
 `/lazy` is the entry router. It reads the configured DAG (`config --json`), what exists (`status --json`), and the chain around your position (`context --json`), then dispatches the right verb. It advances within the current document automatically, but **stops at type boundaries** -- it never auto-creates a child of a different type, even when a gate has cleared. Crossing a type boundary is always human-initiated.
 
+A **type boundary** is a `traversal: chain` row in `config --json`'s `edges` table and nothing else -- a type's `parent_type` declares none, and no other key does either. A row reads child-to-parent, so the child types of the document you are on are the `from` values of the rows whose `to` admits its type.
+
 From there `/lazy` dispatches:
 
 - **Authoring** (ceiling-ordered `scaffold < co-write < generate`): a type's `authorship` value is the ceiling -- the highest authoring verb permitted.
@@ -40,7 +42,7 @@ Two lines keep the work verbs from overlapping:
 
 | Skill         | Description                                                                                       |
 | ------------- | ------------------------------------------------------------------------------------------------- |
-| `lazy`        | Entry router. Reads the DAG and your position from config/status/context, dispatches the right verb, stops at type boundaries |
+| `lazy`        | Entry router. Reads the DAG and your position from config/status/context, dispatches the right verb, stops at type boundaries (the `chain` rows in `edges`) |
 | `scaffold`    | Create a document's file, frontmatter, and links; hand the body back to the human (authorship floor) |
 | `co-write`    | Propose a draft body, the human edits, iterate; refuses for `human`-ceiling types                 |
 | `generate`    | Write the full body from context, then request review; permitted only for `generated`-ceiling types |
