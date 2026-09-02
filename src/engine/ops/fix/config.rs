@@ -206,7 +206,8 @@ fn translate_to_edges(
             bail!(
                 "relationship \"{}\" has a traversal marker whose edge would be named \"{name}\", \
                  which the translated rule of that name already uses: rename that rule before \
-                 migrating, or one of the two rows would be dropped",
+                 migrating, or the migrated config would declare two rows under one name and \
+                 fail to load",
                 relationship.name,
             );
         }

@@ -571,13 +571,10 @@ fn remove_rules(doc: &mut DocumentMut) {
 /// it: `fix --config`, translating a retired `[[rules]]` declaration (ADR-032),
 /// and a settings save carrying an edited row (STORY-260).
 ///
-/// Reconciliation is by `name` (see [`reconcile_array_of_tables`]), and nothing
-/// at load enforces that `name` is unique -- `Config::parse`'s edge loop checks
-/// `via`'s presence, unknown types and unknown relationships, and never checks
-/// for duplicates, so two rows sharing a name are a config the loader accepts
-/// and this writer cannot address. Filling that hole is a load-time check in
-/// that loop, not a workaround here; until it lands, anything seeding a row has
-/// to pick a name no other row holds.
+/// Reconciliation is by `name` (see [`reconcile_array_of_tables`]), which
+/// `Config::parse` refuses to let two rows share, so a loaded config addresses
+/// each row unambiguously. A settings buffer mid-rename can still hold two: it
+/// renders as two blocks and the save's re-parse refuses it (STORY-260).
 fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
     let declared = doc.contains_key("edges");
     if !declared {
@@ -689,12 +686,18 @@ fn set_rel_selector(entry: &mut Table, key: &str, selector: &RelSelector) {
 }
 
 // Reconcile an `[[...]]` array-of-tables to `buffer` entries by IDENTITY (the
-// entry's `name`, unique per collection). Each surviving source table is updated
-// in place via `update` (preserving its decor/comments); deleted source tables
-// are removed by retaining only names still in the buffer (a middle delete drops
-// only that one table, others keep their comments); new buffer entries (names not
-// in the source) are appended as fresh tables. A rename (buffer name absent from
+// entry's `name`). Each surviving source table is updated in place via `update`
+// (preserving its decor/comments); deleted source tables are removed by
+// retaining only names still in the buffer (a middle delete drops only that one
+// table, others keep their comments); new buffer entries (names not in the
+// source) are appended as fresh tables. A rename (buffer name absent from
 // source) is treated as remove-old + append-new.
+//
+// A loadable config gives each entry a distinct name, but a live settings buffer
+// is mid-edit and can hold two under one name, so a source table is claimed by
+// at most one buffer entry: the second entry gets a fresh table rather than
+// overwriting the first's. That renders a buffer the loader refuses instead of
+// silently rendering one row fewer than the buffer holds.
 fn reconcile_array_of_tables<T>(
     tables: &mut ArrayOfTables,
     buffer: &[T],
@@ -706,19 +709,28 @@ fn reconcile_array_of_tables<T>(
         let name = table.get("name").and_then(Item::as_str);
         name.is_some_and(|n| buffer_names.contains(&n))
     });
+    let mut claimed = vec![false; tables.len()];
     for def in buffer {
         let name = name_of(def);
-        let existing = tables
-            .iter_mut()
-            .find(|t| t.get("name").and_then(Item::as_str) == Some(name));
-        match existing {
-            Some(table) => update(table, def),
-            None => {
-                let mut table = Table::new();
-                update(&mut table, def);
-                tables.push(table);
-            }
-        }
+        let unclaimed = tables.iter().enumerate().find_map(|(index, table)| {
+            let free = !claimed[index];
+            let matches = table.get("name").and_then(Item::as_str) == Some(name);
+            (free && matches).then_some(index)
+        });
+        let Some(index) = unclaimed else {
+            let mut table = Table::new();
+            update(&mut table, def);
+            tables.push(table);
+            claimed.push(true);
+            continue;
+        };
+        claimed[index] = true;
+        update(
+            tables
+                .get_mut(index)
+                .expect("the index came from iterating the same tables"),
+            def,
+        );
     }
 }
 
@@ -2000,6 +2012,31 @@ tone = "terse"
             "got: {out}"
         );
         Config::parse(&out).expect("the rendered config strict-loads");
+    }
+
+    // A buffer holding two rows under one name is not loadable, but the settings
+    // panel reaches it mid-edit -- one keystroke into renaming a row. Rendering
+    // it as a single block would answer that edit by dropping a declared row;
+    // rendering both is what lets the loader refuse it and the panel say so.
+    #[test]
+    fn two_buffer_rows_sharing_a_name_each_render_their_own_block() {
+        let buffer = {
+            let mut c = Config::parse(COMMENTED_EDGES_SRC).unwrap();
+            c.edges[1].name = c.edges[0].name.clone();
+            c
+        };
+
+        let out = write_config_in_place(COMMENTED_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            out.matches("[[edges]]").count(),
+            2,
+            "both buffer rows are rendered: {out}"
+        );
+        let err = Config::parse(&out)
+            .expect_err("the rendered config does not load")
+            .to_string();
+        assert!(err.contains("stories-need-rfcs"), "got: {err}");
     }
 
     /// A config whose DAG has yet to be declared, ending in a section that has

@@ -111,6 +111,35 @@ impl EdgeDef {
     }
 }
 
+/// ADR-031 keeps `name` mandatory on an edge so an error can identify a row by
+/// it, and `config_write` addresses rows by name when it reconciles `[[edges]]`.
+/// Neither reader survives a name that is empty or one two rows share, so both
+/// are refused here rather than worked around at either.
+fn reject_edge_name_collisions(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        if edge.name.is_empty() {
+            bail!(
+                "[[edges]] row {} declares an empty `name`; a row is addressed by its name, so \
+                 give it one",
+                index + 1
+            );
+        }
+        let duplicate = edges[index + 1..]
+            .iter()
+            .position(|other| other.name == edge.name);
+        if let Some(offset) = duplicate {
+            bail!(
+                "[[edges]] rows {} and {} are both named \"{}\"; a row is addressed by its name, \
+                 so rename one of them",
+                index + 1,
+                index + offset + 2,
+                edge.name
+            );
+        }
+    }
+    Ok(())
+}
+
 /// ADR-031: requiredness comes from the most specific matching row that states
 /// it, so two rows that can match one concrete edge at equal specificity and
 /// state *different* severities have no resolution. A row that omits `required`
@@ -1641,11 +1670,7 @@ impl Config {
                 );
             }
         }
-        // Nothing above refuses two rows sharing a `name`, even though ADR-031
-        // keeps `name` required so an error can identify a row by it -- and
-        // `config_write`'s reconciliation of `[[edges]]` addresses rows by name,
-        // so a duplicate is a config this loader accepts and that writer cannot
-        // address. The check belongs here, beside the other per-row refusals.
+        reject_edge_name_collisions(&edges)?;
         reject_requiredness_ties(&edges)?;
         reject_traversal_disagreements(&edges)?;
 
@@ -2680,6 +2705,59 @@ via = ["*"]
             !err.contains("not declared in [[relationships]]"),
             "must not send the reader to [[relationships]]: {err}"
         );
+    }
+
+    // ADR-031 keeps `name` mandatory so an error can identify a row by it, and
+    // `config_write` addresses rows by name when it reconciles `[[edges]]`.
+    // Two rows sharing one leave both readers unable to say which row they mean.
+    #[test]
+    fn two_edges_sharing_a_name_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+
+[[edges]]
+name = "stories-implement-rfcs"
+from = "rfc"
+to = "story"
+via = "related-to"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("stories-implement-rfcs"),
+            "names the duplicated name: {err}"
+        );
+        assert!(
+            err.contains('1') && err.contains('2'),
+            "names both rows: {err}"
+        );
+    }
+
+    // An empty `name` names the row nothing, so every message about it and every
+    // write back to it addresses the empty string.
+    #[test]
+    fn edge_with_an_empty_name_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = ""
+from = "story"
+to = "rfc"
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("name"), "names the offending key: {err}");
+        assert!(err.contains("empty"), "says what is wrong with it: {err}");
     }
 
     #[test]

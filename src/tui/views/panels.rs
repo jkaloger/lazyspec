@@ -2578,7 +2578,7 @@ fn settings_lines_inner(
     // override entry-list below it. Everything else (including drilled collections)
     // is a pure field-view derived from `settings_fields`.
     if COLLECTIONS.contains(&category) && drill.is_none() {
-        return settings_entry_names(category, config)
+        return entry_list_rows(category, config)
             .into_iter()
             .enumerate()
             .map(|(i, name)| {
@@ -2594,14 +2594,9 @@ fn settings_lines_inner(
             .map(field_line)
             .collect();
         if drill.is_none() {
-            let names = settings_entry_names(category, config);
-            if names.is_empty() {
-                lines.push("(no overrides configured)".to_string());
-            } else {
-                for (i, name) in names.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, name));
-                }
+            for (i, name) in entry_list_rows(category, config).iter().enumerate() {
+                let pfx = if i == entry { "▸ " } else { "  " };
+                lines.push(format!("{}{}", pfx, name));
             }
         }
         return lines;
@@ -2629,6 +2624,24 @@ fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
         .get(idx)
         .cloned()
         .unwrap_or_default()
+}
+
+/// The rows an undrilled collection category lists: its entry names, or -- when
+/// it declares none, which every one of these categories permits -- one row
+/// naming what is missing and the key that adds it, since a blank pane names
+/// neither.
+fn entry_list_rows(category: usize, config: &Config) -> Vec<String> {
+    let names = settings_entry_names(category, config);
+    if !names.is_empty() {
+        return names;
+    }
+    let missing = match category {
+        1 => "document types",
+        2 => "relationships",
+        3 => "edges",
+        _ => "certification overrides",
+    };
+    vec![format!("(no {missing} configured -- press n to add one)")]
 }
 
 pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
@@ -2750,12 +2763,11 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
                 rows.push(Row::new([Cell::from(field_line(fld))]));
             }
         }
-        let names = settings_entry_names(app.settings_category, config);
-        if app.settings_category == 6 && names.is_empty() {
-            rows.push(Row::new([Cell::from("(no overrides configured)")]));
-        } else {
-            rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
-        }
+        rows.extend(
+            entry_list_rows(app.settings_category, config)
+                .into_iter()
+                .map(|n| Row::new([Cell::from(n)])),
+        );
         // cat 6's leading `normalize` field offsets the entry cursor by one; other
         // collections select the entry row directly.
         let selected = if app.settings_category == 6 {
@@ -4071,7 +4083,12 @@ mod tests {
         let config = Config::default();
         let lines = settings_lines_inner(6, 0, None, &config);
         assert!(lines.iter().any(|l| l.starts_with("normalize:")));
-        assert!(lines.contains(&"(no overrides configured)".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("no certification overrides")),
+            "got: {lines:?}"
+        );
     }
 
     #[test]
@@ -4403,6 +4420,49 @@ max_expanded_height = 8
         assert!(settings_fields(3, 0, None, &edges_fixture()).is_empty());
     }
 
+    // A legal config can declare no edges, and none of the other collections
+    // has to be populated either, so the pane says what is missing and names
+    // the key that adds one rather than rendering blank.
+    #[test]
+    fn an_empty_entry_list_names_what_is_missing_and_how_to_add_it() {
+        let mut empty = Config::default();
+        empty.documents.types.clear();
+        empty.relationships.clear();
+        empty.edges.clear();
+        empty.certification.overrides.clear();
+
+        for (category, missing) in [
+            (1, "document types"),
+            (2, "relationships"),
+            (3, "edges"),
+            (6, "overrides"),
+        ] {
+            let rows = entry_list_rows(category, &empty);
+            assert_eq!(rows.len(), 1, "cat {category} lists nothing: {rows:?}");
+            assert!(
+                rows[0].contains(missing),
+                "cat {category} names what is missing: {}",
+                rows[0]
+            );
+            assert!(
+                rows[0].contains("press n"),
+                "cat {category} names the key that adds one: {}",
+                rows[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_populated_entry_list_is_its_entry_names_alone() {
+        let rows = entry_list_rows(3, &edges_fixture());
+
+        assert_eq!(rows.len(), edges_fixture().edges.len());
+        assert!(
+            !rows.iter().any(|row| row.contains("press n")),
+            "no hint where there are rows: {rows:?}"
+        );
+    }
+
     #[test]
     fn settings_fields_cert_normalize_top_is_toggle() {
         let config = Config::default();
@@ -4415,13 +4475,14 @@ max_expanded_height = 8
 
     #[test]
     fn settings_fields_and_lines_agree_for_field_view() {
-        // Two drilled collections (a doc type, an edge), a scalar category, and
-        // one past the last category.
-        let cases: [(usize, Option<usize>, Config); 4] = [
+        // Two drilled collections (a doc type, an edge), the first and last
+        // scalar categories, and one past the last category.
+        let cases: [(usize, Option<usize>, Config); 5] = [
             (0, None, Config::default()),
             (1, Some(0), Config::default()),
             (3, Some(0), edges_fixture()),
             (8, None, Config::default()),
+            (9, None, Config::default()),
         ];
         for (cat, drill, config) in cases {
             let fields = settings_fields(cat, 0, drill, &config);

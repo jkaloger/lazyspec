@@ -189,17 +189,6 @@ fn optional_variant<T>(variant: &str, parse: fn(&str) -> Option<T>) -> Option<Op
     parse(variant).map(Some)
 }
 
-/// The raw read-back of an edge type position: the wildcard as the `*` its
-/// author wrote, a set as its bare names. Unlike `TypeSelector::spelling` a
-/// multi-name set carries no brackets, so it reads as the value the editor holds
-/// rather than as a rendered list.
-fn type_position_raw(selector: &TypeSelector) -> String {
-    match selector {
-        TypeSelector::Any => WILDCARD.to_string(),
-        TypeSelector::Types(names) => names.join(", "),
-    }
-}
-
 /// The rows the target-type picker shows as selected. `TypeSelector::Any` names
 /// no type, but the picker offers `*` as a choice alongside the declared names,
 /// so the wildcard seeds as that row -- and the exclusivity `SetPicker` enforces
@@ -211,8 +200,10 @@ fn type_selector_members(selector: &TypeSelector) -> Vec<String> {
     }
 }
 
-/// [`type_position_raw`] for the `via` position, a relationship set on the same
-/// terms (ADR-032).
+/// The raw read-back of the `via` position, seeding its comma editor: the
+/// wildcard as the `*` its author wrote, a set as its bare names. Unlike
+/// `RelSelector::spelling` a multi-name set carries no brackets, so it reads as
+/// the value the editor holds rather than as a rendered list.
 fn rel_position_raw(selector: &RelSelector) -> String {
     match selector {
         RelSelector::Any => WILDCARD.to_string(),
@@ -220,9 +211,9 @@ fn rel_position_raw(selector: &RelSelector) -> String {
     }
 }
 
-/// A comma-editor commit for an edge type position. `["*"]` is the wildcard and
-/// not a type named `*`: the editor seeds from the position's own spelling, so
-/// confirming an untouched wildcard has to give the wildcard back.
+/// A picker commit for an edge type position. `["*"]` is the wildcard and not a
+/// type named `*`: [`type_selector_members`] seeds the wildcard as that one row,
+/// so committing an untouched wildcard has to give the wildcard back.
 fn type_selector_from(names: Vec<String>) -> TypeSelector {
     if names == [WILDCARD] {
         return TypeSelector::Any;
@@ -234,8 +225,9 @@ fn type_selector_from(names: Vec<String>) -> TypeSelector {
 /// names would keep the user inside the set strict load accepts, but `via` is a
 /// disjunction over its members (ADR-032) and a single-position cycler cannot
 /// spell one: it would silently narrow `via = ["a", "b"]` to one name on the
-/// next press. So `via` shares the comma editor its two neighbours use, and
-/// `EnumCycle`'s `&'static` variant carrier is left alone.
+/// next press. So `via` keeps the comma editor -- unlike the two type positions
+/// beside it, which take the picker -- and `EnumCycle`'s `&'static` variant
+/// carrier is left alone.
 fn rel_selector_from(names: Vec<String>) -> RelSelector {
     if names == [WILDCARD] {
         return RelSelector::Any;
@@ -269,11 +261,9 @@ fn empty_edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<Str
     Some(format!("`{position}` must name a {kind}, or `*` for any"))
 }
 
-/// An `[[edges]]` name no row in `edges` already holds. `write_edges`
-/// reconciles rows by `name` and nothing at load rejects a duplicate, so two
-/// rows sharing one name are a config the loader accepts and the writer cannot
-/// address (ITERATION-388) -- which is what a constant seed name would produce
-/// on the second `n`.
+/// An `[[edges]]` name no row in `edges` already holds. A row is addressed by
+/// its `name` -- `Config::parse` refuses two rows sharing one -- so a constant
+/// seed name would make the second `n` seed a row that cannot be saved.
 fn unused_edge_name(edges: &[EdgeDef]) -> String {
     let taken = |name: &str| edges.iter().any(|edge| edge.name == name);
     if !taken("edge") {
@@ -1133,8 +1123,10 @@ impl App {
                 .get(*index)
                 .map(|e| match key {
                     EdgeKey::Name => e.name.clone(),
-                    EdgeKey::From => type_position_raw(&e.from),
-                    EdgeKey::To => type_position_raw(&e.to),
+                    // The two type positions take the picker, which seeds from
+                    // `type_selector_members`, so nothing routes them to the
+                    // text input this seeds.
+                    EdgeKey::From | EdgeKey::To => String::new(),
                     EdgeKey::Via => rel_position_raw(&e.via),
                     // An optional enum's raw string has to be a member of its
                     // variant list, so absence reads back as the unset entry
@@ -1459,8 +1451,9 @@ impl App {
     /// Commit the active picker into the buffer at its `path`. A status-bar zone
     /// writes `Some(order)` -- an empty list included, which is an explicit clear
     /// distinct from an untouched zone's `None`. An edge type position refuses the
-    /// empty set in the comma editor's words and stays open, because a position
-    /// that names nothing matches nothing and the loader does not catch it.
+    /// empty set and leaves the picker open -- in the same words `via`'s comma
+    /// editor refuses it -- because a position that names nothing matches nothing
+    /// and the loader does not catch it.
     pub fn settings_commit_picker(&mut self) {
         let Some(picker) = self.settings_set_picker.take() else {
             return;
@@ -1897,11 +1890,12 @@ impl App {
     /// the one that message is about.
     ///
     /// Each arm reads a predicate the engine already exposes -- the selectors'
-    /// `names()` and `EdgeDef::overlaps`/`specificity` -- rather than re-deriving
-    /// a check, because a re-derivation here would be the second spelling
-    /// STORY-260 AC4 forbids, merely relocated from the message to the
-    /// attribution. Every arm is tested against a real refused save for that
-    /// reason: a divergence from the loader has to fail, not go unnoticed.
+    /// `names()` and `EdgeDef::overlaps`/`specificity` -- or, for `name`, the
+    /// field itself, rather than re-deriving a check: a re-derivation here would
+    /// be the second spelling STORY-260 AC4 forbids, merely relocated from the
+    /// message to the attribution. Every arm is tested against a real refused
+    /// save for that reason: a divergence from the loader has to fail, not go
+    /// unnoticed.
     fn first_edge_violation(&self) -> Option<(usize, EdgeKey)> {
         let buf = &self.settings_buffer;
         let declared_type = |name: &String| buf.type_by_name(name).is_some();
@@ -1934,6 +1928,21 @@ impl App {
             // that keeps the position the designer just declared.
             if edge.required.is_some() && edge.from == TypeSelector::Any {
                 return Some((row, EdgeKey::Required));
+            }
+        }
+
+        // A `name` refusal names its own culprit: the empty one for a cleared
+        // name, and for a duplicate the LATER row, since the earlier row held
+        // the name first and renaming the row just edited leaves it alone.
+        for (row, edge) in buf.edges.iter().enumerate() {
+            if edge.name.is_empty() {
+                return Some((row, EdgeKey::Name));
+            }
+            let duplicate = buf.edges[row + 1..]
+                .iter()
+                .position(|other| other.name == edge.name);
+            if let Some(offset) = duplicate {
+                return Some((row + offset + 1, EdgeKey::Name));
             }
         }
 
@@ -3646,7 +3655,7 @@ impl App {
         expanded.sort();
 
         // Set picker inner state (pane / cursor / both lists), or None.
-        let zone = self.settings_set_picker.as_ref().map(|p| {
+        let set_picker = self.settings_set_picker.as_ref().map(|p| {
             format!(
                 "{:?}|{}|{:?}|{:?}",
                 p.pane, p.cursor, p.selected, p.available
@@ -3691,7 +3700,7 @@ impl App {
                 "search_query_len={} search_selected={} ",
                 "settings_editing={} settings_edit_input_len={} settings_dirty={} ",
                 "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
-                "settings_quit_prompt.active={} zone={:?} variant={:?} ",
+                "settings_quit_prompt.active={} set_picker={:?} variant={:?} ",
                 "scaffold_offer={} settings_footer_error={} settings_edit_error={} ",
                 "graph_sort_col={} graph_sort_rev={} {}",
             ),
@@ -3752,7 +3761,7 @@ impl App {
             self.settings_entry,
             self.settings_drill,
             self.settings_quit_prompt.active,
-            zone,
+            set_picker,
             variant,
             self.settings_scaffold_offer.is_some(),
             self.settings_footer_error.is_some(),
@@ -7013,8 +7022,8 @@ mod tests {
         assert_eq!(app.settings_focused_raw(), "a-relates-a");
     }
 
-    // A type position is a set or the wildcard, and the comma editor's seed has
-    // to round-trip both -- `*` back to the wildcard, names back to the set.
+    // A type position is a set or the wildcard, and the picker's commit has to
+    // land both -- names as the set, `*` as the wildcard.
     #[test]
     fn edge_type_position_write_round_trips_set_and_wildcard() {
         let mut app = edge_field_app(config_one_edge(), "to");
@@ -7028,11 +7037,6 @@ mod tests {
             app.settings_buffer.edges[0].to,
             TypeSelector::Types(vec!["story".to_string(), "bug".to_string()])
         );
-        assert_eq!(
-            app.settings_focused_raw(),
-            "story, bug",
-            "the raw seed is what the comma editor splits, so it carries no list brackets"
-        );
 
         app.settings_write(&to, SettingsValue::List(vec!["*".to_string()]));
         assert_eq!(
@@ -7040,7 +7044,6 @@ mod tests {
             TypeSelector::Any,
             "`*` is the wildcard, not a type named `*`"
         );
-        assert_eq!(app.settings_focused_raw(), "*");
     }
 
     // `via` is a relationship set on the same terms (ADR-032), so it takes the
@@ -7718,15 +7721,21 @@ traversal = "chain"
             .to_string()
     }
 
-    /// Commit `input` into the labelled field of drilled edge row 0. A comma
-    /// editor is driven the way the panel drives it -- open, type, confirm. A
-    /// type position is written into the buffer directly, because its picker
-    /// offers only declared type names: the unknown-type shapes these
+    /// [`commit_edge_row_edit`] on drilled edge row 0, the row most of these
+    /// refusals are provoked from.
+    fn commit_edge_edit(app: &mut App, label: &str, input: &str) {
+        commit_edge_row_edit(app, 0, label, input);
+    }
+
+    /// Commit `input` into the labelled field of drilled edge row `row`. A text
+    /// or comma editor is driven the way the panel drives it -- open, type,
+    /// confirm. A type position is written into the buffer directly, because its
+    /// picker offers only declared type names: the unknown-type shapes these
     /// save-refusal tests need reach the panel by loading a file that names a
     /// type `[[types]]` does not, never by picking. The picker's own commit path
     /// is covered by the AC3 tests above.
-    fn commit_edge_edit(app: &mut App, label: &str, input: &str) {
-        focus_edge_field(app, label);
+    fn commit_edge_row_edit(app: &mut App, row: usize, label: &str, input: &str) {
+        focus_edge_row_field(app, row, label);
         let focused = app
             .settings_focused_field()
             .expect("the cursor is on a field");
@@ -7797,6 +7806,53 @@ traversal = "chain"
         save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
 
         assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    // A row is addressed by its `name`, so renaming one onto a name another row
+    // holds leaves two rows the file cannot tell apart. The refusal is the
+    // loader's, and the culprit is the later row: the earlier one held the name
+    // first, so renaming the row just edited leaves the other alone.
+    #[test]
+    fn saving_an_edge_renamed_onto_another_edges_name_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        let taken = app.settings_buffer.edges[0].name.clone();
+        commit_edge_row_edit(&mut app, 1, "name", &taken);
+        let refusal = loader_refusal(TWO_EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+        assert_eq!(
+            read_config_file(&tmp),
+            TWO_EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert_eq!(
+            focused_path(&app),
+            FieldPath::Edge {
+                index: 1,
+                key: EdgeKey::Name
+            }
+        );
+    }
+
+    // Clearing a `name` is the same hole from the other side: the row it leaves
+    // is addressed by nothing.
+    #[test]
+    fn saving_an_edge_with_a_cleared_name_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "name", "");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+        assert_eq!(
+            read_config_file(&tmp),
+            EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Name));
     }
 
     /// Set a drilled row's `required`/`traversal` through the enum cycler's
@@ -7993,9 +8049,9 @@ traversal = "chain"
         assert_eq!(reparse_buffer(&app).edges.len(), 1);
     }
 
-    // `write_edges` reconciles by `name` and nothing at load rejects a
-    // duplicate (ITERATION-388), so two rows sharing one name are a config the
-    // loader accepts and the writer cannot address.
+    // `write_edges` reconciles by `name` and `Config::parse` refuses two rows
+    // sharing one, so a constant seed name would make the second `n` seed a row
+    // no save could accept.
     #[test]
     fn seeding_twice_gives_two_distinctly_named_rows_that_load() {
         let mut app = settings_app(Config::default(), "Edges", 0);

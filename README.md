@@ -222,7 +222,7 @@ Some settings fields hold a set of names rather than a single value: an `[[edges
 | `c`             | Commit the chosen members into the buffer (`w` / `Ctrl-S` still saves the whole config)           |
 | `Esc`           | Close without changing the field                                                                  |
 
-An edge's target types are a set, not a sequence, so the picker offers no ordering for them; `*` is offered alongside the declared type names and is exclusive with them, since it selects any type rather than naming one. A target set must name something: committing an empty one is refused.
+An edge's target types are a set, not a sequence, so the picker offers no ordering for them; `*` is offered alongside the declared type names and is exclusive with them, since it selects any type rather than naming one. A target set must name something: committing an empty one is refused. The same holds for an edge's `via`, which is typed as a comma-separated list rather than picked — confirming it empty is refused too.
 
 ### Graph view
 
@@ -676,7 +676,7 @@ An `[[edges]]` block declares one directed edge kind in the document DAG: a sour
 
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `name`     | Identifies the edge in validation findings                                                                                 |
+| `name`     | Identifies the edge in validation findings. Non-empty, and distinct from every other row's                                 |
 | `from`     | The types of the document that declares the relation, written as one type name, a list of them, or `"*"` for any type       |
 | `to`       | The permitted target types, written the same way. `to = "story"` and `to = ["story"]` are identical, as are the `from` equivalents |
 | `via`      | The relationships that realize the edge, written as one relationship name, a list of them, or `"*"` for any relationship. `via = "implements"` and `via = ["implements"]` are identical, as for `from` and `to`. Required — omitting it is an error, not a shorthand for `"*"` |
@@ -795,6 +795,8 @@ The wildcard is always explicit. Leaving `via` out does not mean "any relationsh
 The wildcard also has one spelling: the bare string. A list is read as names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story", and `via = ["*"]` fails as `to` does.
 
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
+
+A row is addressed by its `name` — in every finding and load error above, and by the Settings panel writing an edit back — so an empty `name`, or two rows sharing one, fails config load naming the rows at fault.
 
 `[[edges]]` is the whole declaration of the DAG. Rows describe it and drive findings; they never refuse a command.
 

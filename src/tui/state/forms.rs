@@ -657,9 +657,11 @@ pub enum RelKey {
 }
 
 /// An edge-key inside a drilled [[edges]] entry -- one key per `EdgeDef` field,
-/// so the drilled view is the row (RFC-067). Every key is editable: `name` and
-/// the three selector positions through text entry, the two optional qualifiers
-/// through the enum cycler's unset-leading variant list.
+/// so the drilled view is the row (RFC-067). Every key is editable: `name`
+/// through text entry, the two type positions through the member-at-a-time
+/// picker over `*` and the declared type names, `via` through the comma editor,
+/// and the two optional qualifiers through the enum cycler's unset-leading
+/// variant list.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeKey {
     Name,
