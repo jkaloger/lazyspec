@@ -798,6 +798,46 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                Some(ConfigCommand::SetEdge {
+                    name,
+                    from,
+                    to,
+                    via,
+                    required,
+                    no_required,
+                    traversal,
+                    no_traversal,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("updating edge {name}"), json);
+                    let edit = lazyspec::cli::config::EdgeEdit {
+                        from,
+                        to,
+                        via,
+                        required: lazyspec::cli::config::FieldEdit::from_flags(
+                            required,
+                            no_required,
+                        ),
+                        traversal: lazyspec::cli::config::FieldEdit::from_flags(
+                            traversal,
+                            no_traversal,
+                        ),
+                    };
+                    match lazyspec::cli::config::run_set_edge(&cwd, &fs, &name, &edit) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge updated");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_set_edge_json(&edge)?);
+                            }
+                        }
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "set-edge failed");
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
         Some(Commands::Provenance { command }) => {

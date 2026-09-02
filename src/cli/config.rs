@@ -113,6 +113,79 @@ pub enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Change fields on an existing `[[edges]]` row. An omitted flag leaves its
+    /// field as it stands; unsetting an optional has its own flag. A row is
+    /// addressed by the `name` it was written with and cannot be renamed here,
+    /// since the writer renames by dropping the block and appending a new one,
+    /// which loses the block's comments
+    SetEdge {
+        /// Name of the row to edit
+        name: String,
+        /// The source types, replacing the ones declared, or `*` for any type
+        /// (repeat per type)
+        #[arg(long = "from")]
+        from: Option<Vec<String>>,
+        /// The permitted target types, REPLACING the ones declared rather than
+        /// joining them, or `*` for any type (repeat per type)
+        #[arg(long = "to")]
+        to: Option<Vec<String>>,
+        /// The relationships that realize the edge, replacing the ones
+        /// declared, or `*` for any (repeat per relationship)
+        #[arg(long = "via")]
+        via: Option<Vec<String>>,
+        /// Severity of the finding when the edge is absent: error or warning
+        #[arg(long)]
+        required: Option<String>,
+        /// Drop `required`, leaving the edge legal but not demanded
+        #[arg(long = "no-required", conflicts_with = "required")]
+        no_required: bool,
+        /// Traversal role the edge joins: chain or related
+        #[arg(long)]
+        traversal: Option<String>,
+        /// Drop `traversal`, leaving the edge naming no role
+        #[arg(long = "no-traversal", conflicts_with = "traversal")]
+        no_traversal: bool,
+        /// Print the row after the edit as JSON (accepted here as well as
+        /// before the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// What an edit says about one optional field. `Option<T>` cannot say it: a
+/// missing flag and a flag that clears the field are different instructions,
+/// and both would be `None`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum FieldEdit<T> {
+    #[default]
+    Leave,
+    Unset,
+    Set(T),
+}
+
+impl<T> FieldEdit<T> {
+    /// The pair of flags clap collects for one optional field -- `--x VALUE`
+    /// and `--no-x`, which clap already refuses together -- read as one
+    /// instruction.
+    pub fn from_flags(value: Option<T>, unset: bool) -> Self {
+        match value {
+            Some(value) => FieldEdit::Set(value),
+            None if unset => FieldEdit::Unset,
+            None => FieldEdit::Leave,
+        }
+    }
+}
+
+/// The fields `config set-edge` was told to change. `None` on a set-valued
+/// position means the flag was absent, so the declared set stands; `Some` is
+/// the whole new set rather than members to add.
+#[derive(Debug, Default)]
+pub struct EdgeEdit {
+    pub from: Option<Vec<String>>,
+    pub to: Option<Vec<String>>,
+    pub via: Option<Vec<String>>,
+    pub required: FieldEdit<String>,
+    pub traversal: FieldEdit<String>,
 }
 
 /// `Config::edges` is skipped when empty so the TOML writer never emits a bare
@@ -679,6 +752,81 @@ pub fn run_add_edge_json(edge: &EdgeDef) -> Result<String> {
     }))?)
 }
 
+/// Apply an edit to the `[[edges]]` row `name` addresses and return the row as
+/// it now stands. Untouched fields, and the decor of every block the row does
+/// not own, survive: the writer edits the surviving source table in place.
+///
+/// This merges where `set-lifecycle` beside it replaces, which is a deliberate
+/// divergence. A lifecycle is one thing spelled in two keys, so re-passing it
+/// whole is no burden; an edge has six fields, and a replace spelling would
+/// make changing `required` alone mean re-passing `from`, `to` and `via` --
+/// getting one of them wrong silently rewrites the DAG. So an omitted flag
+/// means "leave it", and the two optionals get explicit `--no-` flags, because
+/// omitting `--required` cannot mean both "leave it" and "remove it".
+///
+/// The one position that does replace is a set: repeated `--to` gives the new
+/// set, not additions to the old one, or a set could never be shrunk from the
+/// CLI. The TUI answers the same question with a picker that adds and removes
+/// members (STORY-260); two surfaces, two affordances, one resulting row.
+///
+/// `name` is an address, not a field. Renaming a row is remove-old +
+/// append-new to the writer, which would drop the block's comments and move it
+/// to the end of the table -- accepted for a *translated* block (ADR-032) but
+/// not for an edited one (ITERATION-388) -- so there is no `--name`, and a
+/// rename is an edit to the file, where the decor at stake is visible.
+///
+/// Whether the edited row makes sense stays the loader's question, asked on the
+/// next command (STORY-261 AC5), exactly as it is for `add-edge`.
+pub fn run_set_edge(
+    root: &Path,
+    fs: &dyn FileSystem,
+    name: &str,
+    edit: &EdgeEdit,
+) -> Result<EdgeDef> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let mut config = Config::parse(&src)?;
+
+    let Some(edge) = config.edges.iter_mut().find(|edge| edge.name == name) else {
+        bail!("unknown edge \"{}\"", name);
+    };
+
+    if let Some(from) = &edit.from {
+        edge.from = TypeSelector::from_names(from.clone()).context("reading the `--from` flags")?;
+    }
+    if let Some(to) = &edit.to {
+        edge.to = TypeSelector::from_names(to.clone()).context("reading the `--to` flags")?;
+    }
+    if let Some(via) = &edit.via {
+        edge.via = RelSelector::from_names(via.clone()).context("reading the `--via` flags")?;
+    }
+    match &edit.required {
+        FieldEdit::Leave => {}
+        FieldEdit::Unset => edge.required = None,
+        FieldEdit::Set(value) => edge.required = Some(parse_severity(value)?),
+    }
+    match &edit.traversal {
+        FieldEdit::Leave => {}
+        FieldEdit::Unset => edge.traversal = None,
+        FieldEdit::Set(value) => edge.traversal = Some(parse_traversal(value)?),
+    }
+    let edited = edge.clone();
+
+    let out = write_config_in_place(&src, &config)?;
+    fs.write(&path, &out)?;
+    Ok(edited)
+}
+
+/// [`run_add_edge_json`] for an edit: the same envelope, carrying the row after
+/// the edit rather than the row that was appended.
+pub fn run_set_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-updated",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
 fn parse_severity(value: &str) -> Result<Severity> {
     match value {
         "error" => Ok(Severity::Error),
@@ -810,7 +958,9 @@ fn parse_authorship(value: &str) -> Result<Authorship> {
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
+    use crate::cli::{Cli, Commands};
     use crate::engine::fs::RealFileSystem;
+    use clap::Parser;
     use serde_json::Value;
     use std::path::PathBuf;
 
@@ -1572,6 +1722,310 @@ traversal = "chain"
         assert_eq!(envelope["name"], "stories-implement-rfcs");
         let shown = show(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(envelope["edge"], shown["edges"][0]);
+    }
+
+    // `SRC` plus the types an edge can target and one decorated `[[edges]]`
+    // row: a standalone comment above the block and an inline comment on a key
+    // inside it, so an edit has decor to lose.
+    fn edged_src() -> String {
+        format!(
+            "{SRC}{}",
+            r#"
+[[types]]
+name = "spike"
+plural = "spikes"
+dir = "docs/spikes"
+prefix = "SPIKE"
+lifecycle = { states = ["draft"], edges = [] }
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+lifecycle = { states = ["draft"], edges = [] }
+
+# the edge the set-edge tests edit
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc", "spike", "bug"]  # the target set
+via = "implements"
+required = "error"
+traversal = "chain"
+"#
+        )
+    }
+
+    fn set_edge(root: &Path, fs: &dyn FileSystem, edit: EdgeEdit) -> Result<EdgeDef> {
+        run_set_edge(root, fs, "stories-implement-rfcs", &edit)
+    }
+
+    fn names(values: &[&str]) -> Option<Vec<String>> {
+        Some(values.iter().map(|v| v.to_string()).collect())
+    }
+
+    // The lines that differ between two renderings of one file, paired
+    // old-to-new. An edit that touches one key shows up here as one pair; a
+    // dropped comment or a reordered block shows up as several.
+    fn changed_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "an edit that adds or removes a line cannot be compared line-for-line:\n{after}"
+        );
+        before
+            .lines()
+            .zip(after.lines())
+            .filter(|(old, new)| old != new)
+            .collect()
+    }
+
+    // STORY-261 AC2: `set-edge` merges rather than replaces, so a lone
+    // `--required` leaves every other field of the row -- and every comment in
+    // the file, which a reparse could not tell you had been dropped -- alone.
+    #[test]
+    fn set_edge_changes_only_the_field_it_was_given() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.required, Some(Severity::Warning));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            changed_lines(&src, &after),
+            [(r#"required = "error""#, r#"required = "warning""#)],
+            "got: {after}"
+        );
+        let loaded = Config::parse(&after).unwrap();
+        assert_eq!(loaded.edges, vec![updated]);
+    }
+
+    // The target set replaces; it does not accumulate. Shrinking it to one name
+    // also changes the TOML's shape, since a one-member set re-emits bare.
+    #[test]
+    fn set_edge_shrinking_the_target_set_drops_the_members_not_named() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(r#"to = "rfc"  # the target set"#),
+            "the set re-emits bare and keeps the key's own comment: {after}"
+        );
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string()])
+        );
+    }
+
+    #[test]
+    fn set_edge_growing_the_target_set_re_emits_it_as_a_list() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let root = path.parent().unwrap();
+        set_edge(
+            root,
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        set_edge(
+            root,
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc", "spike"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains(r#"to = ["rfc", "spike"]"#), "got: {after}");
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string(), "spike".to_string()])
+        );
+    }
+
+    // Unsetting is its own spelling, because omitting `--required` already
+    // means "leave it". `required` is skipped when absent, so removing the key
+    // is observable in the file rather than written back as a default.
+    #[test]
+    fn set_edge_no_required_removes_the_key_rather_than_defaulting_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.required, None);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("required ="), "got: {after}");
+        assert_eq!(Config::parse(&after).unwrap().edges[0].required, None);
+    }
+
+    #[test]
+    fn set_edge_no_traversal_removes_the_key_rather_than_defaulting_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                traversal: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("traversal ="), "got: {after}");
+        assert_eq!(Config::parse(&after).unwrap().edges[0].traversal, None);
+    }
+
+    // A name that addresses no row is a CLI-argument error, not a config-
+    // validity one, so it reads like `set-lifecycle`'s unknown type.
+    #[test]
+    fn set_edge_rejects_an_unknown_name_without_writing() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_set_edge(
+            path.parent().unwrap(),
+            &fs,
+            "stories-implement-spikes",
+            &EdgeEdit {
+                required: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("unknown edge") && err.contains("stories-implement-spikes"),
+            "the refusal must name the row asked for: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // A bad severity is refused before anything reaches disk, so the row keeps
+    // the severity it had rather than half of the edit.
+    #[test]
+    fn set_edge_rejects_an_unknown_severity_without_writing() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                required: FieldEdit::Set("nonsense".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("nonsense"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // STORY-261 AC4: the envelope carries the row after the edit, spelled the
+    // way `config --json` spells it.
+    #[test]
+    fn set_edge_json_carries_the_row_config_show_reports() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let envelope: Value = serde_json::from_str(&run_set_edge_json(&updated).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-updated");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        let shown = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(envelope["edge"], shown["edges"][0]);
+    }
+
+    // The flag set is the contract (convention §"CLI Patterns"). A row's name
+    // is its address, and renaming it through the writer is remove-old +
+    // append-new -- so `set-edge` offers no `--name` and clap refuses it.
+    #[test]
+    fn set_edge_offers_no_rename_flag() {
+        let parsed = Cli::try_parse_from([
+            "lazyspec",
+            "config",
+            "set-edge",
+            "stories-implement-rfcs",
+            "--name",
+            "stories-implement-anything",
+        ]);
+
+        assert!(parsed.is_err(), "set-edge must not accept a rename");
+    }
+
+    // An empty target set is a config the loader refuses, and it is unreachable
+    // here: each `--to` occurrence takes a value, so `--to` alone is a parse
+    // error and an absent `--to` means "leave the set alone". Confirmed rather
+    // than guarded (ITERATION-393 §Out of scope).
+    #[test]
+    fn set_edge_cannot_be_given_an_empty_target_set() {
+        let parsed = Cli::try_parse_from([
+            "lazyspec",
+            "config",
+            "set-edge",
+            "stories-implement-rfcs",
+            "--to",
+        ]);
+
+        assert!(parsed.is_err(), "`--to` with no value must not parse");
+        let absent =
+            Cli::try_parse_from(["lazyspec", "config", "set-edge", "stories-implement-rfcs"])
+                .unwrap();
+        let Some(Commands::Config {
+            command: Some(ConfigCommand::SetEdge { to, .. }),
+            ..
+        }) = absent.command
+        else {
+            panic!("expected config set-edge");
+        };
+        assert_eq!(to, None);
     }
 
     // AC6: each mutator preserves comments and the section order of untouched
