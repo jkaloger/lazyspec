@@ -1,4 +1,4 @@
-use crate::cli::config::{apply_collected_type, collect_type_interactive};
+use crate::cli::config::{apply_collected_type, collect_edge, collect_type_interactive};
 use crate::cli::style::{bold, dim, section_header, success_line, warning_prefix};
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
@@ -154,6 +154,12 @@ fn git_user_name() -> Option<String> {
 /// IO -- so it is fully driveable by a `ScriptedPrompter`. Accepting every
 /// default returns `base` unchanged (byte-for-byte parity with `init`). A `no`
 /// at the final write confirmation discards the session and starts over.
+///
+/// This designer prunes the edge table and never adds to it: the starter set is
+/// already five rows, and a sixth is `config add-edge`. The from-scratch
+/// designer, which starts with no rows at all, is the one that prompts for them.
+/// Both render the DAG summary before the write confirmation, so a prune the
+/// keep/drop walk forces is shown rather than applied silently.
 pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> Result<Config> {
     let author_default = git_user_name();
     loop {
@@ -173,13 +179,14 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
             }
         }
         config.documents.types = kept;
-        drop_edges_naming_undefined_types(&mut config);
+        let pruned = drop_edges_naming_undefined_types(&mut config);
 
         while prompter.confirm("Add another type", false)? {
             let collected = collect_type_interactive(&config, prompter)?;
             apply_collected_type(&mut config, &collected)?;
         }
 
+        print!("{}", render_dag_summary(&config, &pruned));
         if prompter.confirm("Write this config", true)? {
             return Ok(config);
         }
@@ -187,19 +194,23 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
     }
 }
 
-/// Drop every `[[edges]]` row that names a type `config` no longer defines. The
-/// keep/drop walk can retire a starter type an edge row names, and such a row
-/// fails strict load outright, so the config the wizard writes would not load
-/// back. A wildcard position names no type and keeps its row.
-fn drop_edges_naming_undefined_types(config: &mut Config) {
+/// Drop every `[[edges]]` row that names a type `config` no longer defines, and
+/// return the rows that went. The keep/drop walk can retire a starter type an
+/// edge row names, and such a row fails strict load outright, so the config the
+/// wizard writes would not load back. A wildcard position names no type and
+/// keeps its row.
+///
+/// Pruning beats refusing the drop, because the drop is the feature; the rows
+/// come back so the summary can report them, because a DAG edit the user is not
+/// shown is one they cannot correct.
+fn drop_edges_naming_undefined_types(config: &mut Config) -> Vec<EdgeDef> {
     let defined = |name: &String| config.documents.types.iter().any(|t| &t.name == name);
-    let retained = config
-        .edges
-        .iter()
-        .filter(|edge| edge.from.names().iter().all(defined) && edge.to.names().iter().all(defined))
-        .cloned()
-        .collect();
+    let (retained, pruned): (Vec<EdgeDef>, Vec<EdgeDef>) =
+        config.edges.iter().cloned().partition(|edge| {
+            edge.from.names().iter().all(defined) && edge.to.names().iter().all(defined)
+        });
     config.edges = retained;
+    pruned
 }
 
 /// The empty base the from-scratch designer builds on: the starter config's
@@ -220,16 +231,12 @@ pub fn blank_config() -> Config {
 }
 
 /// Design a whole type DAG from nothing, interactively: author (prompted, not
-/// persisted), naming pattern, and a types loop (at least one type required).
-/// Renders a DAG summary and asks to write; a `no` discards the session and
-/// starts over. Pure -- no disk IO -- so it is fully driveable by a
-/// `ScriptedPrompter`. The returned `Config` owes nothing to `starter_config()`'s
-/// types or edges and validates clean via `write_project`.
-///
-/// The wizard designs types and lifecycles but not the DAG: it declares no
-/// `[[edges]]`, and there is no prompt that would. Authoring edges here is
-/// STORY-261's, and until it lands a from-scratch project starts with an empty
-/// edge table (ITERATION-383 §Out of scope).
+/// persisted), naming pattern, a types loop (at least one type required), then
+/// -- once two or more types exist -- an edge loop. Renders a DAG summary and
+/// asks to write; a `no` discards the session and starts over. Pure -- no disk
+/// IO -- so it is fully driveable by a `ScriptedPrompter`. The returned `Config`
+/// owes nothing to `starter_config()`'s types or edges and validates clean via
+/// `write_project`.
 pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config> {
     let author_default = git_user_name();
     let base = blank_config();
@@ -258,7 +265,23 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
             }
         }
 
-        print!("{}", render_dag_summary(&config));
+        // Edges only make sense once at least two types exist, for the reason
+        // the retired rules loop was gated the same way: a row's endpoints are
+        // chosen from the defined types, so no row can dangle, and a lone type
+        // has nothing but itself to point at. `to = "*"` would be legal with one
+        // type declared; a project that wants it has `config add-edge`.
+        //
+        // The first row is offered by default, because a DAG with no rows walks
+        // nothing: `context` on any document in such a project shows that
+        // document alone.
+        if config.documents.types.len() >= 2 {
+            while prompter.confirm("Add an edge", config.edges.is_empty())? {
+                let edge = collect_edge(&config, prompter)?;
+                config.edges.push(edge);
+            }
+        }
+
+        print!("{}", render_dag_summary(&config, &[]));
         if prompter.confirm("Write this config", true)? {
             return Ok(config);
         }
@@ -282,15 +305,32 @@ fn edge_qualifiers(edge: &EdgeDef) -> String {
     format!(" ({})", parts.join(", "))
 }
 
+/// One `[[edges]]` row as the summary reads it: name, endpoints, the
+/// relationships that realize it, and whichever qualifiers it states.
+fn edge_line(edge: &EdgeDef) -> String {
+    format!(
+        "  {}: {} via {}{}",
+        bold(&edge.name),
+        dim(&format!(
+            "{} -> {}",
+            edge.from.spelling(),
+            edge.to.spelling()
+        )),
+        dim(&edge.via.spelling()),
+        dim(&edge_qualifiers(edge)),
+    )
+}
+
 /// A human-readable summary of the designed DAG: every type with its plural,
 /// directory, prefix, store, and effective lifecycle (states and transitions);
-/// every `[[edges]]` row; and the relation vocabulary. Rendered before the final
-/// write confirmation.
+/// every `[[edges]]` row; the rows in `pruned`, which the design dropped rather
+/// than declared; and the relation vocabulary. Rendered before the final write
+/// confirmation.
 ///
 /// Two unrelated things are called an edge here -- a lifecycle transition and a
 /// row of the document DAG -- so the lifecycle lines read `transition:` and only
 /// the DAG rows are called edges.
-fn render_dag_summary(config: &Config) -> String {
+fn render_dag_summary(config: &Config, pruned: &[EdgeDef]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -318,21 +358,21 @@ fn render_dag_summary(config: &Config) -> String {
 
     let _ = writeln!(out, "{}", section_header("DAG edges:"));
     for edge in &config.edges {
-        let _ = writeln!(
-            out,
-            "  {}: {} via {}{}",
-            bold(&edge.name),
-            dim(&format!(
-                "{} -> {}",
-                edge.from.spelling(),
-                edge.to.spelling()
-            )),
-            dim(&edge.via.spelling()),
-            dim(&edge_qualifiers(edge)),
-        );
+        let _ = writeln!(out, "{}", edge_line(edge));
     }
     if config.edges.is_empty() {
         out.push_str("  (none)\n");
+    }
+
+    if !pruned.is_empty() {
+        let _ = writeln!(
+            out,
+            "{}",
+            section_header("Dropped edges (they named a type you dropped):")
+        );
+        for edge in pruned {
+            let _ = writeln!(out, "{}", edge_line(edge));
+        }
     }
 
     let _ = writeln!(out, "{}", section_header("Relation vocabulary:"));
@@ -499,7 +539,7 @@ by agent skills. For example, a dictum about testing philosophy would have
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
-    use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::config::{Severity, StoreBackend, Traversal, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
     use crate::engine::validation::validate_full;
@@ -508,8 +548,8 @@ mod tests {
         ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect())
     }
 
-    fn plain_summary(config: &Config) -> String {
-        console::strip_ansi_codes(&render_dag_summary(config)).to_string()
+    fn plain_summary(config: &Config, pruned: &[EdgeDef]) -> String {
+        console::strip_ansi_codes(&render_dag_summary(config, pruned)).to_string()
     }
 
     // Enough blank answers to accept every default in the wizard: author, naming,
@@ -693,6 +733,11 @@ mod tests {
             ],
             "only the rows naming no dropped type survive"
         );
+        assert!(
+            Config::parse(&config.to_toml().unwrap()).is_ok(),
+            "the config the wizard hands back must parse: the types list shrinking is what \
+             breaks it"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         write_project(dir.path(), &config).unwrap();
@@ -784,9 +829,8 @@ mod tests {
     }
 
     // A full from-scratch happy-path script: rfc (custom lifecycle draft ->
-    // accepted) and story (inherited lifecycle). The wizard asks nothing about
-    // the DAG, so the script ends at the write confirmation right after the
-    // types loop.
+    // accepted) and story (inherited lifecycle). Two types open the edge loop,
+    // which this script declines, so the design ends with an empty edge table.
     fn full_scratch_answers() -> Vec<String> {
         [
             "",               // author
@@ -820,6 +864,7 @@ mod tests {
             "n",              // set a parent type? no
             "n",              // design a custom lifecycle? no (inherits preset)
             "n",              // add another type? no
+            "n",              // add an edge? no
             "y",              // write this config? yes
         ]
         .iter()
@@ -865,6 +910,7 @@ mod tests {
             "n", // set a parent type? no
             "n", // no custom lifecycle
             "n", // add another type? no
+            "n", // add an edge? no
             "y", // write
         ]
         .iter()
@@ -881,13 +927,11 @@ mod tests {
         assert_eq!(alpha.lifecycle.edges[0].to, "done");
     }
 
-    // STORY-259 AC4: two types are enough for a DAG, and the wizard still asks
-    // nothing about one -- it goes straight from the types loop to the write
-    // confirmation, and declares neither a rule nor an edge. A surviving prompt
-    // would consume the `y` below as its own answer and desync the script.
-    #[test]
-    fn scratch_two_types_are_not_asked_about_the_dag() {
-        let answers = [
+    // A from-scratch script through the end of the types loop -- alpha then
+    // beta, both on inherited lifecycles -- followed by `tail`. Two types are
+    // what opens the edge loop, so every edge script starts here.
+    fn two_type_scratch(tail: &[&str]) -> Vec<String> {
+        [
             "", "",  // author, naming
             "y", // add a type -> alpha
             "alpha", "alphas", "", "", "", "", "", "", "",  // core fields
@@ -899,18 +943,92 @@ mod tests {
             "n", // no parent
             "n", // no custom lifecycle
             "n", // add another type? no
-            "y", // write
         ]
         .iter()
+        .chain(tail)
         .map(|s| s.to_string())
-        .collect();
+        .collect()
+    }
 
-        let mut prompter = ScriptedPrompter::new(answers);
+    // STORY-261 AC7: two types open the edge loop, and the row the answers
+    // describe is the row the design carries. The config it hands back parses,
+    // which is what choosing both endpoints from the defined types buys: a row
+    // naming an undeclared type fails strict load outright.
+    #[test]
+    fn scratch_one_edge_lands_as_a_row_the_config_parses() {
+        let mut prompter = ScriptedPrompter::new(two_type_scratch(&[
+            "y",          // add an edge? yes
+            "alpha",      // from type
+            "beta",       // to types
+            "implements", // via relationships
+            "error",      // requiredness
+            "chain",      // traversal
+            "n",          // add another edge? no
+            "y",          // write
+        ]));
+
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        assert_eq!(config.edges.len(), 1, "one row: {:?}", config.edges);
+        let edge = &config.edges[0];
+        assert_eq!(edge.name, "alphas-to-betas");
+        assert_eq!(edge.from.spelling(), "alpha");
+        assert_eq!(edge.to.spelling(), "beta");
+        assert_eq!(edge.via.spelling(), "implements");
+        assert_eq!(edge.required, Some(Severity::Error));
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+
+        let rendered = config.to_toml().unwrap();
+        assert!(
+            Config::parse(&rendered).is_ok(),
+            "the designed config must parse: {rendered}"
+        );
+    }
+
+    // Nothing at the wizard's own layer stops it assembling two rows under one
+    // name, and such a config does not load, so the generated name steps aside
+    // for the row already there.
+    #[test]
+    fn scratch_two_edges_between_the_same_types_get_distinct_names() {
+        let mut prompter = ScriptedPrompter::new(two_type_scratch(&[
+            "y",
+            "alpha",
+            "beta",
+            "implements",
+            "none",
+            "chain", // the first row
+            "y",
+            "alpha",
+            "beta",
+            "related-to",
+            "none",
+            "none", // the second
+            "n",    // add another edge? no
+            "y",    // write
+        ]));
+
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["alphas-to-betas", "alphas-to-betas-2"]);
+        let rendered = config.to_toml().unwrap();
+        assert!(
+            Config::parse(&rendered).is_ok(),
+            "two rows one name would not parse: {rendered}"
+        );
+    }
+
+    // Declining the loop declares nothing: the wizard writes no row the session
+    // did not ask for.
+    #[test]
+    fn scratch_declining_the_edge_loop_leaves_no_edges() {
+        let mut prompter = ScriptedPrompter::new(two_type_scratch(&["n", "y"]));
+
         let config = design_config_from_scratch(&mut prompter).unwrap();
 
         assert!(config.type_by_name("alpha").is_some());
         assert!(config.type_by_name("beta").is_some());
-        assert!(config.edges.is_empty(), "the wizard declares no edges");
+        assert!(config.edges.is_empty(), "no edge is declared unasked");
     }
 
     // AC3: the DAG summary names every type, its lifecycle transitions, its
@@ -923,7 +1041,7 @@ mod tests {
         let mut prompter = ScriptedPrompter::new(full_scratch_answers());
         let config = design_config_from_scratch(&mut prompter).unwrap();
 
-        let summary = render_dag_summary(&config);
+        let summary = render_dag_summary(&config, &[]);
         assert!(summary.contains("rfc"), "type rfc: {summary}");
         assert!(summary.contains("story"), "type story: {summary}");
         assert!(
@@ -946,7 +1064,7 @@ mod tests {
         // Styling wraps individual tokens, and whether it is on at all is a
         // process-global the colour-parity test toggles; strip it so the
         // assertion is about the line rather than the palette.
-        let summary = plain_summary(&starter_config());
+        let summary = plain_summary(&starter_config(), &[]);
 
         assert!(
             summary.contains(
@@ -978,6 +1096,37 @@ mod tests {
             !summary.contains("Parent-child rules:"),
             "the rules section is gone: {summary}"
         );
+        assert!(
+            !summary.contains("Dropped edges"),
+            "a design that pruned nothing has no dropped section: {summary}"
+        );
+    }
+
+    // A prune the user is not shown is a silent DAG edit, so the rows a dropped
+    // type took with it are reported beside the rows that survived.
+    #[test]
+    fn summary_names_the_edges_a_dropped_type_took_with_it() {
+        let mut config = starter_config();
+        config.documents.types.retain(|t| t.name != "story");
+
+        let pruned = drop_edges_naming_undefined_types(&mut config);
+
+        let summary = plain_summary(&config, &pruned);
+        assert!(
+            summary.contains("Dropped edges"),
+            "the pruned rows are reported: {summary}"
+        );
+        assert!(
+            summary.contains(
+                "stories-need-rfcs: story -> rfc via implements (required: warning, traversal: \
+                 chain)"
+            ),
+            "a pruned row reads the way a surviving one does: {summary}"
+        );
+        assert!(
+            summary.contains("iterations-need-stories: iteration -> story via implements"),
+            "both rows naming the dropped type are reported: {summary}"
+        );
     }
 
     // ITERATION-331: colour parity. With colours forced off the summary carries
@@ -988,14 +1137,14 @@ mod tests {
         let config = starter_config();
 
         console::set_colors_enabled(false);
-        let plain = render_dag_summary(&config);
+        let plain = render_dag_summary(&config, &[]);
         assert!(
             !plain.contains('\u{1b}'),
             "colours-off summary must be free of ANSI: {plain:?}"
         );
 
         console::set_colors_enabled(true);
-        let colored = render_dag_summary(&config);
+        let colored = render_dag_summary(&config, &[]);
         console::set_colors_enabled(false);
 
         assert!(
@@ -1016,10 +1165,46 @@ mod tests {
         }
     }
 
+    // STORY-261 AC7: a from-scratch design carrying a prompted row scaffolds
+    // into a project that strict-loads with that row in it and validates clean.
+    // Strict load, not `validate`, is what refuses a dangling row, so the load
+    // is the assertion the endpoint prompts exist for.
+    #[test]
+    fn scratch_scaffold_with_an_edge_loads_and_validates_clean() {
+        let mut prompter = ScriptedPrompter::new(two_type_scratch(&[
+            "y",
+            "alpha",
+            "beta",
+            "implements",
+            "warning",
+            "chain",
+            "n",
+            "y",
+        ]));
+        let config = design_config_from_scratch(&mut prompter).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_project(root, &config).unwrap();
+
+        let loaded = Config::load(root, &RealFileSystem).unwrap();
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alphas-to-betas"]);
+        assert_eq!(loaded.edges[0].traversal, Some(Traversal::Chain));
+
+        let store = Store::load(root, &loaded).unwrap();
+        let result = validate_full(&store, &loaded);
+        assert!(
+            result.errors.is_empty(),
+            "a designed edge must not make a fresh project invalid: {:?}",
+            result.errors
+        );
+    }
+
     // AC4: a full from-scratch design scaffolds into a temp dir that loads and
-    // validates with zero errors. Its DAG is empty by construction (the wizard
-    // asks about no edge), so there is no row that could dangle -- which strict
-    // load, not `validate`, is what would reject.
+    // validates with zero errors. Its DAG is empty by construction (this script
+    // declines the edge loop), so there is no row that could dangle -- which
+    // strict load, not `validate`, is what would reject.
     #[test]
     fn scratch_scaffold_validates_clean() {
         let mut prompter = ScriptedPrompter::new(full_scratch_answers());
@@ -1065,7 +1250,7 @@ mod tests {
             "solo", "solos", "", "", "", "", "", "", "",  // core fields
             "n", // no attribute
             "n", // no custom lifecycle
-            "n", // add another type? no (one type is enough; no rule loop)
+            "n", // add another type? no (one type: the edge loop is not offered)
             "n", // write this config? no -> discard and reloop
                  // reloop asks for author again; the queue is empty -> Err (abort)
         ]

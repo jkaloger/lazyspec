@@ -1,7 +1,7 @@
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
     AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
-    RelSelector, Severity, StoreBackend, Traversal, TypeDef, TypeSelector,
+    RelSelector, Severity, StoreBackend, Traversal, TypeDef, TypeSelector, WILDCARD,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
@@ -647,6 +647,166 @@ pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> R
     }
 
     Ok(())
+}
+
+/// A stable, dedup-guarded name for the row joining `from` to `to`, built from
+/// the plural forms of the types it names (`stories-to-rfcs`); a wildcard target
+/// names no type and reads `anything`. Appends `-2`, `-3`, ... while the base
+/// name is taken, because two rows sharing a name is a config that does not
+/// load and the wizard writes its whole config without reading it back.
+fn generated_edge_name(config: &Config, from: &str, to: &TypeSelector) -> String {
+    let plural = |name: &str| {
+        config
+            .type_by_name(name)
+            .map(|t| t.plural.clone())
+            .unwrap_or_else(|| format!("{name}s"))
+    };
+    let target = match to.names() {
+        [] => "anything".to_string(),
+        names => names
+            .iter()
+            .map(|name| plural(name))
+            .collect::<Vec<_>>()
+            .join("-and-"),
+    };
+    let base = format!("{}-to-{}", plural(from), target);
+    let taken = |candidate: &str| config.edges.iter().any(|edge| edge.name == candidate);
+    if !taken(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Prompt for one set-valued edge position: the declared names plus the
+/// wildcard, choosable together because a multi-chooser cannot express that
+/// `"*"` is a whole position rather than one member of a set. An empty
+/// selection, or a name the project does not declare, re-asks in place -- a row
+/// naming an undeclared type fails strict load, and a position that names
+/// nothing matches nothing.
+fn pick_edge_position(
+    prompter: &mut dyn Prompter,
+    label: &str,
+    declared: &[&str],
+) -> Result<Vec<String>> {
+    let mut options: Vec<&str> = declared.to_vec();
+    options.push(WILDCARD);
+    loop {
+        let chosen = prompter.multi_select(label, &options, &[])?;
+        if chosen.is_empty() {
+            println!("choose at least one, or \"{WILDCARD}\" for any");
+            continue;
+        }
+        if let Some(unknown) = chosen.iter().find(|name| !options.contains(&name.as_str())) {
+            println!("\"{unknown}\" is not one of the listed names; choose from them");
+            continue;
+        }
+        return Ok(chosen);
+    }
+}
+
+/// Prompt for a single `[[edges]]` row against `config` (an in-memory view of
+/// the project as designed so far). Pure: no disk IO, fully driveable by a
+/// `ScriptedPrompter`.
+///
+/// `from` is one of the defined types and `to` is a set of them or the
+/// wildcard, so no collected row can name a type the config does not declare.
+/// The caller offers this prompt only once `config` declares two or more types,
+/// which is what leaves `from` something to choose from.
+/// The mix of a wildcard with a name is neither selector, and it is refused by
+/// the one engine-side constructor every surface assembling a position uses,
+/// then re-asked here rather than aborting the session.
+///
+/// `required` and `traversal` are both offered with unset as the default: a new
+/// project has no basis to answer either, and both have a safe absence -- an
+/// absent `required` leaves the edge legal rather than demanded, an absent
+/// `traversal` claims no role. `chain` is the default offered while no declared
+/// row states a role at all, since a DAG nothing walks gives `context` a chain
+/// of one document.
+///
+/// The row's `name` is generated rather than prompted for: it is the address a
+/// finding and the writer both use, two rows may not share one, and a session
+/// that answered the same pair of types twice would otherwise assemble a config
+/// that does not load.
+pub fn collect_edge(config: &Config, prompter: &mut dyn Prompter) -> Result<EdgeDef> {
+    let type_names: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let rel_names: Vec<&str> = config
+        .relationships
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+
+    let from = loop {
+        let choice = prompter.select("From type", &type_names, type_names[0])?;
+        if type_names.contains(&choice.as_str()) {
+            break choice;
+        }
+        println!("\"{choice}\" is not a defined type; choose one of the listed names");
+    };
+
+    let to = loop {
+        let names = pick_edge_position(prompter, "To types", &type_names)?;
+        match TypeSelector::from_names(names) {
+            Ok(selector) => break selector,
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let via = loop {
+        let names = pick_edge_position(prompter, "Via relationships", &rel_names)?;
+        match RelSelector::from_names(names) {
+            Ok(selector) => break selector,
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let required = loop {
+        let answer = prompter.select("Requiredness", &["none", "warning", "error"], "none")?;
+        if answer == "none" {
+            break None;
+        }
+        match parse_severity(&answer) {
+            Ok(severity) => break Some(severity),
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let walks_already = config.edges.iter().any(|edge| edge.traversal.is_some());
+    let traversal_default = if walks_already { "none" } else { "chain" };
+    let traversal = loop {
+        let answer = prompter.select(
+            "Traversal",
+            &["none", "chain", "related"],
+            traversal_default,
+        )?;
+        if answer == "none" {
+            break None;
+        }
+        match parse_traversal(&answer) {
+            Ok(traversal) => break Some(traversal),
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    Ok(EdgeDef {
+        name: generated_edge_name(config, &from, &to),
+        from: TypeSelector::from_names(vec![from])?,
+        to,
+        via,
+        required,
+        traversal,
+    })
 }
 
 /// Prompt for a type's fields on a TTY and drive the same writers the flag path
@@ -1856,6 +2016,143 @@ to = "story"
 via = "implements"
 traversal = "related"
 "#;
+
+    // --- STORY-261 AC7: the wizard's edge collector ---
+
+    fn collect_scripted_edge(config: &Config, answers: &[&str]) -> Result<EdgeDef> {
+        let mut prompter = ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect());
+        collect_edge(config, &mut prompter)
+    }
+
+    // The five answers -- source, targets, relationships, requiredness,
+    // traversal -- become the row they describe, under a name generated from the
+    // plurals of the types it names.
+    #[test]
+    fn collect_edge_builds_the_row_its_answers_describe() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge =
+            collect_scripted_edge(&config, &["story", "rfc", "implements", "warning", "chain"])
+                .unwrap();
+
+        assert_eq!(edge.name, "stories-to-rfcs");
+        assert_eq!(edge.from, TypeSelector::Types(vec!["story".to_string()]));
+        assert_eq!(edge.to, TypeSelector::Types(vec!["rfc".to_string()]));
+        assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
+        assert_eq!(edge.required, Some(Severity::Warning));
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+    }
+
+    // `to` is a set: several targets in one answer make one row, which is the
+    // disjunction ADR-030 gives the position, not one row per member.
+    #[test]
+    fn collect_edge_reads_several_targets_as_one_set() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "rfc,story", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            edge.to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(edge.name, "stories-to-rfcs-and-stories");
+    }
+
+    // `none` on either optional writes no key at all, which is the answer a new
+    // project has a basis for: an absent `required` demands nothing and an
+    // absent `traversal` claims no role.
+    #[test]
+    fn collect_edge_leaves_both_optionals_unset_when_declined() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "none", "none"])
+            .unwrap();
+
+        assert_eq!(edge.required, None);
+        assert_eq!(edge.traversal, None);
+    }
+
+    // ADR-031's `"*"` is a whole position rather than a member of a set, and the
+    // multi-chooser cannot say so, so the mix is refused where it is assembled
+    // and the prompt re-asked. The lone wildcard that follows is the wildcard.
+    #[test]
+    fn collect_edge_re_asks_when_the_target_mixes_the_wildcard_with_a_name() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "*,rfc", "*", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(edge.to, TypeSelector::Any);
+        assert_eq!(edge.name, "stories-to-anything");
+    }
+
+    // A target the project does not declare re-asks too: such a row fails strict
+    // load, and the wizard writes its whole config without reading it back.
+    #[test]
+    fn collect_edge_re_asks_when_a_target_names_no_declared_type() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "spike", "rfc", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(edge.to, TypeSelector::Types(vec!["rfc".to_string()]));
+    }
+
+    // A DAG no row gives a role to walks nothing, so `chain` is the default
+    // offered while that is true. Requiredness is unset by default regardless.
+    #[test]
+    fn collect_edge_offers_chain_while_no_declared_row_walks() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "", ""]).unwrap();
+
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+        assert_eq!(edge.required, None);
+    }
+
+    // Once some row walks, the default goes back to unset: absence is the safe
+    // answer, and a second role guessed for the user rewires the walks.
+    #[test]
+    fn collect_edge_offers_no_traversal_once_a_declared_row_walks() {
+        let mut config = Config::parse(SRC).unwrap();
+        config.edges = vec![EdgeDef {
+            name: "implements-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["implements".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        }];
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "", ""]).unwrap();
+
+        assert_eq!(edge.traversal, None);
+    }
+
+    // Two rows sharing a name is a config that does not load, so the generated
+    // name steps aside for one the table already carries.
+    #[test]
+    fn collect_edge_names_a_second_row_between_the_same_types_apart() {
+        let mut config = Config::parse(SRC).unwrap();
+        let answers = ["story", "rfc", "implements", "none", "none"];
+
+        let first = collect_scripted_edge(&config, &answers).unwrap();
+        config.edges.push(first.clone());
+        let second = collect_scripted_edge(&config, &answers).unwrap();
+
+        assert_eq!(first.name, "stories-to-rfcs");
+        assert_eq!(second.name, "stories-to-rfcs-2");
+    }
 
     // `SRC` plus the vocabulary and one decorated `[[edges]]` row.
     fn edged_src() -> String {
