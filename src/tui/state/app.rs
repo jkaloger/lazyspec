@@ -2,9 +2,9 @@
 use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, LinkEditor,
-    OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm,
-    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
-    StatusPicker, TypeKey, ZoneOrderingEditor,
+    OpenRequest, OverrideKeyPrompt, PickerKind, ProvenanceEditor, RelKey, SetPicker,
+    SettingsDeleteConfirm, SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt,
+    SettingsVariantPicker, StatusPicker, TypeKey,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -189,14 +189,25 @@ fn optional_variant<T>(variant: &str, parse: fn(&str) -> Option<T>) -> Option<Op
     parse(variant).map(Some)
 }
 
-/// The comma editor's seed for an edge type position: the wildcard as the `*`
-/// its author wrote, a set as its bare names. Unlike `TypeSelector::spelling`
-/// a multi-name set carries no brackets, because `FieldEditor::List` splits the
-/// seed on commas and would keep them inside the first and last name.
+/// The raw read-back of an edge type position: the wildcard as the `*` its
+/// author wrote, a set as its bare names. Unlike `TypeSelector::spelling` a
+/// multi-name set carries no brackets, so it reads as the value the editor holds
+/// rather than as a rendered list.
 fn type_position_raw(selector: &TypeSelector) -> String {
     match selector {
         TypeSelector::Any => WILDCARD.to_string(),
         TypeSelector::Types(names) => names.join(", "),
+    }
+}
+
+/// The rows the target-type picker shows as selected. `TypeSelector::Any` names
+/// no type, but the picker offers `*` as a choice alongside the declared names,
+/// so the wildcard seeds as that row -- and the exclusivity `SetPicker` enforces
+/// is what keeps it from ever sharing the set with one.
+fn type_selector_members(selector: &TypeSelector) -> Vec<String> {
+    match selector {
+        TypeSelector::Any => vec![WILDCARD.to_string()],
+        TypeSelector::Types(names) => names.clone(),
     }
 }
 
@@ -236,8 +247,9 @@ fn rel_selector_from(names: Vec<String>) -> RelSelector {
 /// does not catch it: its declared-name checks iterate `names()`, and an empty
 /// list iterates nothing. So the panel refuses the empty set at commit rather
 /// than reading it as `*`, which is a different claim the user did not make.
-/// ITERATION-391 replaces this editor for `from`/`to` and has to carry the same
-/// refusal.
+/// Shared by both commit paths -- `via`'s comma editor and the two type
+/// positions' picker -- because two wordings for one refusal is the drift AC4
+/// exists to prevent, one layer down.
 fn empty_edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<String> {
     if !names.is_empty() {
         return None;
@@ -713,11 +725,12 @@ pub struct App {
     /// The spec-path key prompt for seeding a new certification override. The key
     /// is entered before the override is inserted into the buffer.
     pub override_key_prompt: OverrideKeyPrompt,
-    /// The two-pane status-bar zone ordering editor, active while a
-    /// `statusbar.left/center/right` row is being reordered. `Some` routes keys to
-    /// the zone editor instead of the field list; commit writes the chosen order
-    /// back into `settings_buffer` (RFC-023 slice 7).
-    pub settings_zone_editor: Option<ZoneOrderingEditor>,
+    /// The two-pane Selected/Available picker, active while a `statusbar` zone
+    /// row is being reordered (RFC-023 slice 7) or an edge's `from`/`to` target
+    /// set is being chosen (STORY-260 AC3). `Some` routes keys to the picker
+    /// instead of the field list; commit writes the chosen members back into
+    /// `settings_buffer`.
+    pub settings_set_picker: Option<SetPicker>,
     /// The enum variant-picker overlay, active while an enum field (numbering,
     /// store, or reserved format) is being edited via `Enter`. `Some` routes keys
     /// to the picker; selecting writes the chosen variant back into
@@ -864,7 +877,7 @@ impl App {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -1025,8 +1038,8 @@ impl App {
             KeyContext::SettingsQuitPrompt
         } else if self.settings_editing {
             KeyContext::SettingsEditing
-        } else if self.settings_zone_editor.is_some() {
-            KeyContext::SettingsZoneEditor
+        } else if self.settings_set_picker.is_some() {
+            KeyContext::SettingsSetPicker
         } else if self.settings_variant_picker.is_some() {
             KeyContext::SettingsVariantPicker
         } else if self.settings_scaffold_offer.is_some() {
@@ -1351,9 +1364,13 @@ impl App {
         let Some(focused) = self.settings_focused_field() else {
             return;
         };
-        // A status-bar zone row opens the two-pane ordering editor, not text entry.
-        if focused.editor == FieldEditor::ZoneOrdering {
-            self.settings_open_zone_editor(focused.path);
+        // A two-pane row (a status-bar zone, an edge type position) opens the
+        // set picker, not text entry.
+        if matches!(
+            focused.editor,
+            FieldEditor::ZoneOrdering | FieldEditor::TypeSet
+        ) {
+            self.settings_open_picker(focused.path);
             return;
         }
         let editable = matches!(
@@ -1371,46 +1388,115 @@ impl App {
         self.settings_edit_error = None;
     }
 
-    /// Open the status-bar zone ordering editor for `path`, seeding it from the
-    /// matching buffer zone and its RFC-022 default names (so an unset zone starts
-    /// from what the bar actually renders, not a blank).
-    fn settings_open_zone_editor(&mut self, path: FieldPath) {
-        use crate::tui::views::status_bar::{
-            STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT, STATUS_BAR_DEFAULT_RIGHT,
-        };
-        let sb = &self.settings_buffer.ui.statusbar;
-        let (current, defaults): (Option<&Vec<String>>, &[&str]) = match path {
-            FieldPath::StatusbarLeft => (sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT),
-            FieldPath::StatusbarCenter => (sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER),
-            FieldPath::StatusbarRight => (sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT),
-            _ => return,
-        };
-        self.settings_zone_editor = Some(ZoneOrderingEditor::new(path.clone(), current, defaults));
-    }
-
-    /// Commit the active zone editor into the buffer at its `path`: a non-empty
-    /// list writes `Some(order)`; an empty list writes `Some(vec![])` (an explicit
-    /// clear, distinct from an untouched zone's `None`). Dirties the buffer and
-    /// closes the editor.
-    pub fn settings_commit_zone(&mut self) {
-        let Some(editor) = self.settings_zone_editor.take() else {
+    /// Open the two-pane set picker for `path`. No-op for a path with no picker.
+    fn settings_open_picker(&mut self, path: FieldPath) {
+        let Some(picker) = self.settings_picker_for(&path) else {
             return;
         };
-        let value = Some(editor.selected);
-        let sb = &mut self.settings_buffer.ui.statusbar;
-        match editor.path {
-            FieldPath::StatusbarLeft => sb.left = value,
-            FieldPath::StatusbarCenter => sb.center = value,
-            FieldPath::StatusbarRight => sb.right = value,
+        self.settings_edit_error = None;
+        self.settings_set_picker = Some(picker);
+    }
+
+    /// The picker `path` addresses: a status-bar zone seeded from the buffer zone
+    /// and its RFC-022 default names (so an unset zone starts from what the bar
+    /// actually renders, not a blank), over the component vocabulary and ordered;
+    /// an edge type position seeded from the position's own spelling, over `"*"`
+    /// plus every declared type name, unordered.
+    fn settings_picker_for(&self, path: &FieldPath) -> Option<SetPicker> {
+        use crate::tui::views::status_bar::{
+            STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT,
+            STATUS_BAR_DEFAULT_RIGHT,
+        };
+        let owned = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let zone = |current: Option<&Vec<String>>, defaults: &[&str]| {
+            let selected = current.cloned().unwrap_or_else(|| owned(defaults));
+            SetPicker::new(
+                path.clone(),
+                selected,
+                owned(STATUS_BAR_COMPONENTS),
+                PickerKind::Ordered,
+            )
+        };
+        let sb = &self.settings_buffer.ui.statusbar;
+        match path {
+            FieldPath::StatusbarLeft => Some(zone(sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT)),
+            FieldPath::StatusbarCenter => Some(zone(sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER)),
+            FieldPath::StatusbarRight => Some(zone(sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT)),
+            FieldPath::Edge { index, key } => {
+                let edge = self.settings_buffer.edges.get(*index)?;
+                let selector = match key {
+                    EdgeKey::From => &edge.from,
+                    EdgeKey::To => &edge.to,
+                    _ => return None,
+                };
+                Some(SetPicker::new(
+                    path.clone(),
+                    type_selector_members(selector),
+                    self.edge_type_vocabulary(),
+                    PickerKind::WildcardSet,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `"*"` plus every type the buffer declares, in declared order: the whole
+    /// vocabulary an edge type position may name. Offering anything else would
+    /// let the picker produce the unknown-type refusal the save then has to
+    /// report (ITERATION-389).
+    fn edge_type_vocabulary(&self) -> Vec<String> {
+        std::iter::once(WILDCARD.to_string())
+            .chain(
+                self.settings_buffer
+                    .documents
+                    .types
+                    .iter()
+                    .map(|t| t.name.clone()),
+            )
+            .collect()
+    }
+
+    /// Commit the active picker into the buffer at its `path`. A status-bar zone
+    /// writes `Some(order)` -- an empty list included, which is an explicit clear
+    /// distinct from an untouched zone's `None`. An edge type position refuses the
+    /// empty set in the comma editor's words and stays open, because a position
+    /// that names nothing matches nothing and the loader does not catch it.
+    pub fn settings_commit_picker(&mut self) {
+        let Some(picker) = self.settings_set_picker.take() else {
+            return;
+        };
+        if let Some(message) = empty_edge_position_refusal(&picker.path, &picker.selected) {
+            self.settings_edit_error = Some(message);
+            self.settings_set_picker = Some(picker);
+            return;
+        }
+        let members = picker.selected;
+        match &picker.path {
+            FieldPath::StatusbarLeft => self.settings_buffer.ui.statusbar.left = Some(members),
+            FieldPath::StatusbarCenter => self.settings_buffer.ui.statusbar.center = Some(members),
+            FieldPath::StatusbarRight => self.settings_buffer.ui.statusbar.right = Some(members),
+            path @ FieldPath::Edge {
+                key: EdgeKey::From | EdgeKey::To,
+                ..
+            } => self.settings_write(path, SettingsValue::List(members)),
             _ => return,
         }
+        self.settings_edit_error = None;
         self.settings_dirty = true;
     }
 
-    /// Close the zone editor without writing; the buffer is untouched (an untouched
-    /// zone stays `None`).
-    pub fn settings_cancel_zone(&mut self) {
-        self.settings_zone_editor = None;
+    /// Close the picker without writing; the buffer is untouched (an untouched
+    /// zone stays `None`, an untouched type position keeps its spelling).
+    pub fn settings_cancel_picker(&mut self) {
+        self.settings_set_picker = None;
+        self.settings_edit_error = None;
+    }
+
+    /// True iff the open picker binds the reorder keys.
+    pub(crate) fn settings_picker_reorders(&self) -> bool {
+        self.settings_set_picker
+            .as_ref()
+            .is_some_and(SetPicker::reorders)
     }
 
     pub fn settings_cancel_edit(&mut self) {
@@ -1466,6 +1552,7 @@ impl App {
             FieldEditor::Toggle
             | FieldEditor::EnumCycle { .. }
             | FieldEditor::ZoneOrdering
+            | FieldEditor::TypeSet
             | FieldEditor::ReadOnly => {}
         }
     }
@@ -3558,11 +3645,11 @@ impl App {
             .collect();
         expanded.sort();
 
-        // Zone editor inner state (pane / cursor / both lists), or None.
-        let zone = self.settings_zone_editor.as_ref().map(|z| {
+        // Set picker inner state (pane / cursor / both lists), or None.
+        let zone = self.settings_set_picker.as_ref().map(|p| {
             format!(
                 "{:?}|{}|{:?}|{:?}",
-                z.pane, z.cursor, z.selected, z.available
+                p.pane, p.cursor, p.selected, p.available
             )
         });
         // Variant picker inner state (selected index), or None.
@@ -3832,7 +3919,7 @@ pub(crate) mod parity_seed {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -4118,24 +4205,30 @@ pub(crate) mod parity_seed {
                 app.settings_dirty = true;
                 app.settings_quit_prompt.active = true;
             }
-            KeyContext::SettingsZoneEditor => {
-                use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+            KeyContext::SettingsSetPicker => {
+                use crate::tui::state::forms::{FieldPath, PickerKind, PickerPane, SetPicker};
+                use crate::tui::views::status_bar::STATUS_BAR_COMPONENTS;
                 app.view_mode = ViewMode::Settings;
-                // >= 2 selected + >= 2 available, cursor in the middle of selected
-                // (so K/J move-up/down both act and j/k both move).
-                let mut z = ZoneOrderingEditor::new(
+                // A status-bar zone, so the reorder keys the registry documents
+                // are live: >= 2 selected + >= 2 available, cursor in the middle
+                // of selected (so K/J move-up/down both act and j/k both move).
+                let mut picker = SetPicker::new(
                     FieldPath::StatusbarLeft,
-                    Some(&vec![
+                    vec![
                         "branch".to_string(),
                         "filter".to_string(),
                         "sync".to_string(),
-                    ]),
-                    &[],
+                    ],
+                    STATUS_BAR_COMPONENTS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    PickerKind::Ordered,
                 );
-                z.pane = ZonePane::Selected;
-                z.cursor = 1;
-                assert!(z.available.len() >= 2, "zone editor needs >= 2 available");
-                app.settings_zone_editor = Some(z);
+                picker.pane = PickerPane::Selected;
+                picker.cursor = 1;
+                assert!(picker.available.len() >= 2, "picker needs >= 2 available");
+                app.settings_set_picker = Some(picker);
             }
             KeyContext::SettingsVariantPicker => {
                 use crate::tui::state::forms::{FieldPath, SettingsVariantPicker};
@@ -4167,6 +4260,7 @@ mod tests {
     use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
     use crate::engine::traversal::TraversalWalk;
+    use crate::tui::state::forms::PickerPane;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn make_dummy_node(index: usize) -> DocListNode {
@@ -4314,7 +4408,7 @@ mod tests {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -7059,25 +7153,6 @@ mod tests {
         );
     }
 
-    // Clearing a type position yields the empty set, which matches nothing. The
-    // loader does not catch it -- its declared-type check iterates `names()`,
-    // and an empty list iterates nothing -- so the panel refuses it at commit
-    // rather than reading it as `*`, a claim the user did not make.
-    #[test]
-    fn clearing_an_edge_target_set_is_refused_and_leaves_the_buffer_alone() {
-        let mut app = edge_field_app(config_one_edge(), "to");
-        let before = app.settings_buffer.edges[0].to.clone();
-
-        app.settings_start_edit();
-        app.settings_edit_input.clear();
-        app.settings_confirm_edit();
-
-        assert_eq!(app.settings_buffer.edges[0].to, before);
-        assert!(!app.settings_dirty, "a refused edit writes nothing");
-        assert!(app.settings_edit_error.is_some());
-        assert!(app.settings_editing, "a refused edit stays in edit mode");
-    }
-
     // The refusal is scoped to edge positions: `types[].agents` shares the
     // comma editor, and an empty agents list is how that key is unset.
     #[test]
@@ -7094,6 +7169,242 @@ mod tests {
         assert!(app.settings_buffer.documents.types[0].agents.is_empty());
         assert!(app.settings_dirty);
         assert!(app.settings_edit_error.is_none());
+    }
+
+    // --- STORY-260 AC3: the target-type picker (ITERATION-391) ---
+
+    /// Three declared types and one edge whose `to` is the wildcard: the whole
+    /// vocabulary the picker offers, and the variant it has to be able to leave.
+    fn config_three_types_one_edge() -> Config {
+        Config {
+            edges: vec![EdgeDef {
+                name: "a-implements-b".to_string(),
+                from: TypeSelector::Types(vec!["a".to_string()]),
+                to: TypeSelector::Any,
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: None,
+                traversal: None,
+            }],
+            ..config_with_types(&["a", "b", "c"])
+        }
+    }
+
+    /// A settings app with the picker open on the labelled position of drilled
+    /// edge row 0, driven the way `Enter` drives it.
+    fn picker_app(label: &str) -> App {
+        let mut app = edge_field_app(config_three_types_one_edge(), label);
+        app.settings_start_edit();
+        assert!(
+            !app.settings_editing,
+            "`{label}` opens the picker, not the comma editor"
+        );
+        app
+    }
+
+    fn open_picker(app: &App) -> &SetPicker {
+        app.settings_set_picker
+            .as_ref()
+            .expect("the picker is open")
+    }
+
+    /// Add `name` from the Available pane, as `Space` does.
+    fn pick(app: &mut App, name: &str) {
+        let picker = app
+            .settings_set_picker
+            .as_mut()
+            .expect("the picker is open");
+        picker.pane = PickerPane::Available;
+        picker.cursor = picker
+            .available
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("{name} is not offered: {:?}", picker.available));
+        picker.add();
+    }
+
+    /// Remove `name` from the Selected pane, as `Space` does.
+    fn unpick(app: &mut App, name: &str) {
+        let picker = app
+            .settings_set_picker
+            .as_mut()
+            .expect("the picker is open");
+        picker.pane = PickerPane::Selected;
+        picker.cursor = picker
+            .selected
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("{name} is not selected: {:?}", picker.selected));
+        picker.remove();
+    }
+
+    // AC3: target types are added and removed one at a time, and the committed
+    // set is what the Selected pane holds -- not what any one keypress said.
+    #[test]
+    fn picking_two_target_types_then_dropping_one_commits_the_remaining_set() {
+        let mut app = picker_app("to");
+
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        unpick(&mut app, "b");
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["c".to_string()])
+        );
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_set_picker.is_none(),
+            "commit closes the picker"
+        );
+    }
+
+    // AC3: `*` is offered alongside the declared names, and the vocabulary is
+    // exactly that -- a name the config does not declare is the load error
+    // ITERATION-389 surfaces, and a picker that can produce it is a worse picker.
+    #[test]
+    fn the_target_picker_offers_the_wildcard_and_every_declared_type() {
+        let app = picker_app("to");
+        let picker = open_picker(&app);
+
+        let mut offered: Vec<&str> = picker
+            .selected
+            .iter()
+            .chain(picker.available.iter())
+            .map(String::as_str)
+            .collect();
+        offered.sort_unstable();
+        assert_eq!(offered, ["*", "a", "b", "c"]);
+    }
+
+    // `*` is the `TypeSelector::Any` variant, not a member of a set, so picking
+    // it clears the concrete names rather than joining them (ADR-031).
+    #[test]
+    fn picking_the_wildcard_clears_the_concrete_target_types() {
+        let mut app = picker_app("to");
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        app.settings_commit_picker();
+
+        app.settings_start_edit();
+        pick(&mut app, "*");
+        assert_eq!(
+            open_picker(&app).selected,
+            ["*"],
+            "the wildcard displaces the members it is not one of"
+        );
+        app.settings_commit_picker();
+
+        assert_eq!(app.settings_buffer.edges[0].to, TypeSelector::Any);
+    }
+
+    // The exclusivity holds in both directions: `Types(vec!["*"])` is a shape
+    // only this panel could produce, and the parser reads a scalar `"*"` as
+    // `Any`, so the picker must never assemble it.
+    #[test]
+    fn picking_a_type_while_the_wildcard_is_selected_drops_the_wildcard() {
+        let mut app = picker_app("to");
+        assert_eq!(
+            open_picker(&app).selected,
+            ["*"],
+            "a wildcard position seeds as the `*` its author wrote"
+        );
+
+        pick(&mut app, "b");
+        assert_eq!(open_picker(&app).selected, ["b"]);
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["b".to_string()])
+        );
+    }
+
+    // AC3 names `to`, but `from` is the same position on the same terms, and
+    // leaving two spellings live is the failure mode.
+    #[test]
+    fn the_from_position_opens_the_same_picker() {
+        let mut app = picker_app("from");
+        assert_eq!(open_picker(&app).selected, ["a"]);
+
+        pick(&mut app, "b");
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].from,
+            TypeSelector::Types(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    // A position that names nothing matches nothing, and the loader does not
+    // catch it -- its declared-type check iterates `names()`, and an empty list
+    // iterates nothing. The picker refuses it at commit in the words the comma
+    // editor used, because two wordings for one refusal is the drift AC4 is
+    // about, one layer down.
+    #[test]
+    fn committing_an_empty_target_set_is_refused_and_leaves_the_buffer_alone() {
+        let mut app = picker_app("to");
+        let before = app.settings_buffer.edges[0].to.clone();
+
+        unpick(&mut app, "*");
+        app.settings_commit_picker();
+
+        assert_eq!(app.settings_buffer.edges[0].to, before);
+        assert!(!app.settings_dirty, "a refused commit writes nothing");
+        assert_eq!(
+            app.settings_edit_error.as_deref(),
+            Some("`to` must name a type, or `*` for any")
+        );
+        assert!(
+            app.settings_set_picker.is_some(),
+            "a refused commit keeps the picker open so the set can be corrected"
+        );
+    }
+
+    // A type set is unordered -- `TypeSelector::Types` is a set spelled as a
+    // list and `EdgeDef::matches` is order-blind -- so the reorder keys would
+    // dirty the file and change no behaviour. They are not bound here.
+    #[test]
+    fn the_target_picker_binds_no_reorder_keys() {
+        let mut app = picker_app("to");
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        let before = open_picker(&app).selected.clone();
+        let picker = app.settings_set_picker.as_mut().unwrap();
+        picker.pane = PickerPane::Selected;
+        picker.cursor = 1;
+
+        press_settings(&mut app, KeyCode::Char('K'));
+        press_settings(&mut app, KeyCode::Char('J'));
+
+        assert_eq!(open_picker(&app).selected, before);
+        assert!(!open_picker(&app).reorders());
+    }
+
+    // The same keys still reorder a status-bar zone, whose order IS the render
+    // order: suppressing them for a type set must not suppress them there.
+    #[test]
+    fn a_status_bar_zone_picker_still_reorders() {
+        let mut app = settings_app(config_one_type(), "Interface", 2); // statusbar.left
+        app.settings_start_edit();
+        let picker = app.settings_set_picker.as_mut().expect("zone picker");
+        picker.pane = PickerPane::Selected;
+        picker.cursor = 1;
+        let expected = [picker.selected[1].clone(), picker.selected[0].clone()];
+
+        press_settings(&mut app, KeyCode::Char('K'));
+
+        assert_eq!(open_picker(&app).selected[..2], expected[..]);
+    }
+
+    /// Press `code` through the real settings key handler, so a test about a
+    /// keybinding is a test about the binding and not about the state op behind
+    /// it.
+    fn press_settings(app: &mut App, code: KeyCode) {
+        app.view_mode = ViewMode::Settings;
+        let root = app.store.root.clone();
+        let config = Config::default();
+        app.handle_key(code, KeyModifiers::NONE, &root, &config);
     }
 
     // A field's editor picks the commit path, and `settings_write` no-ops on a
@@ -7116,6 +7427,17 @@ mod tests {
                     assert!(app.settings_editing, "{label} opens the text editor");
                     app.settings_edit_input = "changed".to_string();
                     app.settings_confirm_edit();
+                }
+                FieldEditor::TypeSet => {
+                    app.settings_start_edit();
+                    let picker = app
+                        .settings_set_picker
+                        .as_mut()
+                        .unwrap_or_else(|| panic!("{label} opens the picker"));
+                    picker.pane = PickerPane::Available;
+                    picker.cursor = 0;
+                    picker.add();
+                    app.settings_commit_picker();
                 }
                 FieldEditor::EnumCycle { .. } => app.settings_space(),
                 other => panic!("{label} carries an editor with no edge commit path: {other:?}"),
@@ -7267,8 +7589,8 @@ repo = "owner/repo"
         let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
         focus_edge_field(&mut app, "to");
         app.settings_start_edit();
-        app.settings_edit_input = "rfc, story".to_string();
-        app.settings_confirm_edit();
+        pick(&mut app, "story");
+        app.settings_commit_picker();
         assert!(app.settings_dirty, "the edit dirtied the buffer");
         app.settings_footer_error = Some("an earlier save failed".to_string());
 
@@ -7287,6 +7609,28 @@ repo = "owner/repo"
         assert!(!app.settings_dirty, "dirty clears on success");
         assert_eq!(app.settings_footer_error, None, "footer clears on success");
         assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    // The loader refuses a wildcard written inside a list, so the picker's
+    // exclusivity has to reach disk as the scalar `"*"` -- `to = ["*"]` is a
+    // spelling only this panel could produce, and it would not load.
+    #[test]
+    fn picking_the_wildcard_saves_it_as_a_scalar() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        focus_edge_field(&mut app, "to");
+        app.settings_start_edit();
+        pick(&mut app, "*");
+        app.settings_commit_picker();
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error, None, "the save succeeded");
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            changed_config_lines(EDGES_SAVE_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = "*""#)],
+            "got: {out}"
+        );
     }
 
     // Edges joining the writer's set is the moment a table that used to be left
@@ -7374,13 +7718,27 @@ traversal = "chain"
             .to_string()
     }
 
-    /// Commit `input` into the labelled field of drilled edge row 0 the way the
-    /// panel does: open the editor, type, confirm.
+    /// Commit `input` into the labelled field of drilled edge row 0. A comma
+    /// editor is driven the way the panel drives it -- open, type, confirm. A
+    /// type position is written into the buffer directly, because its picker
+    /// offers only declared type names: the unknown-type shapes these
+    /// save-refusal tests need reach the panel by loading a file that names a
+    /// type `[[types]]` does not, never by picking. The picker's own commit path
+    /// is covered by the AC3 tests above.
     fn commit_edge_edit(app: &mut App, label: &str, input: &str) {
         focus_edge_field(app, label);
-        app.settings_start_edit();
-        app.settings_edit_input = input.to_string();
-        app.settings_confirm_edit();
+        let focused = app
+            .settings_focused_field()
+            .expect("the cursor is on a field");
+        if focused.editor == FieldEditor::TypeSet {
+            let names = input.split(',').map(|s| s.trim().to_string()).collect();
+            app.settings_write(&focused.path, SettingsValue::List(names));
+            app.settings_dirty = true;
+        } else {
+            app.settings_start_edit();
+            app.settings_edit_input = input.to_string();
+            app.settings_confirm_edit();
+        }
         assert!(app.settings_dirty, "the edit dirtied the buffer");
     }
 
@@ -8991,7 +9349,6 @@ name = "related-to"
     // and dirties it.
     #[test]
     fn iter192_ac4_zone_ordering_round_trip_into_buffer() {
-        use crate::tui::state::forms::ZonePane;
         use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
 
         let config = config_one_type(); // statusbar.left is None
@@ -9000,7 +9357,7 @@ name = "related-to"
         // Enter opens the zone editor (routed via start_edit).
         app.settings_start_edit();
         let editor = app
-            .settings_zone_editor
+            .settings_set_picker
             .as_ref()
             .expect("zone editor opens for a ZoneOrdering field");
         let defaults: Vec<String> = STATUS_BAR_DEFAULT_LEFT
@@ -9013,8 +9370,8 @@ name = "related-to"
         );
 
         // Remove the first selected name (default left = [mode, type_filter, doc_count]).
-        let z = app.settings_zone_editor.as_mut().unwrap();
-        z.pane = ZonePane::Selected;
+        let z = app.settings_set_picker.as_mut().unwrap();
+        z.pane = PickerPane::Selected;
         z.cursor = 0;
         let removed = z.selected[0].clone();
         z.remove();
@@ -9022,22 +9379,22 @@ name = "related-to"
         assert!(z.available.contains(&removed));
 
         // Add git_branch from Available, then move it up one.
-        let z = app.settings_zone_editor.as_mut().unwrap();
-        z.pane = ZonePane::Available;
+        let z = app.settings_set_picker.as_mut().unwrap();
+        z.pane = PickerPane::Available;
         z.cursor = z
             .available
             .iter()
             .position(|n| n == "git_branch")
             .expect("git_branch available");
         z.add();
-        z.pane = ZonePane::Selected;
+        z.pane = PickerPane::Selected;
         z.cursor = z.selected.len() - 1; // git_branch landed at the end
         z.move_up();
         let expected = z.selected.clone();
 
-        app.settings_commit_zone();
+        app.settings_commit_picker();
         assert!(
-            app.settings_zone_editor.is_none(),
+            app.settings_set_picker.is_none(),
             "commit closes the editor"
         );
         assert_eq!(
@@ -9052,8 +9409,6 @@ name = "related-to"
     // persists as Some(vec![]); both survive an atomic save round-trip.
     #[test]
     fn iter192_ac4_untouched_vs_cleared_zone_persist() {
-        use crate::tui::state::forms::ZonePane;
-
         const SRC: &str = r#"[naming]
 pattern = "{type}-{n:03}-{title}.md"
 
@@ -9077,13 +9432,13 @@ center = ["warnings"]
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center
         app.settings_start_edit();
-        let z = app.settings_zone_editor.as_mut().expect("center editor");
-        z.pane = ZonePane::Selected;
+        let z = app.settings_set_picker.as_mut().expect("center editor");
+        z.pane = PickerPane::Selected;
         while !z.selected.is_empty() {
             z.cursor = 0;
             z.remove();
         }
-        app.settings_commit_zone();
+        app.settings_commit_picker();
         assert_eq!(
             app.settings_buffer.ui.statusbar.center,
             Some(vec![]),
@@ -9117,20 +9472,22 @@ center = ["warnings"]
         );
     }
 
-    // AC5: the ordering editor only ever surfaces RFC-022 vocabulary -- both the
-    // seeded selected set and the available set are subsets of STATUS_BAR_COMPONENTS,
-    // and adding can only ever move a const name into selected.
+    // AC5: a zone picker only ever surfaces RFC-022 vocabulary -- both the
+    // seeded selected set and the available set are subsets of
+    // STATUS_BAR_COMPONENTS, and adding can only ever move a const name into
+    // selected. Driven through the App because the vocabulary is now the
+    // caller's to supply, so the const reaching the panes is the claim.
     #[test]
     fn iter192_ac5_editor_offers_only_vocabulary() {
-        use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
-        use crate::tui::views::status_bar::{STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_RIGHT};
+        use crate::tui::views::status_bar::STATUS_BAR_COMPONENTS;
 
         let vocab: std::collections::HashSet<&str> =
             STATUS_BAR_COMPONENTS.iter().copied().collect();
-        let mut editor =
-            ZoneOrderingEditor::new(FieldPath::StatusbarRight, None, STATUS_BAR_DEFAULT_RIGHT);
+        let mut app = settings_app(config_one_type(), "Interface", 4); // statusbar.right
+        app.settings_start_edit();
+        let picker = app.settings_set_picker.as_ref().expect("zone picker");
 
-        for name in editor.selected.iter().chain(editor.available.iter()) {
+        for name in picker.selected.iter().chain(picker.available.iter()) {
             assert!(
                 vocab.contains(name.as_str()),
                 "{name} is offered but not in the RFC-022 vocabulary"
@@ -9139,14 +9496,14 @@ center = ["warnings"]
 
         // Exhaustively add everything available; selected must remain within vocab
         // and never exceed the full vocabulary.
-        editor.pane = ZonePane::Available;
-        while !editor.available.is_empty() {
-            editor.cursor = 0;
-            editor.add();
+        let picker = app.settings_set_picker.as_mut().unwrap();
+        picker.pane = PickerPane::Available;
+        while !picker.available.is_empty() {
+            picker.cursor = 0;
+            picker.add();
         }
-        assert!(editor.available.is_empty());
-        assert_eq!(editor.selected.len(), STATUS_BAR_COMPONENTS.len());
-        for name in &editor.selected {
+        assert_eq!(picker.selected.len(), STATUS_BAR_COMPONENTS.len());
+        for name in &picker.selected {
             assert!(vocab.contains(name.as_str()));
         }
     }
@@ -9155,8 +9512,13 @@ center = ["warnings"]
         SettingsVariantPicker::new(FieldPath::Naming, &["sqids", "reserved"], 0)
     }
 
-    fn dummy_zone_editor() -> ZoneOrderingEditor {
-        ZoneOrderingEditor::new(FieldPath::Naming, None, &["branch"])
+    fn dummy_set_picker() -> SetPicker {
+        SetPicker::new(
+            FieldPath::Naming,
+            vec!["branch".to_string()],
+            vec!["branch".to_string(), "sync".to_string()],
+            PickerKind::Ordered,
+        )
     }
 
     fn dummy_scaffold_offer() -> ScaffoldResult {
@@ -9290,8 +9652,8 @@ center = ["warnings"]
 
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
-        app.settings_zone_editor = Some(dummy_zone_editor());
-        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+        app.settings_set_picker = Some(dummy_set_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsSetPicker);
 
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
@@ -9317,15 +9679,15 @@ center = ["warnings"]
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
         app.settings_editing = true;
-        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_set_picker = Some(dummy_set_picker());
         assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
 
         // zone editor outranks the variant picker.
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
-        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_set_picker = Some(dummy_set_picker());
         app.settings_variant_picker = Some(dummy_variant_picker());
-        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+        assert_eq!(app.active_key_context(), KeyContext::SettingsSetPicker);
 
         // variant picker outranks the scaffold offer.
         let mut app = make_test_app(1);

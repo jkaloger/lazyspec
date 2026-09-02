@@ -39,7 +39,7 @@ pub enum KeyContext {
     Settings,
     SettingsEditing,
     SettingsQuitPrompt,
-    SettingsZoneEditor,
+    SettingsSetPicker,
     SettingsVariantPicker,
     SettingsScaffoldOffer,
 }
@@ -615,9 +615,11 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
             ],
         }],
 
-        // handle_settings_key zone-editor branch, keys.rs:795.
-        KeyContext::SettingsZoneEditor => vec![KeybindGroup {
-            title: "Settings · Zone order",
+        // handle_settings_key set-picker branch, keys.rs:863. K/J are listed
+        // because a status-bar zone binds them; an edge type set is unordered
+        // and suppresses them, which the picker's own hint line reflects.
+        KeyContext::SettingsSetPicker => vec![KeybindGroup {
+            title: "Settings · Choose members",
             binds: vec![
                 bind!("Tab", "Switch pane", [k(KeyCode::Tab)]),
                 bind!(
@@ -635,8 +637,8 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                     "Add/remove",
                     [k(KeyCode::Char(' ')), k(KeyCode::Enter)]
                 ),
-                bind!("K", "Move up", [k(KeyCode::Char('K'))]),
-                bind!("J", "Move down", [k(KeyCode::Char('J'))]),
+                bind!("K", "Move up (ordered only)", [k(KeyCode::Char('K'))]),
+                bind!("J", "Move down (ordered only)", [k(KeyCode::Char('J'))]),
                 bind!("c", "Commit", [k(KeyCode::Char('c'))]),
                 bind!("Esc", "Cancel", [k(KeyCode::Esc)]),
             ],
@@ -700,7 +702,7 @@ pub fn context_label(ctx: KeyContext) -> &'static str {
         KeyContext::Settings => "Settings",
         KeyContext::SettingsEditing => "Settings · Edit field",
         KeyContext::SettingsQuitPrompt => "Settings · Unsaved changes",
-        KeyContext::SettingsZoneEditor => "Settings · Zone order",
+        KeyContext::SettingsSetPicker => "Settings · Choose members",
         KeyContext::SettingsVariantPicker => "Settings · Choose variant",
         KeyContext::SettingsScaffoldOffer => "Settings · Dependency scaffold",
     }
@@ -736,7 +738,7 @@ mod tests {
         KeyContext::Settings,
         KeyContext::SettingsEditing,
         KeyContext::SettingsQuitPrompt,
-        KeyContext::SettingsZoneEditor,
+        KeyContext::SettingsSetPicker,
         KeyContext::SettingsVariantPicker,
         KeyContext::SettingsScaffoldOffer,
     ];

@@ -2245,21 +2245,21 @@ pub fn settings_fields(
                         FieldEditor::Text,
                         key(EdgeKey::Name),
                     ));
-                    // All three selector positions are name sets, so all three
-                    // take the comma editor `types[].agents` uses. ITERATION-391
-                    // replaces it for `from`/`to` with the member-at-a-time
-                    // picker AC3 asks for; `via` keeps it (see
-                    // `rel_selector_from` for why it is not a cycler).
+                    // The two type positions take the member-at-a-time picker
+                    // (AC3), whose vocabulary is `*` plus the declared type
+                    // names. `via` keeps the comma editor: its vocabulary is the
+                    // relationships, and see `rel_selector_from` for why it is
+                    // not a cycler.
                     fields.push(field(
                         "from",
                         e.from.spelling(),
-                        FieldEditor::List,
+                        FieldEditor::TypeSet,
                         key(EdgeKey::From),
                     ));
                     fields.push(field(
                         "to",
                         e.to.spelling(),
-                        FieldEditor::List,
+                        FieldEditor::TypeSet,
                         key(EdgeKey::To),
                     ));
                     fields.push(field(
@@ -4171,6 +4171,19 @@ mod tests {
             ]
             .map(|key| FieldPath::Edge { index: 0, key })
         );
+    }
+
+    // STORY-260 AC3: the two type positions carry the member-at-a-time picker
+    // and nothing else -- leaving the interim comma editor live on either would
+    // be two spellings of one edit. `via` keeps the comma editor: it is a
+    // relationship set, and ITERATION-387 settled that.
+    #[test]
+    fn settings_fields_edge_type_positions_carry_the_picker_and_via_the_comma_editor() {
+        let fields = settings_fields(3, 0, Some(0), &edges_fixture());
+
+        assert_eq!(field_by_label(&fields, "from").editor, FieldEditor::TypeSet);
+        assert_eq!(field_by_label(&fields, "to").editor, FieldEditor::TypeSet);
+        assert_eq!(field_by_label(&fields, "via").editor, FieldEditor::List);
     }
 
     // STORY-260 AC2: the optional qualifiers cycle over a list that leads with

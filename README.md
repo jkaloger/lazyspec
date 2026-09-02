@@ -199,7 +199,7 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `h` / `l`      | Switch category (also `Left` / `Right`)                                                                                                                    |
 | `j` / `k`      | Move between fields / entries (also `Down` / `Up`)                                                                                                         |
-| `Enter`        | Drill into a collection entry, or start editing a field                                                                                                    |
+| `Enter`        | Drill into a collection entry, or start editing a field (a set field opens the two-pane picker below)                                                      |
 | `n`            | Add a new entry to a collection (Document Types / Relationships / Edges seed a default and drill in; Certification prompts for a spec-path key)            |
 | `d`            | Delete the selected collection entry, behind a confirm (refuses the last relationship)                                                                     |
 | `Space`        | Toggle a boolean / cycle an enum field                                                                                                                     |
@@ -208,6 +208,21 @@ Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `
 | `Esc`          | Cancel an in-progress edit, or undrill from an entry                                                                                                       |
 | `w` / `Ctrl-S` | Save changes to `.lazyspec.toml` (validates the whole config)                                                                                              |
 | `q` / `Esc`    | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel`                                                                                    |
+
+#### Choosing set members
+
+Some settings fields hold a set of names rather than a single value: an `[[edges]]` row's `from` and `to` (target document types, or `*` for any) and the `[tui.statusbar]` zones (`left` / `center` / `right`). `Enter` on one of these opens a two-pane picker — the members currently chosen on the left, the remaining choices on the right — which adds and removes them one at a time.
+
+| Key             | Action                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| `Tab`           | Switch between the Selected and Available panes                                                   |
+| `j` / `k`       | Move within the focused pane (also `Down` / `Up`)                                                 |
+| `Space` / `Enter` | Add the focused available name, or remove the focused selected one                              |
+| `K` / `J`       | Move the focused member up / down — status-bar zones only, where the order is the render order    |
+| `c`             | Commit the chosen members into the buffer (`w` / `Ctrl-S` still saves the whole config)           |
+| `Esc`           | Close without changing the field                                                                  |
+
+An edge's target types are a set, not a sequence, so the picker offers no ordering for them; `*` is offered alongside the declared type names and is exclusive with them, since it selects any type rather than naming one. A target set must name something: committing an empty one is refused.
 
 ### Graph view
 

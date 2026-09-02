@@ -1,3 +1,4 @@
+use crate::engine::config::WILDCARD;
 use crate::engine::document::DocType;
 use crate::tui::state::settings_guard::TypeFieldImpact;
 use std::path::PathBuf;
@@ -442,64 +443,97 @@ pub enum FieldEditor {
     /// (`statusbar.left/center/right`). The current value + per-zone defaults are
     /// derived from the `FieldPath` when the editor opens, so the variant is unit.
     ZoneOrdering,
+    /// The same two-pane editor over an edge's `from`/`to` position: an unordered
+    /// set of declared type names in which `"*"` is the `TypeSelector::Any`
+    /// variant rather than a member (ADR-031). Vocabulary and current value are
+    /// derived from the `FieldPath` when the picker opens, so the variant is unit.
+    TypeSet,
     ReadOnly,
 }
 
-/// Which pane the status-bar zone editor cursor is on: the ordered `Selected`
-/// list (the zone's chosen components) or the `Available` vocabulary list.
+/// Which pane the two-pane picker's cursor is on: the `Selected` list (the
+/// field's chosen members) or the `Available` vocabulary list.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ZonePane {
+pub enum PickerPane {
     Selected,
     Available,
 }
 
-/// The two-pane reorderable editor state for one status-bar zone. `selected` is
-/// the zone's components in render order; `available` is the remaining
-/// `STATUS_BAR_COMPONENTS` vocabulary (const order preserved). `path` records
-/// which zone the commit writes back to. Operations are pure (no terminal), so
-/// they are App-testable.
+/// What a [`SetPicker`] is choosing, and so which of its operations mean
+/// anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PickerKind {
+    /// A status-bar zone: `selected`'s order is the render order, so the picker
+    /// reorders and every member stands alone.
+    Ordered,
+    /// An edge type position: an unordered set (`TypeSelector::Types` is a set
+    /// spelled as a list, and `EdgeDef::matches` is order-blind) in which `"*"`
+    /// is a different selector variant rather than a member, so it can never
+    /// share the set with a type name.
+    WildcardSet,
+}
+
+/// The two-pane picker state for one settings field. `selected` is the field's
+/// current members; `available` is `vocabulary` minus them, in vocabulary order.
+/// `path` records which field the commit writes back to. Operations are pure (no
+/// terminal), so they are App-testable.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ZoneOrderingEditor {
+pub struct SetPicker {
     pub path: FieldPath,
     pub selected: Vec<String>,
     pub available: Vec<String>,
     pub cursor: usize,
-    pub pane: ZonePane,
+    pub pane: PickerPane,
+    pub kind: PickerKind,
+    /// Every name the picker may offer, in offer order. Retained so `remove` can
+    /// put a name back where the vocabulary has it.
+    vocabulary: Vec<String>,
 }
 
-impl ZoneOrderingEditor {
-    /// Seed the editor for `path` from the zone's current buffer value: `selected`
-    /// is the current names (or `defaults` when the zone is `None`); `available`
-    /// is `STATUS_BAR_COMPONENTS` minus the selected names, in const order.
-    pub fn new(path: FieldPath, current: Option<&Vec<String>>, defaults: &[&str]) -> Self {
-        let selected: Vec<String> = match current {
-            Some(names) => names.clone(),
-            None => defaults.iter().map(|s| s.to_string()).collect(),
-        };
-        let available = Self::available_for(&selected);
-        ZoneOrderingEditor {
+impl SetPicker {
+    /// Seed a picker for `path`: `selected` is the field's current members,
+    /// `vocabulary` every name the picker may offer, in offer order. Both come
+    /// from the caller rather than a const, so the same two panes serve a
+    /// status-bar zone and an edge type position.
+    pub fn new(
+        path: FieldPath,
+        selected: Vec<String>,
+        vocabulary: Vec<String>,
+        kind: PickerKind,
+    ) -> Self {
+        let available = Self::available_for(&vocabulary, &selected);
+        SetPicker {
             path,
             selected,
             available,
             cursor: 0,
-            pane: ZonePane::Selected,
+            pane: PickerPane::Selected,
+            kind,
+            vocabulary,
         }
     }
 
-    /// The vocabulary minus `selected`, in `STATUS_BAR_COMPONENTS` order. Only
-    /// const names can ever appear here (AC5).
-    fn available_for(selected: &[String]) -> Vec<String> {
-        crate::tui::views::status_bar::STATUS_BAR_COMPONENTS
+    /// `vocabulary` minus `selected`, in vocabulary order. Only a vocabulary
+    /// name can ever appear here, so the picker cannot offer a name its field's
+    /// config does not declare.
+    fn available_for(vocabulary: &[String], selected: &[String]) -> Vec<String> {
+        vocabulary
             .iter()
             .filter(|name| !selected.iter().any(|s| s == *name))
-            .map(|s| s.to_string())
+            .cloned()
             .collect()
+    }
+
+    /// True iff reordering `selected` changes what the field means. Only this
+    /// kind binds [`SetPicker::move_up`] / [`SetPicker::move_down`].
+    pub fn reorders(&self) -> bool {
+        self.kind == PickerKind::Ordered
     }
 
     fn active_len(&self) -> usize {
         match self.pane {
-            ZonePane::Selected => self.selected.len(),
-            ZonePane::Available => self.available.len(),
+            PickerPane::Selected => self.selected.len(),
+            PickerPane::Available => self.available.len(),
         }
     }
 
@@ -514,8 +548,8 @@ impl ZoneOrderingEditor {
 
     pub fn toggle_pane(&mut self) {
         self.pane = match self.pane {
-            ZonePane::Selected => ZonePane::Available,
-            ZonePane::Available => ZonePane::Selected,
+            PickerPane::Selected => PickerPane::Available,
+            PickerPane::Available => PickerPane::Selected,
         };
         self.clamp_cursor();
     }
@@ -531,39 +565,53 @@ impl ZoneOrderingEditor {
         }
     }
 
-    /// Move the focused Available name to the end of `selected`. No-op unless the
-    /// Available pane is focused and non-empty. Only ever surfaces a const name.
+    /// Move the focused Available name into `selected`. No-op unless the
+    /// Available pane is focused and non-empty. Only ever surfaces a vocabulary
+    /// name. A [`PickerKind::WildcardSet`] additionally enforces the exclusivity
+    /// its selector has -- `"*"` displaces every name and every name displaces
+    /// `"*"` -- so the commit never has to silently discard half a selection.
     pub fn add(&mut self) {
-        if self.pane != ZonePane::Available {
+        if self.pane != PickerPane::Available {
             return;
         }
         if self.cursor >= self.available.len() {
             return;
         }
         let name = self.available.remove(self.cursor);
+        if self.kind == PickerKind::WildcardSet {
+            if name == WILDCARD {
+                self.selected.clear();
+            } else {
+                self.selected.retain(|n| n != WILDCARD);
+            }
+            self.selected.push(name);
+            self.available = Self::available_for(&self.vocabulary, &self.selected);
+            self.clamp_cursor();
+            return;
+        }
         self.selected.push(name);
         self.clamp_cursor();
     }
 
-    /// Move the focused Selected name back into `available`, restoring const order
-    /// among the available names. No-op unless the Selected pane is focused and
-    /// non-empty.
+    /// Move the focused Selected name back into `available`, restoring
+    /// vocabulary order among the available names. No-op unless the Selected
+    /// pane is focused and non-empty.
     pub fn remove(&mut self) {
-        if self.pane != ZonePane::Selected {
+        if self.pane != PickerPane::Selected {
             return;
         }
         if self.cursor >= self.selected.len() {
             return;
         }
         self.selected.remove(self.cursor);
-        self.available = Self::available_for(&self.selected);
+        self.available = Self::available_for(&self.vocabulary, &self.selected);
         self.clamp_cursor();
     }
 
     /// Swap the focused Selected name with the one above it. No-op off the Selected
     /// pane or at the top.
     pub fn move_up(&mut self) {
-        if self.pane != ZonePane::Selected || self.cursor == 0 {
+        if self.pane != PickerPane::Selected || self.cursor == 0 {
             return;
         }
         self.selected.swap(self.cursor, self.cursor - 1);
@@ -573,7 +621,7 @@ impl ZoneOrderingEditor {
     /// Swap the focused Selected name with the one below it. No-op off the Selected
     /// pane or at the bottom.
     pub fn move_down(&mut self) {
-        if self.pane != ZonePane::Selected {
+        if self.pane != PickerPane::Selected {
             return;
         }
         if self.cursor + 1 >= self.selected.len() {
