@@ -52,6 +52,18 @@ Two lines keep the work verbs from overlapping:
 | `create-audit`| Run a criteria-based review and document findings for user triage                                 |
 | `configure-type`| Interview the user to co-author one custom document type; write its template and `[[types]]` config via the config-write CLI (runs independently of the pipeline) |
 
+### Source of truth: these files are edited, AGENTS.md is generated
+
+`skills/<verb>/SKILL.md` is the only hand-edited copy of this prose. `src/engine/skills.rs` embeds each one into the binary at build time, and `lazyspec skills install` writes them out: one file per skill under `.claude/skills/` for `--runtime claude`, a single concatenation at `./AGENTS.md` for `--runtime agents-md`. This repo's own `AGENTS.md` is that generated artifact. **Edit the skill, run `cargo build`, then regenerate.** Never hand-edit `AGENTS.md` -- and never install from a stale binary, which writes the prose it was compiled with and looks like the edit did not take.
+
+The checked-in `AGENTS.md` had drifted from these files in both directions before ITERATION-398, so the rule above was applied by regenerating rather than by back-porting. Nothing was back-ported, because every line `AGENTS.md` held alone was one of three things, none of them prose worth keeping:
+
+- a restatement the skill already makes -- the router's `## Rules` summary and its bullet list of rationalizations repeat the `<HARD-GATE>` and the left column of the rationalization table verbatim
+- a flag the whole set standardised away -- `--body-file` alongside every `--body`, which all seven verbs now state as `--body` alone
+- a superseded model -- the pre-`/orchestrate` router in which `/lazy` never dispatched work at all and stopped dead at a ready plan
+
+A generated file that has drifted is not a second source. If it holds something worth keeping, back-port it into the skill first, then regenerate.
+
 ### Usage
 
 Add the skills directory to your Claude Code settings or copy individual skills into your project's `.claude/skills/` directory. The `/lazy` skill will handle routing from there.

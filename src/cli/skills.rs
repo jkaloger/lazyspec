@@ -198,6 +198,29 @@ mod tests {
     }
 
     #[test]
+    fn shipped_router_derives_type_boundaries_from_the_edge_table() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_install(root, None).unwrap();
+
+        let router = fs::read_to_string(root.join(".claude/skills/lazy/SKILL.md")).unwrap();
+        let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        for (surface, prose) in [("router skill", &router), ("AGENTS.md", &agents)] {
+            for retired in ["UNION", "parent-child rule"] {
+                assert!(
+                    !prose.contains(retired),
+                    "{surface} still derives boundaries from `{retired}`"
+                );
+            }
+        }
+        assert!(
+            router.contains("`edges`"),
+            "router must name the config key it reads boundaries from"
+        );
+    }
+
+    #[test]
     fn runtime_claude_skips_agents_md() {
         let dir = tempdir().unwrap();
         let root = dir.path();

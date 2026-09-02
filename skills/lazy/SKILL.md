@@ -72,7 +72,7 @@ dispatch -> author: "authoring step due"
 dispatch -> review: "critique due"
 dispatch -> reviewwork: "work landed, awaiting critique"
 dispatch -> confirm: "work is the next step"
-dispatch -> boundary: "next step crosses a type boundary (parent_type or parent-child rule)"
+dispatch -> boundary: "next step crosses a type boundary (a chain row in edges)"
 
 confirm -> execute: "approved, one ready unit"
 confirm -> orchestrate: "approved, several ready units"
@@ -88,7 +88,19 @@ reviewwork -> locate: "GREEN -> advance to completion"
 
 <HARD-GATE>
 CONFIRM THE PLAN BEFORE MUTATING. Before the FIRST graph-mutating dispatch of a turn (`create`, `link`, `/advance`, or any authoring verb) AND before `/execute` or `/orchestrate`, present the planned commands and the direction (which doc, which type, which parent link, what the fix/feature is), then STOP for explicit user approval. A prior "do it", "go ahead", "use /lazy", or the user naming the fix is approval of the WORK -- never of THIS specific plan (the parent link, the scope, the type choice are decisions to surface). General go-ahead is not step approval. This binds the actor: it holds whether `/lazy` is the entry router OR you are acting inline as the orchestrator -- running a verb directly does not exempt you. Violating the letter of this gate is violating its spirit.
-A **type-boundary edge** is any edge to a different type, declared EITHER via `parent_type` OR via a parent-child `rule` (`shape: parent-child`, carrying `child`/`parent`/`link`). Both express the DAG; a config may use one, the other, or both. Derive boundaries from the UNION. Never assume `parent_type` is populated -- many configs encode the entire DAG in `rules` with every `parent_type` null. Null `parent_type` everywhere does NOT mean "no boundaries"; read the boundaries from the rules.
+A **type-boundary edge** is a row in `config --json`'s `edges` whose `traversal` is `chain`, whose `to` admits the type of the document you are on, and whose `from` names a different type. `edges` is the only source of a boundary: a type's `parent_type` declares none, and no other key does either.
+**A row reads child-to-parent.** `from = "iteration"`, `to = "story"`, `via = "implements"` says an iteration implements a story. So the child types of the document you are on are a REVERSE lookup -- the `from` side of the rows whose `to` admits its type, never the `to` side of the rows whose `from` does. Run it:
+
+```
+lazyspec config --json | jq -r --arg t <doc-type> '
+  [ .edges[]
+    | select(.traversal == "chain")
+    | select([.to] | flatten | any(. == $t or . == "*"))
+    | [.from] | flatten[] | select(. != "*") ] | unique | .[]'
+```
+
+What it prints is the far side of the crossing: the child type to create. `$t` is the near side, the document you already have. Read a row the other way and you propose creating the parent that exists.
+`"*"` sits on any position and filters rather than lists. On `to` it admits every type, so such a row applies to whatever document you are on. On `from` it names no type at all, so such a row yields no child type and no crossing to report -- a config that means concrete children names them in `from`. Take the type vocabulary from `types`; never expand a `"*"` into one. A row's `via` is the relation to pass to `lazyspec link`.
 Do NOT auto-run `create <child-type>` across a type-boundary edge. Crossing into a different type is always human-initiated -- even when a `require_parent_status` gate is already satisfied. Within-document progression is automatic; crossing a type boundary is not.
 **No work without a reviewed plan -- the PLAN->EXECUTE gate.** Authoring and advancing a delivery document's plan (task breakdown, AC) is automatic within that document. *Starting the work* is not: it requires an explicit, separate approval of THIS work plan -- which units, in which order, by which route. Present it and STOP. Never begin work off a general go-ahead, and never off a plan that has not been through /review.
 Compute the dispatch table from `lazyspec config --json` at runtime. There is no fixed chain in this prose.
@@ -99,7 +111,7 @@ After every graph-mutating dispatch (/advance and the authoring verbs), run `laz
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from `parent_type` edges AND parent-child `rules` (the union); honor every `rule`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 - Do NOT author, link, advance, or execute before the user approves the direction for THIS step -- even when they already authorized the work, named the fix, or said "use /lazy".
 </NEVER>
 
@@ -126,7 +138,7 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 
 This is the resolve-context fold-in: `/lazy` reads context from the CLI rather than calling a separate skill.
 
-1. `lazyspec config --json` -- the full DAG: `types` (with `intent`, `authorship`, `lifecycle`, `parent_type`), `relationships`, and `rules` (including any `require_parent_status` gates).
+1. `lazyspec config --json` -- the full DAG, in three keys: `types` for the type vocabulary and each type's `intent`, `authorship` ceiling and `lifecycle`; `edges` for the parent-child DAG, one row per declared edge (`name`, `from`, `to`, `via`, `required`, `traversal`); `relationships` for the link verbs a row's `via` names.
 2. `lazyspec status --json` -- what documents exist and each one's current status.
 3. `lazyspec context --json` -- the chain around the user's current document.
 
@@ -137,7 +149,7 @@ When the user arrives with a **bug, defect, test failure, or unexpected behaviou
 1. **Root cause first.** REQUIRED SUB-SKILL: systematic-debugging. Complete its Phase 1 (root-cause investigation) BEFORE authoring any fix document. No fix doc before root cause -- that is the systematic-debugging Iron Law, and it gates this branch.
 2. **Pick the fix-doc type from config.** Read `config --json`. If a type's `intent` describes defects/bugs/fixes (a user may have a dedicated `bug` type), use that type. Otherwise use the delivery type -- the type whose breakdown describes implementation work (in the shipped default config that is `iteration`, but read it; never hardcode the name).
 3. **Find the document the bug touches.** `lazyspec search "<area>" --json` plus `context --json` to locate the story/spec/feature covering the buggy area.
-4. **Propose a create+link that satisfies the type's relation rules.** The fix-doc type may carry a `parent_type` or a `relation-existence` rule (e.g. `iterations-need-stories`). Propose the `create` plus the `link` (using the configured relation) that satisfies those rules -- linking the fix doc to the doc it touches. If no document satisfies a required relation, report that the human must pick or create the parent first. NEVER create a standalone doc that bypasses a rule, and never invent a link the user did not confirm.
+4. **Propose a create+link that satisfies the type's edges.** The fix-doc type may sit on the `from` side of a required edge (e.g. the `iterations-need-stories` edge, whose `required` is `error`). Propose the `create` plus the `link` (using that row's `via` relation) that satisfies those edges -- linking the fix doc to the doc it touches. If no document satisfies a required edge, report that the human must pick or create the parent first. NEVER create a standalone doc that bypasses a required edge, and never invent a link the user did not confirm.
 5. **Crossing into the fix-doc type is a type boundary -- human-initiated.** Lazy proposes the exact `create` + `link` commands and stops (see Stop-at-Type-Boundary). It does not auto-create the fix doc.
 
 ## Locate-in-DAG
@@ -146,7 +158,7 @@ From config + status + context, determine which document and type the user is on
 
 ## Dispatch (computed from config)
 
-Build the dispatch table at runtime from config. No `parent_type` chain is hardcoded here. (The shipped default config happens to define a chain among types named `rfc`, `story`, and `iteration` -- treat that only as the shipped default, never as a routing assumption.)
+Build the dispatch table at runtime from config. No chain is hardcoded here; the chain is whatever `edges` says at runtime. (The shipped default config happens to define a chain among types named `rfc`, `story`, and `iteration` -- treat that only as the shipped default, never as a routing assumption.)
 
 **Within-document progression is automatic.** If the current document has an eligible outgoing `lifecycle` edge (the edge exists and its gate, if any, is met), dispatch the matching verb WITHOUT asking:
 
@@ -173,7 +185,7 @@ Approval of the work is not approval of this plan. "Go ahead", "use /lazy", or t
 
 ## Stop-at-Type-Boundary
 
-When the only remaining next step would create a child of a **different type** -- crossing a type-boundary edge (a `parent_type` edge OR a parent-child `rule`, per the HARD-GATE union) -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
+When the only remaining next step would create a child of a **different type** -- crossing a type-boundary edge (a `chain` row in `edges` whose `to` admits this document's type, per the HARD-GATE) -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
 
 This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it with the ceiling verb for the child type (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate), like:
 
