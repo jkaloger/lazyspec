@@ -185,13 +185,25 @@ Approval of the work is not approval of this plan. "Go ahead", "use /lazy", or t
 
 ## Stop-at-Type-Boundary
 
-When the only remaining next step would create a child of a **different type** -- crossing a type-boundary edge (a `chain` row in `edges` whose `to` admits this document's type, per the HARD-GATE) -- `/lazy` **STOPS.** It reports the boundary and what the human can do next; it never auto-runs `create <child-type>`.
+When the only remaining next step would cross into a **different type** -- traversing a type-boundary edge (a `chain` row in `edges`, per the HARD-GATE) -- `/lazy` **STOPS.** The boundary is the edge, not one type: a row's far side is a set of types, and any one member satisfies the row. So the report names every type the edge admits and leaves the choice among them to the human; `/lazy` never auto-runs `create <child-type>` for a member of that set.
 
-This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the child _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. Report it with the ceiling verb for the child type (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate), like:
+This holds **even when a `require_parent_status` gate is already satisfied.** Gate-clear makes the crossing _eligible_, not _automatic_. Crossing a type boundary is always human-initiated. A ceiling belongs to the type, not to the edge, so a three-member set can carry three ceilings and therefore three different verbs (per Authorship-aware dispatch: `human` -> /scaffold, `assisted` -> /co-write, `generated` -> /generate). That is why the report is a list: one line per type, carrying that type's own verb.
 
-> `<doc>` (type `<type>`) is at status `<status>`; its child type `<child-type>` is now eligible to create. Crossing types is human-initiated -- run <ceiling-verb> to start one.
+**Two commands assemble it.** `validate --json` says *that* an edge is unsatisfied. `config --json` says *which* types satisfy it. `validate`'s `errors` are flat strings -- one rendered finding each -- so a finding's type set is prose; do not string-parse it back out, however direct a source it looks. Read the set structured, from `config --json`: `edges[].to` when the crossing goes up (the document you hold needs a parent), and the `from` sides of the rows admitting this type when it goes down (the HARD-GATE's reverse lookup, which already collects them as a set).
 
-**Multi-hop:** if the required parent type is itself empty (e.g. an iteration needs a story, but no story exists), report the FULL chain the human must author in order -- each hop is a separate human-initiated crossing -- not just the nearest one.
+When the row names its types:
+
+> `<doc>` (type `<type>`) is at status `<status>`; edge `<edge-name>` is now eligible to cross. Any one of these satisfies it -- crossing types is human-initiated, so pick one and run its verb:
+> - `<type-a>` -- run <ceiling-verb-a>
+> - `<type-b>` -- run <ceiling-verb-b>
+
+When the far side is `"*"` there is no list to name, because the row declined to name one:
+
+> `<doc>` (type `<type>`) is at status `<status>`; edge `<edge-name>` goes `to a document of any type`. Pick the type from `types` in `config --json`, then run that type's ceiling verb.
+
+Never expand a `"*"` into the type vocabulary. Eleven names offered as equal options claim a choice the config did not make.
+
+**Multi-hop:** when the type at the far side has no document to link to either, report the whole chain the human must author, nearest hop first -- each hop is a separate human-initiated crossing. **Enumerate at the nearest hop only.** The hop being crossed now gets one line per type; each hop beyond it gets a single line naming its edge and its set in the finding's own wording -- `to one of: spike, story, bug`, or `to a document of any type` for a `"*"` row -- and no lines of its own. The choice at a later hop is not live until the earlier one is made, and three types at this hop against two at the next is six chains nobody asked to read.
 
 with every value read from config + status for that run.
 

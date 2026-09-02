@@ -147,8 +147,11 @@ fn via_phrase(via: &RelSelector) -> String {
     }
 }
 
-/// How an unsatisfied edge's target set reads in the finding.
-fn to_phrase(to: &TypeSelector) -> String {
+/// How an unsatisfied edge's target set reads in the finding. The `/lazy` skill
+/// reports the same set when it stops at a type boundary, and reads it back in
+/// this wording; `shipped_router_phrases_a_target_set_as_the_finding_does`
+/// (`src/cli/skills.rs`) holds the two together.
+pub(crate) fn to_phrase(to: &TypeSelector) -> String {
     match to {
         TypeSelector::Any => "to a document of any type".to_string(),
         TypeSelector::Types(names) => format!("to one of: {}", names.join(", ")),

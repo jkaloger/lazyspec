@@ -133,6 +133,8 @@ pub fn run_install(root: &Path, runtime: Option<Runtime>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::TypeSelector;
+    use crate::engine::validation::to_phrase;
     use std::fs;
     use tempfile::tempdir;
 
@@ -315,6 +317,59 @@ mod tests {
             scaffold.contains("`via`"),
             "scaffold must name the edge-row key its relation comes from"
         );
+    }
+
+    /// A crossing whose far side admits several types offers a choice, and the
+    /// report has to carry the whole set with a verb against each member.
+    #[test]
+    fn shipped_router_reports_every_type_a_crossing_admits() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_install(root, None).unwrap();
+
+        let router = fs::read_to_string(root.join(".claude/skills/lazy/SKILL.md")).unwrap();
+        assert!(
+            !router.contains("its child type `<child-type>` is now eligible to create"),
+            "router reports one arbitrary member where the crossing admits a set"
+        );
+        assert!(
+            router.contains("one line per type"),
+            "router must say the report is a list, since the ceiling verb is per type"
+        );
+        for source in ["`validate --json`", "`edges[].to`"] {
+            assert!(
+                router.contains(source),
+                "router must name {source} among the commands the report is assembled from"
+            );
+        }
+    }
+
+    /// The boundary report and the `UnsatisfiedEdge` finding name the same target
+    /// set, so they must name it the same way. A comment in `to_phrase` asking for
+    /// that would not fail when the prose drifts, and this paragraph is rewritten
+    /// once per slice.
+    #[test]
+    fn shipped_router_phrases_a_target_set_as_the_finding_does() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_install(root, None).unwrap();
+
+        let named = to_phrase(&TypeSelector::Types(vec!["spike".into(), "story".into()]));
+        let frame = named.split_once("spike").unwrap().0.trim_end();
+        let wildcard = to_phrase(&TypeSelector::Any);
+
+        let router = fs::read_to_string(root.join(".claude/skills/lazy/SKILL.md")).unwrap();
+        let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        for (surface, prose) in [("router skill", &router), ("AGENTS.md", &agents)] {
+            for phrase in [frame, wildcard.as_str()] {
+                assert!(
+                    prose.contains(phrase),
+                    "{surface} phrases a target set its own way; the finding says `{phrase}`"
+                );
+            }
+        }
     }
 
     #[test]
