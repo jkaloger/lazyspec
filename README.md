@@ -482,7 +482,7 @@ Run the `--dry-run` first. The migration is a rewrite, not an addition, and the 
 
 **Append-only, for relationships and lifecycles.** It adds the standard `[[relationships]]` that are missing, comparing by name, so user-added relationships are kept and nothing is duplicated. It injects the default `lifecycle` into any `[[types]]` entry that lacks one (a type that already declares a lifecycle is left untouched); migrated types are reported under `lifecycles_added`. Nothing the file already said is taken away.
 
-Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the three standard constraints. They land as `[[edges]]` rows, which is the only shape that loads; no run of `fix --config` ever writes a `[[rules]]` block. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
+Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the three standard constraints, the same rows `lazyspec init` scaffolds. They land as `[[edges]]`, which is the only shape that loads; no run of `fix --config` ever writes a `[[rules]]` block. A standard row naming a type the config does not declare is skipped, since an edge row's type names are checked at load. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
 
 **A translating rewrite, for the edge migration.** `[[rules]]` blocks and `[[relationships]].traversal` markers become `[[edges]]` rows, and the source declarations are then deleted — a config cannot declare its DAG twice. A `parent-child` rule becomes one row whose `via` names every relationship the config marks `traversal = "chain"`; if it marks none, the rule was satisfiable by nothing and the row carries `via = []`, which is satisfied by nothing too. Two things do not survive the deletion:
 
@@ -642,35 +642,9 @@ name = "related-to"
 traversal = "related"
 ```
 
-### Validation rules
-
-> [!WARNING]
-> `[[rules]]` is retired. A config declaring one is rejected on every command; declare constraints as [`[[edges]]`](#edges) instead, and run `lazyspec fix --config` to translate an existing `[[rules]]` block. This section documents the old shape only so you can recognise it in a config you are migrating.
-
-Validation rules defined structural constraints between document types. Two shapes were supported:
-
-- `parent-child`: the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
-- `relation-existence`: documents of a given type must have at least one relationship.
-
-```toml
-[[rules]]
-shape = "parent-child"
-name = "stories-need-rfcs"
-child = "story"
-parent = "rfc"
-severity = "warning"
-
-[[rules]]
-shape = "relation-existence"
-name = "adrs-need-relations"
-type = "adr"
-require = "any-relation"
-severity = "error"
-```
-
 ### Edges
 
-An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. Where a retired `parent-child` rule was satisfied by any chain relationship, an edge is satisfied only by a relationship its `via` names.
+An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. `[[edges]]` is where the DAG is declared, and the only place: a document of a type named in `from` is expected to carry a relation named in `via` to a document of a type named in `to`, and an edge is satisfied only by a relationship its `via` names.
 
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |

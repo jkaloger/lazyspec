@@ -760,11 +760,10 @@ mod tests {
     }
 
     // Verify item 2: a Chain relationship forms the chain purely from its
-    // `traversal` marker, with NO ParentChild rule declaring the link.
+    // `traversal` marker, with NO `[[edges]]` row declaring the link.
     #[test]
-    fn chain_forms_from_traversal_marker_without_validation_rule() {
-        let mut config = Config::default();
-        config.rules.clear();
+    fn chain_forms_from_traversal_marker_without_an_edge_row() {
+        let config = Config::default();
         assert!(
             config.relationship_by_name("implements").unwrap().traversal == Some(Traversal::Chain),
             "implements is Chain by marker"

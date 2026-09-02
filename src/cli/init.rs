@@ -36,7 +36,6 @@ pub fn starter_config() -> Config {
         },
         relationships: starter_relationships(),
         ui: UiConfig::default(),
-        rules: Vec::new(),
         edges: starter_edges(),
         ref_count_ceiling: 15,
         certification: CertificationConfig::default(),
@@ -918,7 +917,6 @@ mod tests {
         assert!(config.type_by_name("alpha").is_some());
         assert!(config.type_by_name("beta").is_some());
         assert!(config.edges.is_empty(), "the wizard declares no edges");
-        assert!(config.rules.is_empty(), "the wizard declares no rules");
     }
 
     // AC3: the DAG summary names every type, its lifecycle transitions, its

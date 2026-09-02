@@ -148,7 +148,6 @@ fn init_writes_edges_and_no_rules() {
         "init edges must equal the canonical starter_edges()"
     );
     assert_eq!(config.edges.len(), 3, "three starter constraints");
-    assert!(config.rules.is_empty(), "init declares no rules");
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
     assert!(

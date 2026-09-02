@@ -19,9 +19,9 @@ use std::path::Path;
 /// relationship no row states a traversal for keeps its global marker as a
 /// blanket fallback. Unioning would make the whole change inert wherever it
 /// matters most: this project marks `targets` chain globally, so a union would
-/// keep every `targets` link hierarchy no matter what the table said. This is
-/// not the coexistence rule `[[rules]]` and `[[edges]]` follow for findings --
-/// findings stack, a walk cannot.
+/// keep every `targets` link hierarchy no matter what the table said. Findings
+/// from two rows stack; a walk cannot, because a triple is on one walk or the
+/// other and not both.
 #[derive(Debug, Default)]
 pub struct TraversalWalk {
     /// Every row that states a `traversal`, kept whole because deciding a
@@ -112,9 +112,8 @@ impl TraversalWalk {
     /// child, which is no answer at all; a config author who wants concrete
     /// child types names them in `from`. The blanket relationship set is silent
     /// here for the same reason, one step further: a global marker names a
-    /// relationship and no types whatsoever. While `[[rules]]` exists, its
-    /// parent/child pairs are the answer for such configs, which is why the
-    /// caller unions the two.
+    /// relationship and no types whatsoever. A config that wants an answer here
+    /// states the pairs as concrete rows.
     ///
     /// [`TypeSelector::names`]: crate::engine::config::TypeSelector::names
     pub(crate) fn child_types_for(&self, parent_type: &str) -> Vec<String> {

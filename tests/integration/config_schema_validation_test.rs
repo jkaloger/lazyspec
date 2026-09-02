@@ -56,8 +56,9 @@ fn repo_lazyspec_toml_validates_against_schema() {
 }
 
 // A minimal-but-complete config used as the positive control for (c): identical
-// to the invalid fixture except for a valid `severity`, proving the rejection
-// below is caused specifically by the enum violation, not some unrelated defect.
+// to the invalid fixture except for a valid `required` severity, proving the
+// rejection below is caused specifically by the enum violation, not some
+// unrelated defect.
 const VALID_MINIMAL_TOML: &str = r#"
 [[types]]
 name = "spec"
@@ -78,12 +79,12 @@ name = "implements"
 inverse = "implemented-by"
 traversal = "chain"
 
-[[rules]]
-shape = "parent-child"
+[[edges]]
 name = "stories-need-specs"
-child = "story"
-parent = "spec"
-severity = "warning"
+from = "story"
+to = "spec"
+via = "implements"
+required = "warning"
 "#;
 
 #[test]
@@ -101,13 +102,13 @@ fn valid_minimal_config_is_accepted() {
     );
 }
 
-// (c) An invalid `severity` (not in the serde-renamed lowercase enum) must be
-// rejected. `severity = "fatal"` fails the `parent-child` branch's Severity
-// constraint and matches no other rule shape, so the whole document is invalid.
+// (c) An invalid severity (not in the serde-renamed lowercase enum) must be
+// rejected. `required = "fatal"` fails the edge row's Severity constraint, so
+// the whole document is invalid.
 #[test]
 fn invalid_severity_value_is_rejected() {
     let invalid_toml =
-        VALID_MINIMAL_TOML.replace(r#"severity = "warning""#, r#"severity = "fatal""#);
+        VALID_MINIMAL_TOML.replace(r#"required = "warning""#, r#"required = "fatal""#);
     assert_ne!(
         invalid_toml, VALID_MINIMAL_TOML,
         "fixture substitution must actually change the severity"

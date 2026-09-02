@@ -3985,8 +3985,8 @@ mod tests {
     }
 
     // STORY-259: the settings panel no longer offers a category for editing
-    // `[[rules]]`, so nothing in the TUI can author a shape the load path is about
-    // to refuse. Category 3 is now Numbering, a field-view, not an entry list.
+    // `[[rules]]`, so nothing in the TUI can author a shape the load path
+    // refuses. Category 3 is now Numbering, a field-view, not an entry list.
     #[test]
     fn settings_categories_offer_no_validation_rules() {
         let cats = App::settings_categories();

@@ -352,7 +352,6 @@ impl App {
 
                                 let ctx = match crate::engine::prompt::build_render_context(
                                     &self.store,
-                                    config,
                                     &doc,
                                     &*self.fs,
                                 ) {
@@ -383,7 +382,6 @@ impl App {
                                 };
                                 let ctx = match crate::engine::prompt::build_render_context(
                                     &self.store,
-                                    config,
                                     &doc,
                                     &*self.fs,
                                 ) {

@@ -7327,7 +7327,6 @@ mod tests {
             },
             relationships: crate::engine::config::starter_relationships(),
             ui: UiConfig::default(),
-            rules: vec![],
             edges: vec![],
             ref_count_ceiling: 0,
             certification: Default::default(),

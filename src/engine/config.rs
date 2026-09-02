@@ -27,26 +27,6 @@ pub enum Traversal {
     Related,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
-#[serde(tag = "shape")]
-pub enum ValidationRule {
-    #[serde(rename = "parent-child")]
-    ParentChild {
-        name: String,
-        child: String,
-        parent: String,
-        severity: Severity,
-    },
-    #[serde(rename = "relation-existence")]
-    RelationExistence {
-        name: String,
-        #[serde(rename = "type")]
-        doc_type: String,
-        require: String,
-        severity: Severity,
-    },
-}
-
 /// One entry in the `[[edges]]` block: a directed edge kind in the document DAG
 /// (RFC-067). `from` names the source type, `to` the permitted target types,
 /// `via` the relationship that realizes the edge. `required` is the severity of
@@ -626,7 +606,7 @@ pub struct AttrDef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct TypeDef {
     /// The type's canonical singular name, used as its identifier in commands,
-    /// relationships, and rules (e.g. `rfc`, `story`).
+    /// relationships, and edges (e.g. `rfc`, `story`).
     pub name: String,
     /// The plural label shown in the TUI and used for grouping (e.g. `rfcs`).
     pub plural: String,
@@ -756,8 +736,7 @@ pub struct RelationshipDef {
     pub github_native: Option<String>,
     /// This relationship's blanket traversal role, holding for every pair of
     /// types it links. The walks read it only where no `[[edges]]` row assigns
-    /// this relationship a role; `[[rules]]`, which has no notion of a triple,
-    /// reads it unconditionally.
+    /// this relationship a role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traversal: Option<Traversal>,
 }
@@ -990,13 +969,6 @@ pub struct Config {
     pub relationships: Vec<RelationshipDef>,
     #[serde(rename = "tui")]
     pub ui: UiConfig,
-    // Serialized so `to_toml` writes `[[rules]]` into the config it emits, but
-    // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
-    // set is skipped for the same reason `edges` skips one: a bare `rules = []`
-    // key would be hoisted above the tables and collide with any `[[rules]]`
-    // header appended after it.
-    #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
-    pub rules: Vec<ValidationRule>,
     // Serialized so `to_toml` writes `[[edges]]` into the config it emits, but
     // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
     // set is skipped: a bare `edges = []` key would be hoisted above the tables
@@ -1159,9 +1131,15 @@ struct RawConfig {
     /// The relationship vocabulary, one per `[[relationships]]` block. Each
     /// declares a name and optional inverse; the block is required.
     relationships: Option<Vec<RelationshipDef>>,
-    /// Structural validation rules between types, one per `[[rules]]` block
-    /// (`parent-child` or `relation-existence` shapes), checked by `validate`.
-    rules: Option<Vec<ValidationRule>>,
+    // The retired `[[rules]]` table, read as opaque values and never as a
+    // shape: nothing in the load path understands a rule any more, and the one
+    // command that still does -- `fix --config` -- reads the source text
+    // itself. The field survives its type only so a config still declaring the
+    // table is refused by name rather than silently ignored (STORY-259,
+    // ADR-011). It is absent from the schema for the same reason: `[[rules]]`
+    // is not part of the config language the schema documents.
+    #[schemars(skip)]
+    rules: Option<Vec<toml::Value>>,
     /// The document DAG's edge kinds, one per `[[edges]]` block: source type,
     /// permitted target types, the relationship realizing the edge, and the
     /// severity of its absence.
@@ -1307,39 +1285,12 @@ pub fn starter_types() -> Vec<TypeDef> {
     ]
 }
 
-/// The canonical starter validation rules. Not injected by the load path; only
-/// the config `init` writes and the test-only `Config::default()` use these.
-pub fn default_rules() -> Vec<ValidationRule> {
-    vec![
-        ValidationRule::ParentChild {
-            name: "stories-need-rfcs".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Warning,
-        },
-        ValidationRule::ParentChild {
-            name: "iterations-need-stories".to_string(),
-            child: "iteration".to_string(),
-            parent: "story".to_string(),
-            severity: Severity::Error,
-        },
-        ValidationRule::RelationExistence {
-            name: "adrs-need-relations".to_string(),
-            doc_type: "adr".to_string(),
-            require: "any-relation".to_string(),
-            severity: Severity::Error,
-        },
-    ]
-}
-
-/// The three starter constraints stated as `[[edges]]` rows: the config `init`
-/// writes into a fresh project (ADR-011 keeps the load path free of all three).
-/// The two chain constraints name `implements` rather than wildcarding `via`.
-/// `fix --config` translates a `parent-child` rule to `via = "*"` so a migration
-/// cannot turn a project's valid documents into findings (STORY-258 AC2), but a
-/// fresh project has no documents to protect, and a wildcard would scaffold
-/// exactly the imprecision the edge table exists to escape. `init`'s output is
-/// therefore not the migration's output.
+/// The three starter constraints stated as `[[edges]]` rows: what the config
+/// `init` writes into a fresh project (ADR-011 keeps the load path free of all
+/// three), and what `fix --config` seeds into a config that has declared no DAG
+/// of its own. The two chain constraints name `implements` rather than
+/// wildcarding `via`, because a wildcard would scaffold exactly the imprecision
+/// the edge table exists to escape.
 ///
 /// No row states `traversal`. A row that did would suppress `implements`'s
 /// blanket `traversal = "chain"` marker (ADR-035) and narrow the chain to the
@@ -1382,8 +1333,8 @@ pub fn starter_edges() -> Vec<EdgeDef> {
 
 /// The starter hierarchy stated the way ITERATION-380 made the five surviving
 /// hierarchy findings read it: as `[[edges]]` rows. This is what `fix --config`
-/// writes when it migrates [`default_rules`] and the starter `implements`
-/// marker (ADR-032), minus `required` -- these rows exist to declare the walk,
+/// writes when it migrates a legacy config's three standard constraints and the
+/// starter `implements` marker (ADR-032), minus `required` -- these rows exist to declare the walk,
 /// and a fixture that wants the missing-link findings too states `required`
 /// itself.
 ///
@@ -1436,12 +1387,6 @@ impl Default for Config {
             },
             relationships: starter_relationships(),
             ui: UiConfig::default(),
-            // No rules. Strict load refuses a config that declares any
-            // (STORY-259), so a default fixture carrying them would serialize
-            // through `to_toml` into a config that cannot be loaded back --
-            // and nothing reads them, since `ParentLinkRule` is gone. A
-            // fixture that needs the legacy declaration states it itself.
-            rules: Vec::new(),
             edges: Vec::new(),
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
@@ -1575,8 +1520,7 @@ impl Config {
         // Non-empty, because `rules = []` declares nothing and there is nothing
         // in it for the remedy to translate: refusing it would name a fix that
         // makes no change.
-        let rules = raw.rules.unwrap_or_default();
-        if !lenient && !rules.is_empty() {
+        if !lenient && raw.rules.is_some_and(|rules| !rules.is_empty()) {
             bail!(
                 "[[rules]] is retired: the document DAG is declared in [[edges]]. Run \
                  `lazyspec fix --config --dry-run` to see what migrating this config \
@@ -1753,7 +1697,6 @@ impl Config {
             },
             relationships,
             ui: raw.tui.unwrap_or_default(),
-            rules,
             edges,
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
@@ -2010,24 +1953,20 @@ name = "related-to"
             "schema must expose the top-level `types` property"
         );
 
-        // The internally `shape`-tagged ValidationRule enum lands as a `oneOf`
-        // of two subschemas, each pinning `shape` to a const kebab-case tag.
-        let variants = json["$defs"]["ValidationRule"]["oneOf"]
-            .as_array()
-            .expect("ValidationRule must be a oneOf of variant subschemas");
-        assert_eq!(variants.len(), 2, "two rule shapes");
-
-        let shape_consts: Vec<&str> = variants
-            .iter()
-            .filter_map(|v| v["properties"]["shape"]["const"].as_str())
-            .collect();
+        // STORY-259 AC5. The retired `[[rules]]` table is not part of the config
+        // language any more, so the schema defines no shape for it and offers no
+        // key to state it under. `$defs` is asserted as well as `properties`
+        // because a schema that still carried the rule shape would go on
+        // documenting the retired grammar wherever a reader followed a `$ref`.
         assert!(
-            shape_consts.contains(&"parent-child"),
-            "expected a parent-child shape const, got {shape_consts:?}"
+            json["$defs"]["ValidationRule"].is_null(),
+            "the schema must define no rule shape, got {}",
+            json["$defs"]["ValidationRule"]
         );
         assert!(
-            shape_consts.contains(&"relation-existence"),
-            "expected a relation-existence shape const, got {shape_consts:?}"
+            json["properties"]["rules"].is_null(),
+            "the schema must offer no `rules` key, got {}",
+            json["properties"]["rules"]
         );
 
         let edge_props = &json["$defs"]["EdgeDef"]["properties"];
@@ -2138,7 +2077,6 @@ required = "warning"
     fn strict_load_accepts_the_same_constraint_stated_as_an_edge() {
         let config = Config::parse(&edges_declaration()).expect("[[edges]] must load");
 
-        assert!(config.rules.is_empty());
         assert_eq!(
             config.edges,
             vec![EdgeDef {
@@ -2153,23 +2091,15 @@ required = "warning"
     }
 
     // ADR-012: the lenient read is the one place strict load is bypassed, and
-    // `fix --config` is the only caller. It has to go on parsing the table the
+    // `fix --config` is the only caller. It has to go on ACCEPTING the table the
     // refusal above names, or the remedy the refusal points at could not read
-    // the config it is meant to repair.
+    // the config it is meant to repair. What the blocks say is no longer this
+    // module's business -- the migration reads them off the source text
+    // (`ops::fix::config`) -- so all that is asserted here is that the read
+    // does not fail.
     #[test]
-    fn the_lenient_read_still_parses_the_rules_the_strict_load_refuses() {
-        let config =
-            Config::parse_lenient(&rules_declaration()).expect("the lenient read accepts rules");
-
-        assert_eq!(
-            config.rules,
-            vec![ValidationRule::ParentChild {
-                name: "stories-need-rfcs".to_string(),
-                child: "story".to_string(),
-                parent: "rfc".to_string(),
-                severity: Severity::Warning,
-            }]
-        );
+    fn the_lenient_read_still_accepts_the_rules_the_strict_load_refuses() {
+        Config::parse_lenient(&rules_declaration()).expect("the lenient read accepts rules");
     }
 
     // An empty array declares nothing, and `fix --config` finds nothing in it
@@ -2177,10 +2107,8 @@ required = "warning"
     // remedy cannot repair.
     #[test]
     fn strict_load_accepts_an_empty_rules_array() {
-        let config = Config::parse(&format!("{EDGE_PREAMBLE}\nrules = []\n"))
+        Config::parse(&format!("{EDGE_PREAMBLE}\nrules = []\n"))
             .expect("an empty rules array declares nothing");
-
-        assert!(config.rules.is_empty());
     }
 
     #[test]

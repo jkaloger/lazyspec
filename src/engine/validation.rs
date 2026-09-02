@@ -1943,10 +1943,9 @@ mod edge_tests {
         }
     }
 
-    /// No hierarchy declared, in either place that declares one. Every
-    /// assertion here is about `UnsatisfiedEdge`, which reads a row's own `via`
-    /// and `to` and asks nothing of the traversal table -- and the configs these
-    /// tests build carry no `[[rules]]`, so nothing else reads a chain either.
+    /// No hierarchy declared. Every assertion here is about `UnsatisfiedEdge`,
+    /// which reads a row's own `via` and `to` and asks nothing of the traversal
+    /// table.
     fn store_from(docs: Vec<DocMeta>) -> super::super::store::Store {
         let mut map = HashMap::new();
         for d in docs {
@@ -1989,8 +1988,8 @@ mod edge_tests {
         }
     }
 
-    /// The edge under test with `[[rules]]` cleared, so any finding can only
-    /// have come from the edge checker.
+    /// The edge under test and nothing else, so any finding can only have come
+    /// from the edge checker.
     fn config_with_edge(edge: EdgeDef) -> Config {
         config_with_edges(vec![edge])
     }
@@ -2000,7 +1999,6 @@ mod edge_tests {
         relationships.push(targets_relationship());
         Config {
             relationships,
-            rules: Vec::new(),
             edges,
             ..Config::default()
         }
@@ -2699,7 +2697,6 @@ mod hierarchy_from_edges_tests {
     /// One chain row, `story -implements-> rfc`, and no rules at all.
     fn stories_implement_rfcs() -> Config {
         Config {
-            rules: Vec::new(),
             relationships: unmarked_relationships(),
             edges: vec![EdgeDef {
                 name: "stories-implement-rfcs".to_string(),

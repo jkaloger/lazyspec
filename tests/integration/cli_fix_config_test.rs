@@ -732,7 +732,6 @@ fn fix_config_translates_rules_and_traversal_into_edges() {
     // Strict load is the real gate: the translated rows have to name declared
     // types and relationships, and must not read as a traversal contradiction.
     let config = Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
-    assert!(config.rules.is_empty());
     assert!(config.relationships.iter().all(|r| r.traversal.is_none()));
 
     let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
@@ -791,7 +790,6 @@ fn fix_config_injects_relationships_and_the_standard_constraints() {
 
     // The three standard constraints arrive as `[[edges]]`, not as `[[rules]]`:
     // seeding them through the translation is what keeps one run enough.
-    assert!(config.rules.is_empty(), "no rules are written: {text}");
     let by_name = |name: &str| config.edges.iter().find(|e| e.name == name).unwrap();
 
     let stories = by_name("stories-need-rfcs");
@@ -876,7 +874,6 @@ fn fix_config_result_passes_strict_load() {
     // Strict load path returns Ok.
     let config = Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
     assert_eq!(config.relationships.len(), 4);
-    assert!(config.rules.is_empty());
     assert_eq!(config.edges.len(), 5, "3 constraints + 2 traversal rows");
     // A sample relationship reference resolves against the injected registry.
     assert_eq!(
@@ -1386,7 +1383,6 @@ url = "https://example.invalid"
 
     // The user's own rule is translated like any other, through the one
     // relationship the config marks chain.
-    assert!(config.rules.is_empty());
     let tracked = config
         .edges
         .iter()

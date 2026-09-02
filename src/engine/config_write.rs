@@ -5,7 +5,7 @@ use crate::engine::config::{
     default_git_ref_remote, default_normalize, default_skills_entry, default_table_columns,
     AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
     RelSelector, RelationshipDef, ReservedFormat, Severity, Traversal, TypeDef, TypeSelector,
-    ValidationRule, WILDCARD,
+    WILDCARD,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -23,7 +23,7 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_agents(&mut doc, buffer);
     write_skills(&mut doc, buffer);
     write_git_ref(&mut doc, buffer);
-    write_rules(&mut doc, buffer);
+    remove_rules(&mut doc);
     write_edges(&mut doc, buffer);
 
     Ok(doc.to_string())
@@ -553,62 +553,14 @@ fn write_git_ref(doc: &mut DocumentMut, buffer: &Config) {
     );
 }
 
-fn write_rules(doc: &mut DocumentMut, buffer: &Config) {
-    if !doc.contains_key("rules") {
-        if buffer.rules.is_empty() {
-            return;
-        }
-        doc.insert("rules", Item::ArrayOfTables(ArrayOfTables::new()));
-    }
-    let Some(rules) = doc.get_mut("rules").and_then(Item::as_array_of_tables_mut) else {
-        return;
-    };
-    reconcile_array_of_tables(rules, &buffer.rules, rule_name, update_rule_table);
-}
-
-fn rule_name(rule: &ValidationRule) -> &str {
-    match rule {
-        ValidationRule::ParentChild { name, .. } => name,
-        ValidationRule::RelationExistence { name, .. } => name,
-    }
-}
-
-fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
-    let shape_changed = entry.get("shape").and_then(Item::as_str) != Some(rule_shape(rule));
-    // A shape (enum) edit switches the rule's variant, so the previous variant's
-    // body keys are no longer valid and must be cleared before the new variant is
-    // written. `name`/`severity` are common to both variants.
-    if shape_changed {
-        for key in ["child", "parent", "link", "type", "require"] {
-            entry.remove(key);
-        }
-    }
-    match rule {
-        ValidationRule::ParentChild {
-            name,
-            child,
-            parent,
-            severity,
-        } => {
-            set_str(entry, "name", name);
-            set_str(entry, "shape", "parent-child");
-            set_str(entry, "child", child);
-            set_str(entry, "parent", parent);
-            set_str(entry, "severity", severity_str(severity));
-        }
-        ValidationRule::RelationExistence {
-            name,
-            doc_type,
-            require,
-            severity,
-        } => {
-            set_str(entry, "name", name);
-            set_str(entry, "shape", "relation-existence");
-            set_str(entry, "type", doc_type);
-            set_str(entry, "require", require);
-            set_str(entry, "severity", severity_str(severity));
-        }
-    }
+/// Delete the retired `[[rules]]` table, whatever it says. There is no buffer
+/// field to reconcile it against any more (STORY-259) and nothing may author
+/// one, so the writer's only business with the table is removing it -- which is
+/// what `fix --config` needs after translating its blocks to `[[edges]]`
+/// (ADR-032). Every other caller loads strictly and so cannot be holding a
+/// source that declares one, making this a no-op there.
+fn remove_rules(doc: &mut DocumentMut) {
+    doc.remove("rules");
 }
 
 fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
@@ -731,13 +683,6 @@ fn reconcile_array_of_tables<T>(
                 tables.push(table);
             }
         }
-    }
-}
-
-fn rule_shape(rule: &ValidationRule) -> &'static str {
-    match rule {
-        ValidationRule::ParentChild { .. } => "parent-child",
-        ValidationRule::RelationExistence { .. } => "relation-existence",
     }
 }
 
@@ -1099,10 +1044,9 @@ inverse = "implemented-by"
 "#;
 
     /// A legacy source declaring one `[[rules]]` block, for the writer paths
-    /// that are about the rule table itself. Only [`Config::parse_lenient`]
-    /// reads it — the read `fix --config` uses (ADR-012) — because strict load
-    /// refuses the shape. `write_rules` outlives the loader's rule path by one
-    /// slice (ITERATION-385 takes both).
+    /// that are about the retired table. Only [`Config::parse_lenient`] reads
+    /// it — the read `fix --config` uses (ADR-012) — because strict load
+    /// refuses the shape.
     const RULES_SRC: &str = r#"[[types]]
 name = "rfc"
 plural = "rfcs"
@@ -1120,30 +1064,6 @@ child = "story"
 parent = "rfc"
 severity = "error"
 "#;
-
-    #[test]
-    fn shape_change_clears_stale_variant_keys() {
-        let buffer = {
-            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
-            c.rules[0] = ValidationRule::RelationExistence {
-                name: "story-has-rfc".to_string(),
-                doc_type: "story".to_string(),
-                require: "implements".to_string(),
-                severity: Severity::Error,
-            };
-            c
-        };
-
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-
-        assert!(out.contains(r#"shape = "relation-existence""#));
-        assert!(out.contains(r#"type = "story""#));
-        assert!(out.contains(r#"require = "implements""#));
-        assert!(!out.contains("child"));
-        assert!(!out.contains("parent"));
-        assert!(!out.contains("link"));
-        Config::parse_lenient(&out).unwrap();
-    }
 
     #[test]
     fn adding_a_type_appends_and_preserves_existing_comments() {
@@ -1242,7 +1162,7 @@ name = "related-to"
 
     #[test]
     fn add_and_delete_in_one_render() {
-        // Buffer: add a type AND remove the one rule.
+        // Buffer: add a type; the render takes the source's one rule away.
         let buffer = {
             let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.documents.types.push(TypeDef {
@@ -1269,7 +1189,6 @@ name = "related-to"
                 clickup_task_type: None,
                 clickup_custom_field_map: None,
             });
-            c.rules.clear();
             c
         };
 
@@ -1278,7 +1197,6 @@ name = "related-to"
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(reparsed.documents.types.len(), 2);
         assert!(reparsed.type_by_name("spec").is_some());
-        assert!(reparsed.rules.is_empty());
         assert!(!out.contains(r#"name = "story-has-rfc""#));
     }
 
@@ -1358,27 +1276,6 @@ name = "related-to"
                 .as_deref(),
             Some("sub-issue")
         );
-    }
-
-    #[test]
-    fn adding_a_rule_appends_and_reparses() {
-        let buffer = {
-            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
-            c.rules.push(ValidationRule::RelationExistence {
-                name: "adrs-need-relations".to_string(),
-                doc_type: "adr".to_string(),
-                require: "any-relation".to_string(),
-                severity: Severity::Error,
-            });
-            c
-        };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-        let reparsed = Config::parse_lenient(&out).unwrap();
-        assert_eq!(reparsed.rules.len(), 2);
-        assert!(matches!(
-            &reparsed.rules[1],
-            ValidationRule::RelationExistence { name, .. } if name == "adrs-need-relations"
-        ));
     }
 
     const OVERRIDES_SRC: &str = r#"[[types]]
@@ -1771,17 +1668,13 @@ severity = "error"
 repo = "owner/repo"
 "#;
 
-    // The edge migration deletes every rule, and an array-of-tables reconciled
-    // against an empty buffer leaves its key behind, so the key comes off the
+    // The edge migration deletes the retired table, and there is no buffer
+    // field left to reconcile it against, so any render takes the key off the
     // document outright. Asserted on the text: a reparse cannot tell an absent
     // key from an empty one.
     #[test]
-    fn clearing_every_rule_takes_the_rules_key_off_the_document() {
-        let buffer = {
-            let mut c = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
-            c.rules.clear();
-            c
-        };
+    fn rendering_takes_the_rules_key_off_the_document() {
+        let buffer = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
 
         let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
 
@@ -1790,7 +1683,7 @@ repo = "owner/repo"
             out.contains("[github]"),
             "the section after it survives: {out}"
         );
-        assert!(Config::parse(&out).unwrap().rules.is_empty());
+        Config::parse(&out).expect("the rendered config strict-loads");
     }
 
     #[test]
@@ -1806,8 +1699,6 @@ repo = "owner/repo"
         let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
 
         assert!(!out.contains("traversal"), "got: {out}");
-        // Lenient: this buffer keeps the source's rule, which the rewrite
-        // clears separately (`clearing_every_rule_takes_the_rules_key_off_the_document`).
         let reparsed = Config::parse_lenient(&out).unwrap();
         assert!(reparsed.relationships.iter().all(|r| r.traversal.is_none()));
     }
