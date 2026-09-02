@@ -1,7 +1,7 @@
 ---
 title: Edit an edge's fields from the config CLI
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

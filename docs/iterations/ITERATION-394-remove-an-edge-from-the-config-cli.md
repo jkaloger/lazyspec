@@ -1,7 +1,7 @@
 ---
 title: Remove an edge from the config CLI
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
