@@ -869,22 +869,29 @@ pub struct RelationshipDef {
 /// preceded the config registry. Used by `init`'s `starter_config`, the
 /// `to_toml` writer, and the test-only `Config::default()`. The load path
 /// carries none (ADR-011): a real config must declare `[[relationships]]`.
+///
+/// None of them carries a `traversal` marker. The walks these relationships used
+/// to declare are declared by [`starter_edges`]'s two blanket rows instead, and
+/// a row assigning a relationship a role suppresses that relationship's marker
+/// anyway (ADR-035) -- so keeping the markers would change no behaviour and
+/// would teach every new project to state its DAG in two tables, which is the
+/// defect the edge table exists to end (RFC-067 §Problem).
 pub fn starter_relationships() -> Vec<RelationshipDef> {
-    let directional = |name: &str, inverse: &str, traversal: Option<Traversal>| RelationshipDef {
+    let directional = |name: &str, inverse: &str| RelationshipDef {
         name: name.to_string(),
         inverse: Some(inverse.to_string()),
         github_native: None,
-        traversal,
+        traversal: None,
     };
     vec![
-        directional("implements", "implemented-by", Some(Traversal::Chain)),
-        directional("supersedes", "superseded-by", None),
-        directional("blocks", "blocked-by", None),
+        directional("implements", "implemented-by"),
+        directional("supersedes", "superseded-by"),
+        directional("blocks", "blocked-by"),
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
             github_native: None,
-            traversal: Some(Traversal::Related),
+            traversal: None,
         },
     ]
 }
@@ -1412,19 +1419,23 @@ pub fn starter_types() -> Vec<TypeDef> {
 /// The starter DAG stated as `[[edges]]` rows: what `init` writes into a fresh
 /// project (ADR-011 keeps the load path free of all of it), and what
 /// `fix --config` seeds into a config that has declared no DAG of its own.
-/// Three constraints and the hierarchy they hang on, which is the shape this
+/// Three constraints and the two walks they hang on, which is the shape this
 /// repository's own migrated config carries.
 ///
 /// The two chain constraints name `implements` rather than wildcarding `via`,
 /// because a wildcard would scaffold exactly the imprecision the edge table
 /// exists to escape.
 ///
-/// The blanket row is what makes the set a hierarchy rather than three demands
-/// for a link. It states `implements` chain between any pair of types, as the
-/// relationship's global `traversal` marker did -- and it suppresses that marker
-/// (ADR-035), which is why it must be here and not left implicit: the concrete
-/// rows alone would suppress the marker too and narrow the chain to the two
-/// pairs they name. The concrete rows carry the role as well, because a
+/// The two blanket rows are what make the set a hierarchy and a neighbourhood
+/// rather than three demands for a link: `implements` chain and `related-to`
+/// related, between any pair of types, exactly as the relationships' global
+/// `traversal` markers once did. They wildcard both type positions on purpose
+/// (RFC-067 §"The traversal cost, stated plainly"): a scaffold that named pairs
+/// would emit a row per type pair, and the precision the table makes available
+/// is the project's to spend, not the scaffold's. They also suppress those
+/// markers (ADR-035), which is why they must be here and not left implicit: the
+/// concrete rows alone would suppress them too and narrow the chain to the two
+/// pairs they name. The concrete rows carry the chain role as well, because a
 /// wildcard `from` enumerates no child types
 /// ([`TraversalWalk::child_types_for`]) and the two findings that walk
 /// `(parent type, child type)` pairs have nothing else to read.
@@ -1472,7 +1483,36 @@ pub fn starter_edges() -> Vec<EdgeDef> {
             required: None,
             traversal: Some(Traversal::Chain),
         },
+        EdgeDef {
+            name: "related-to-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["related-to".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Related),
+        },
     ]
+}
+
+/// The starter vocabulary carrying the traversal markers a config with no
+/// `[[edges]]` needs. [`Config::default`] declares no edge rows, so the walks its
+/// consumers exercise come from `RelationshipDef.traversal` -- the legacy
+/// fallback the loader still honours where no row assigns a relationship a role
+/// (ADR-035). A scaffolded project states those walks as [`starter_edges`] rows
+/// instead, which is why [`starter_relationships`] itself marks nothing.
+#[cfg(any(test, feature = "test-support"))]
+fn marked_starter_relationships() -> Vec<RelationshipDef> {
+    starter_relationships()
+        .into_iter()
+        .map(|rel| {
+            let traversal = match rel.name.as_str() {
+                "implements" => Some(Traversal::Chain),
+                "related-to" => Some(Traversal::Related),
+                _ => None,
+            };
+            RelationshipDef { traversal, ..rel }
+        })
+        .collect()
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1493,7 +1533,7 @@ impl Default for Config {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
-            relationships: starter_relationships(),
+            relationships: marked_starter_relationships(),
             ui: UiConfig::default(),
             edges: Vec::new(),
             ref_count_ceiling: 15,

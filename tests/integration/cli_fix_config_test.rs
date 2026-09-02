@@ -1214,10 +1214,10 @@ traversal = "chain"
 }
 
 // The rewrite must never replace a config that loads with one that does not.
-// A hand-written `via = "*"` row carrying `traversal = "chain"` overlaps the
-// marker row that the appended `related-to` relationship translates to on all
-// three positions, and the loader refuses that pair. The rendered text is
-// parsed before it is written, so the file survives and the error says why.
+// A hand-written `via = "*"` row carrying `traversal = "chain"` overlaps the row
+// the source's own `related-to` marker translates to on all three positions, and
+// the loader refuses that pair. The rendered text is parsed before it is
+// written, so the file survives and the error says why.
 #[test]
 fn fix_config_refuses_to_write_a_config_that_would_no_longer_load() {
     let collides = r#"[[types]]
@@ -1245,6 +1245,10 @@ inverse = "superseded-by"
 [[relationships]]
 name = "blocks"
 inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
 
 [[edges]]
 name = "everything-is-chain"

@@ -308,10 +308,12 @@ fn traversal_edge_name(relationship: &str) -> String {
 /// on the edge table's terms, next to the ones `init` scaffolds -- and this
 /// function only decides which of them apply.
 ///
-/// The hierarchy comes with it, because nothing else in such a config declares
-/// one: the rows a seeded `parent-child` rule used to translate to carried
-/// `traversal = "chain"` ([`edge_from_rule`]), and a config with no markers to
-/// translate has no blanket declaration either.
+/// The hierarchy and the neighbourhood come with it, because nothing else in
+/// such a config declares them: the rows a seeded `parent-child` rule used to
+/// translate to carried `traversal = "chain"` ([`edge_from_rule`]), and a config
+/// with no markers to translate has no blanket declaration either. Where the
+/// config does mark the relationship, the blanket row is its translation's --
+/// see [`a_marker_translates_to`].
 ///
 /// Seeded only into a config that has said nothing about its DAG — neither
 /// `[[edges]]` nor `[[rules]]`. A config carrying `[[edges]]` has stated it on
@@ -1107,7 +1109,8 @@ severity = "fatal"
             vec![
                 "stories-need-rfcs".to_string(),
                 "iterations-need-stories".to_string(),
-                "implements-traversal".to_string()
+                "implements-traversal".to_string(),
+                "related-to-traversal".to_string()
             ]
         );
     }
@@ -1151,7 +1154,8 @@ severity = "fatal"
             vec![
                 "stories-need-rfcs".to_string(),
                 "iterations-need-stories".to_string(),
-                "adrs-need-relations".to_string()
+                "adrs-need-relations".to_string(),
+                "related-to-traversal".to_string()
             ]
         );
         assert!(translate_to_edges(
@@ -1177,8 +1181,11 @@ severity = "fatal"
         let seeded = standard_edges_to_seed(&source.config, &source.rules);
 
         assert!(
-            seeded.iter().all(|edge| edge.traversal.is_none()),
-            "no seeded row may contradict the marker: {seeded:?}"
+            seeded
+                .iter()
+                .filter(|edge| edge.via.matches("implements"))
+                .all(|edge| edge.traversal.is_none()),
+            "no seeded row may claim a role the `implements` marker contradicts: {seeded:?}"
         );
     }
 

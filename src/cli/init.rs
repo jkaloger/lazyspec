@@ -686,7 +686,11 @@ mod tests {
         let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["adrs-need-relations", "implements-traversal"],
+            vec![
+                "adrs-need-relations",
+                "implements-traversal",
+                "related-to-traversal"
+            ],
             "only the rows naming no dropped type survive"
         );
 
@@ -733,6 +737,19 @@ mod tests {
             loaded.edges,
             starter_edges(),
             "the starter DAG round-trips through the written config"
+        );
+        // Named, not counted: a count survives a row being silently swapped for
+        // another. Three constraints and the two blanket walks (STORY-261 AC6).
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "stories-need-rfcs",
+                "iterations-need-stories",
+                "adrs-need-relations",
+                "implements-traversal",
+                "related-to-traversal",
+            ]
         );
 
         let store = Store::load(root, &loaded).unwrap();
@@ -952,6 +969,10 @@ mod tests {
         assert!(
             summary.contains("implements-traversal: * -> * via implements (traversal: chain)"),
             "the blanket hierarchy row, which states no requiredness: {summary}"
+        );
+        assert!(
+            summary.contains("related-to-traversal: * -> * via related-to (traversal: related)"),
+            "the blanket neighbourhood row: {summary}"
         );
         assert!(
             !summary.contains("Parent-child rules:"),
