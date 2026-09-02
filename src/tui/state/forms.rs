@@ -134,7 +134,7 @@ impl DeleteConfirm {
 }
 
 /// Which buffer entry a `SettingsDeleteConfirm` targets. Vec-backed collections
-/// (Document Types / Relationships) carry the entry index; certification
+/// (Document Types / Relationships / Edges) carry the entry index; certification
 /// overrides carry the sorted-key (spec-path) they live under.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsDeleteTarget {

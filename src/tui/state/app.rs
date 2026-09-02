@@ -257,6 +257,22 @@ fn empty_edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<Str
     Some(format!("`{position}` must name a {kind}, or `*` for any"))
 }
 
+/// An `[[edges]]` name no row in `edges` already holds. `write_edges`
+/// reconciles rows by `name` and nothing at load rejects a duplicate, so two
+/// rows sharing one name are a config the loader accepts and the writer cannot
+/// address (ITERATION-388) -- which is what a constant seed name would produce
+/// on the second `n`.
+fn unused_edge_name(edges: &[EdgeDef]) -> String {
+    let taken = |name: &str| edges.iter().any(|edge| edge.name == name);
+    if !taken("edge") {
+        return "edge".to_string();
+    }
+    (2usize..)
+        .map(|n| format!("edge-{n}"))
+        .find(|name| !taken(name))
+        .expect("one of an unbounded sequence of candidates is unused")
+}
+
 fn reserved_format_variant(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
@@ -2847,8 +2863,8 @@ impl App {
     }
 
     /// Seed a default entry into the current Vec-backed collection (Document
-    /// Types / Relationships) and drill into it. Placeholder fields carry
-    /// starter/default values so the new entry is immediately editable.
+    /// Types / Relationships / Edges) and drill into it. Placeholder fields
+    /// carry starter/default values so the new entry is immediately editable.
     /// Buffer-only; sets `settings_dirty`.
     pub fn settings_seed_entry(&mut self) {
         match self.settings_category {
@@ -2887,6 +2903,30 @@ impl App {
                     traversal: None,
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
+            }
+            // A shape that loads, not a row worth keeping. The two arms above
+            // seed placeholder names because nothing cross-references them; an
+            // edge is cross-referenced, and strict load rejects an unknown type
+            // in `from`/`to` or an unknown relationship in `via` -- so a
+            // placeholder string here is a config that will not load, and
+            // reading a real name out of the buffer has nothing to read when
+            // the config declares a single relationship and no type pair.
+            //
+            // The consequence is the designer's to undo: ADR-031 and RFC-067
+            // both record that an all-wildcard row restores the blanket
+            // behaviour the edge table exists to escape. Do not "improve" this
+            // default by adding a severity -- ITERATION-370 refuses `required`
+            // on a wildcard `from`, so the row would stop loading.
+            3 => {
+                self.settings_buffer.edges.push(EdgeDef {
+                    name: unused_edge_name(&self.settings_buffer.edges),
+                    from: TypeSelector::Any,
+                    to: TypeSelector::Any,
+                    via: RelSelector::Any,
+                    required: None,
+                    traversal: None,
+                });
+                self.settings_entry = self.settings_buffer.edges.len() - 1;
             }
             _ => return,
         }
@@ -2982,6 +3022,17 @@ impl App {
                     r.name.clone(),
                 )
             }
+            // No analogue of the ADR-011 guard above: a config declaring zero
+            // edges is legal and validates clean, it just constrains nothing.
+            3 => {
+                let Some(e) = self.settings_buffer.edges.get(self.settings_entry) else {
+                    return;
+                };
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    e.name.clone(),
+                )
+            }
             6 => {
                 let mut keys: Vec<&String> = self
                     .settings_buffer
@@ -3028,6 +3079,12 @@ impl App {
                         self.settings_buffer.relationships.remove(i);
                     }
                     self.settings_buffer.relationships.len()
+                }
+                3 => {
+                    if i < self.settings_buffer.edges.len() {
+                        self.settings_buffer.edges.remove(i);
+                    }
+                    self.settings_buffer.edges.len()
                 }
                 _ => 0,
             },
@@ -7504,6 +7561,208 @@ traversal = "chain"
             !matches!(focused_path(&app), FieldPath::Edge { .. }),
             "landed on {:?}",
             focused_path(&app)
+        );
+    }
+
+    // --- STORY-260 AC6: seeding and deleting an edge row (ITERATION-390) ---
+
+    /// A config declaring one type and exactly one relationship: the narrowest
+    /// vocabulary a seeded row has to survive, and the case where reading a
+    /// real type pair out of the buffer would have nothing to read.
+    fn config_one_relationship() -> Config {
+        Config {
+            relationships: vec![RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+                github_native: None,
+                traversal: None,
+            }],
+            ..config_one_type()
+        }
+    }
+
+    /// The buffer as the strict loader reads it back: rendered to TOML, then
+    /// parsed. Going through both is what makes an assertion a claim about what
+    /// loads rather than about the in-memory struct.
+    fn reparse_buffer(app: &App) -> Config {
+        Config::parse(&app.settings_buffer.to_toml().expect("the buffer renders"))
+            .expect("the rendered buffer loads")
+    }
+
+    /// Back out of the drilled row the way `Esc` does, so a second `n` is
+    /// reachable -- the key is bound only while nothing is drilled.
+    fn undrill(app: &mut App) {
+        app.settings_drill = None;
+    }
+
+    fn seed_edge(app: &mut App) {
+        app.settings_category = App::settings_category_index("Edges");
+        app.settings_seed_entry();
+    }
+
+    #[test]
+    fn seeding_an_edge_appends_a_wildcard_row_that_loads_and_drills_in() {
+        let mut app = settings_app(Config::default(), "Edges", 0);
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.edges.len(), 1);
+        let loaded = reparse_buffer(&app);
+        let seeded = loaded.edges.last().expect("the seeded row loads");
+        assert_eq!(seeded.from, TypeSelector::Any);
+        assert_eq!(seeded.to, TypeSelector::Any);
+        assert_eq!(seeded.via, RelSelector::Any);
+        assert_eq!(
+            seeded.required, None,
+            "ITERATION-370 refuses `required` on a wildcard `from`"
+        );
+        assert_eq!(seeded.traversal, None);
+        assert_eq!(app.settings_entry, 0);
+        assert_eq!(app.settings_drill, Some(0));
+        assert_eq!(app.settings_field, 0);
+        assert!(app.settings_dirty);
+    }
+
+    // The seed cannot name a type or a relationship out of the buffer the way
+    // a smarter default would: strict load rejects an unknown name in `from`,
+    // `to` and `via`, and this vocabulary offers no pair to read.
+    #[test]
+    fn seeding_an_edge_loads_against_a_config_declaring_one_relationship() {
+        let mut app = settings_app(config_one_relationship(), "Edges", 0);
+
+        app.settings_seed_entry();
+
+        assert_eq!(reparse_buffer(&app).edges.len(), 1);
+    }
+
+    // `write_edges` reconciles by `name` and nothing at load rejects a
+    // duplicate (ITERATION-388), so two rows sharing one name are a config the
+    // loader accepts and the writer cannot address.
+    #[test]
+    fn seeding_twice_gives_two_distinctly_named_rows_that_load() {
+        let mut app = settings_app(Config::default(), "Edges", 0);
+
+        app.settings_seed_entry();
+        undrill(&mut app);
+        app.settings_seed_entry();
+
+        let loaded = reparse_buffer(&app);
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "a duplicate name is unaddressable");
+    }
+
+    // A config with zero edges is legal and validates clean -- it just
+    // constrains nothing -- so ADR-011's protected last relationship has no
+    // analogue here.
+    #[test]
+    fn deleting_the_only_edge_is_permitted_and_leaves_a_loading_config() {
+        let mut app = settings_app(config_one_edge(), "Edges", 0);
+        let name = app.settings_buffer.edges[0].name.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        assert_eq!(app.settings_delete_confirm.entry_label, name);
+        assert_eq!(
+            app.settings_buffer.edges.len(),
+            1,
+            "buffer unchanged until confirm"
+        );
+
+        app.settings_confirm_delete();
+
+        assert!(app.settings_buffer.edges.is_empty());
+        assert!(reparse_buffer(&app).edges.is_empty());
+        assert_eq!(app.settings_entry, 0, "the entry cursor is clamped");
+        assert!(app.settings_dirty);
+        assert!(!app.settings_delete_confirm.active);
+    }
+
+    // The in-place writer is a second code path from `to_toml`, so a seed whose
+    // validity is only asserted against the renderer proves nothing about the
+    // bytes a save actually produces.
+    #[test]
+    fn a_seeded_edge_reaches_disk_as_the_buffer_held_it() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+        let expected = app.settings_buffer.edges.clone();
+        assert_eq!(expected.len(), 2, "the declared row plus the seed");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let written = Config::parse(&read_config_file(&tmp)).expect("the saved file loads");
+        assert_eq!(written.edges, expected);
+    }
+
+    /// The key lines of the last `[[edges]]` block in `src`, which is where a
+    /// seeded row lands.
+    fn last_edge_block(src: &str) -> Vec<&str> {
+        src.rsplit_once("[[edges]]")
+            .expect("an edges block")
+            .1
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take_while(|line| !line.starts_with('['))
+            .collect()
+    }
+
+    // How the row reads back to whoever opens the file: every position the bare
+    // wildcard (`["*"]` is a wildcard inside a list, which the loader rejects),
+    // and no `required` or `traversal` key at all.
+    #[test]
+    fn a_seeded_edge_is_written_as_three_bare_wildcards_and_nothing_else() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            last_edge_block(&out),
+            vec![
+                r#"name = "edge""#,
+                r#"from = "*""#,
+                r#"to = "*""#,
+                r#"via = "*""#,
+            ],
+            "got: {out}"
+        );
+    }
+
+    // Two seeded rows are the case the derived name exists for: addressing by
+    // `name`, the writer would emit one row for two constant-named seeds.
+    #[test]
+    fn two_seeded_edges_reach_disk_as_two_distinct_rows() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+        undrill(&mut app);
+        seed_edge(&mut app);
+        let expected = app.settings_buffer.edges.clone();
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let written = Config::parse(&read_config_file(&tmp)).expect("the saved file loads");
+        assert_eq!(written.edges.len(), 3, "the declared row plus two seeds");
+        assert_eq!(written.edges, expected);
+    }
+
+    // AC6's whole claim: the seeded row needs no repair before it can be saved,
+    // so ITERATION-389's refusal path has nothing to refuse.
+    #[test]
+    fn a_save_straight_after_seeding_an_edge_is_not_refused() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error, None, "the save was refused");
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+        assert_eq!(
+            app.settings_drill,
+            Some(1),
+            "the cursor stays on the seeded row rather than jumping to a fault"
         );
     }
 

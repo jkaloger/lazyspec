@@ -989,18 +989,16 @@ impl App {
             KeyCode::Char('n') if self.settings_drill.is_none() => {
                 // Seed a new entry in the current collection: Vec collections push
                 // a default and drill in; certification overrides open a key prompt.
-                // Edges (cat 3) is read-only until ITERATION-390 seeds a row.
                 match self.settings_category {
-                    1..=2 => self.settings_seed_entry(),
+                    1..=3 => self.settings_seed_entry(),
                     6 => self.settings_seed_override(),
                     _ => {}
                 }
             }
-            // Edges (cat 3) is absent: deleting an edge row is ITERATION-390.
             KeyCode::Char('d')
                 if self.settings_drill.is_none()
                     && self.settings_entry_count() > 0
-                    && matches!(self.settings_category, 1 | 2 | 6) =>
+                    && matches!(self.settings_category, 1..=3 | 6) =>
             {
                 // Delete the selected entry behind a confirm (buffer-only). cat 2
                 // refuses its last relationship inside the open path (ADR-011).
