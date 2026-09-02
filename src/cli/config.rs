@@ -150,6 +150,17 @@ pub enum ConfigCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Drop a row from the `[[edges]]` table. A config declaring no edges is
+    /// legal, so removing the last row is not refused -- the DAG it described
+    /// simply stops being described
+    RemoveEdge {
+        /// Name of the row to remove
+        name: String,
+        /// Print the row that was removed as JSON (accepted here as well as
+        /// before the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What an edit says about one optional field. `Option<T>` cannot say it: a
@@ -822,6 +833,52 @@ pub fn run_set_edge(
 pub fn run_set_edge_json(edge: &EdgeDef) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "action": "edge-updated",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
+/// Drop the `[[edges]]` row `name` addresses and return it as it stood.
+///
+/// Deletion needs no writer of its own: `write_config_in_place` reconciles the
+/// table to the buffer by name, so a name the buffer no longer carries is a
+/// block that goes, its own comments with it, and its neighbours keep theirs.
+/// The last row taking the whole `[[edges]]` table with it falls out of the same
+/// mechanism -- an emptied array-of-tables renders as nothing.
+///
+/// `retain` drops *every* row carrying the name, not the first one. A config
+/// declaring two rows under one name does not load at all, so the `Config::parse`
+/// above is what reports that and the case is unreachable here; the total
+/// spelling is the one that stays right if the collision guard ever loosens,
+/// rather than leaving half a pair behind.
+///
+/// A config declaring no edges is legal -- strict load demands no minimum -- so
+/// removing the last row is not refused, and neither is removing a row whose
+/// absence changes what `validate` reports: an edge condition never refuses a
+/// command (RFC-067). Dropping a `required` row silences its findings and
+/// dropping a `traversal` row shortens every chain that walked it. Neither is
+/// warned about here, which is why the whole row comes back: a caller that wants
+/// to say so cannot re-read what is gone.
+pub fn run_remove_edge(root: &Path, fs: &dyn FileSystem, name: &str) -> Result<EdgeDef> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let mut config = Config::parse(&src)?;
+
+    let Some(removed) = config.edges.iter().find(|edge| edge.name == name).cloned() else {
+        bail!("unknown edge \"{}\"", name);
+    };
+    config.edges.retain(|edge| edge.name != name);
+
+    let out = write_config_in_place(&src, &config)?;
+    fs.write(&path, &out)?;
+    Ok(removed)
+}
+
+/// [`run_add_edge_json`] for a removal: the same envelope, carrying the row as
+/// it stood before it went.
+pub fn run_remove_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-removed",
         "name": edge.name,
         "edge": edge,
     }))?)
@@ -1724,13 +1781,9 @@ traversal = "chain"
         assert_eq!(envelope["edge"], shown["edges"][0]);
     }
 
-    // `SRC` plus the types an edge can target and one decorated `[[edges]]`
-    // row: a standalone comment above the block and an inline comment on a key
-    // inside it, so an edit has decor to lose.
-    fn edged_src() -> String {
-        format!(
-            "{SRC}{}",
-            r#"
+    // The types the `[[edges]]` fixtures below name, beyond the `rfc` and
+    // `story` `SRC` already declares.
+    const EDGE_TYPES: &str = r#"
 [[types]]
 name = "spike"
 plural = "spikes"
@@ -1744,8 +1797,13 @@ plural = "bugs"
 dir = "docs/bugs"
 prefix = "BUG"
 lifecycle = { states = ["draft"], edges = [] }
+"#;
 
-# the edge the set-edge tests edit
+    // The row the edit and removal tests address, decorated both ways a block
+    // can be: a standalone comment above it and an inline comment on a key
+    // inside it, so a mutation has decor to lose.
+    const EDGE_BLOCK: &str = r#"
+# the edge the set-edge and remove-edge tests address
 [[edges]]
 name = "stories-implement-rfcs"
 from = "story"
@@ -1753,8 +1811,37 @@ to = ["rfc", "spike", "bug"]  # the target set
 via = "implements"
 required = "error"
 traversal = "chain"
-"#
-        )
+"#;
+
+    // Neighbours for [`EDGE_BLOCK`], each decorated too, so removing the middle
+    // of three rows has comments either side of it to leave alone.
+    const EDGE_BLOCK_BEFORE: &str = r#"
+# the row above the one that goes
+[[edges]]
+name = "rfcs-implement-rfcs"
+from = "rfc"
+to = "rfc"  # a superseding RFC
+via = "implements"
+"#;
+
+    const EDGE_BLOCK_AFTER: &str = r#"
+# the row below the one that goes
+[[edges]]
+name = "bugs-implement-stories"
+from = "bug"
+to = "story"
+via = "implements"
+traversal = "related"
+"#;
+
+    // `SRC` plus the vocabulary and one decorated `[[edges]]` row.
+    fn edged_src() -> String {
+        format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK}")
+    }
+
+    // [`edged_src`] with a decorated row either side of the addressed one.
+    fn three_edged_src() -> String {
+        format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK}{EDGE_BLOCK_AFTER}")
     }
 
     fn set_edge(root: &Path, fs: &dyn FileSystem, edit: EdgeEdit) -> Result<EdgeDef> {
@@ -2026,6 +2113,118 @@ traversal = "chain"
             panic!("expected config set-edge");
         };
         assert_eq!(to, None);
+    }
+
+    // STORY-261 AC3: the removed row goes and nothing else moves. Asserting the
+    // whole file rather than a substring is the point -- a dropped comment on a
+    // neighbour, or a blank line the writer invented, is invisible to a reparse
+    // and shows up here.
+    #[test]
+    fn remove_edge_drops_the_middle_row_and_leaves_the_rest_byte_identical() {
+        let (_dir, path, fs) = fixture(&three_edged_src());
+
+        let removed =
+            run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        assert_eq!(removed.name, "stories-implement-rfcs");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK_AFTER}")
+        );
+    }
+
+    // A config declaring no edges is legal, so the last row can go -- and the
+    // table goes with it rather than staying behind as an empty
+    // array-of-tables. The TOML loses the key; `config --json` keeps the field,
+    // because an agent reading `edges` should never have to branch on null.
+    #[test]
+    fn remove_edge_removing_the_last_row_takes_the_edges_table_with_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            format!("{SRC}{EDGE_TYPES}"),
+            "the emptied table leaves no trace of itself"
+        );
+        assert!(Config::parse(&after).unwrap().edges.is_empty());
+        assert_eq!(show(&after)["edges"], serde_json::json!([]));
+    }
+
+    // A name that addresses no row is a CLI-argument error, not a config one,
+    // and a removal that matched nothing must not rewrite the file at all.
+    #[test]
+    fn remove_edge_rejects_an_unknown_name_without_writing() {
+        let src = three_edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-spikes")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("unknown edge") && err.contains("stories-implement-spikes"),
+            "the refusal must name the row asked for: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // STORY-261 AC4: the envelope carries the row as it stood, spelled the way
+    // `config --json` spelled it while it was there. Dictum 2 -- an agent cannot
+    // re-read a row that is gone, so removal is the one mutation whose result
+    // has to carry the whole thing.
+    #[test]
+    fn remove_edge_json_carries_the_row_config_show_reported() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+        let removed =
+            run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        let envelope: Value =
+            serde_json::from_str(&run_remove_edge_json(&removed).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-removed");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        assert_eq!(envelope["edge"], show(&src)["edges"][0]);
+    }
+
+    // Two rows under one name is a config that does not load, so `remove-edge`
+    // reports the collision rather than choosing which of them to drop -- the
+    // parse happens before the removal, and the file is left as it was. Were
+    // the guard ever to loosen, `run_remove_edge` retains by name and both
+    // would go.
+    #[test]
+    fn remove_edge_refuses_a_config_whose_rows_share_a_name() {
+        let src = format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK}{EDGE_BLOCK}");
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("both named") && err.contains("stories-implement-rfcs"),
+            "the loader's own collision error must come through: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // The writer inserting or leaving whitespace a human would not is invisible
+    // to every other assertion on this story, so the round trip is asserted on
+    // the bytes: a config that declared no `[[edges]]` is returned to exactly
+    // what it was, table header and all.
+    #[test]
+    fn add_edge_then_remove_edge_returns_the_file_to_what_it_was() {
+        let src = format!("{SRC}{EDGE_TYPES}");
+        let (_dir, path, fs) = fixture(&src);
+        let root = path.parent().unwrap();
+
+        add_stories_implement_rfcs(root, &fs).unwrap();
+        run_remove_edge(root, &fs, "stories-implement-rfcs").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
     }
 
     // AC6: each mutator preserves comments and the section order of untouched

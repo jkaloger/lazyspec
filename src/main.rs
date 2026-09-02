@@ -838,6 +838,26 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                Some(ConfigCommand::RemoveEdge {
+                    name,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("removing edge {name}"), json);
+                    match lazyspec::cli::config::run_remove_edge(&cwd, &fs, &name) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge removed");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_remove_edge_json(&edge)?);
+                            }
+                        }
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "remove-edge failed");
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
         Some(Commands::Provenance { command }) => {
