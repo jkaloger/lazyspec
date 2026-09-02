@@ -1,7 +1,7 @@
 ---
 title: Author edges in the from-scratch wizard, and document the surface
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
