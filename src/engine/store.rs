@@ -4,7 +4,7 @@ mod loader;
 pub use links::Link;
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{Config, StoreBackend, Traversal};
+use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
@@ -37,15 +37,6 @@ pub struct Store {
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
-    /// The relationship names whose `traversal == Some(Traversal::Chain)`,
-    /// sourced from `config.relationships`. One reader is left: the
-    /// `MissingParentLink` half of `ParentLinkRule`
-    /// ([`validation`](crate::engine::validation)), which asks "is this ANY
-    /// chain relationship" -- exactly the defect RFC-067 §Problem.1 describes.
-    /// ITERATION-384 stops `[[rules]]` loading and takes that checker, this
-    /// field and the filter that fills it. Everything else already asks the
-    /// triple, via `traversal_walk` below.
-    pub(crate) chain_relationships: Vec<String>,
     /// Which (source type, relationship, target type) triples form the
     /// parent-child DAG walked by
     /// [`resolve_chain`](crate::engine::context::resolve_chain) and
@@ -120,13 +111,6 @@ impl Store {
 
         let (forward_links, reverse_links) = Self::build_links(&docs);
 
-        let chain_relationships: Vec<String> = config
-            .relationships
-            .iter()
-            .filter(|r| r.traversal == Some(Traversal::Chain))
-            .map(|r| r.name.clone())
-            .collect();
-
         let mut store = Store {
             root: root.to_path_buf(),
             docs,
@@ -135,7 +119,6 @@ impl Store {
             children,
             parent_of,
             parse_errors,
-            chain_relationships,
             traversal_walk: TraversalWalk::from_config(config),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };

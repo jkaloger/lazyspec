@@ -1,7 +1,6 @@
 use crate::common::TestFixture;
 use lazyspec::engine::config::{
     starter_hierarchy_edges, Config, EdgeDef, RelSelector, Severity, Traversal, TypeSelector,
-    ValidationRule,
 };
 use lazyspec::engine::validation::ValidationIssue;
 
@@ -241,138 +240,154 @@ fn all_children_accepted_json_output() {
     );
 }
 
-// --- Custom rule tests ---
+// --- Custom constraint tests ---
+//
+// Each of these declared its constraint as a `[[rules]]` block until
+// STORY-259 made that shape unloadable. The constraint is the same; only its
+// spelling changed, so each is now the `[[edges]]` row the migration
+// translates its rule to (ADR-032) and each asserts the same finding under the
+// same name.
 
-fn config_with_rules(rules: Vec<ValidationRule>) -> Config {
+fn config_with_edges(edges: Vec<EdgeDef>) -> Config {
     Config {
-        rules,
+        edges,
         ..Config::default()
     }
 }
 
+/// The row a `parent-child` rule translates to: from the child type, to the
+/// parent type, via the relationship the config marks chain.
+fn parent_child_row(name: &str, child: &str, parent: &str, severity: Severity) -> EdgeDef {
+    EdgeDef {
+        name: name.to_string(),
+        from: TypeSelector::Types(vec![child.to_string()]),
+        to: TypeSelector::Types(vec![parent.to_string()]),
+        via: RelSelector::Named(vec!["implements".to_string()]),
+        required: Some(severity),
+        traversal: Some(Traversal::Chain),
+    }
+}
+
+/// The row a `relation-existence` rule translates to: a relationship of any
+/// kind, to a document of any type (RFC-067 §Design).
+fn relation_existence_row(name: &str, doc_type: &str, severity: Severity) -> EdgeDef {
+    EdgeDef {
+        name: name.to_string(),
+        from: TypeSelector::Types(vec![doc_type.to_string()]),
+        to: TypeSelector::Any,
+        via: RelSelector::Any,
+        required: Some(severity),
+        traversal: None,
+    }
+}
+
 #[test]
-fn custom_parent_child_rule_fires_when_story_lacks_rfc_link() {
+fn custom_parent_child_row_fires_when_story_lacks_rfc_link() {
     let fixture = TestFixture::new();
     fixture.write_story("STORY-001.md", "Orphan Story", "draft", None);
 
-    let config = config_with_rules(vec![ValidationRule::ParentChild {
-        name: "stories-must-implement-rfcs".to_string(),
-        child: "story".to_string(),
-        parent: "rfc".to_string(),
-        severity: Severity::Error,
-    }]);
+    let config = config_with_edges(vec![parent_child_row(
+        "stories-must-implement-rfcs",
+        "story",
+        "rfc",
+        Severity::Error,
+    )]);
 
-    let store = fixture.store();
-    let result = store.validate_full(&config);
+    let result = fixture.store_with(&config).validate_full(&config);
 
     assert!(
         result.errors.iter().any(|e| matches!(
             e,
-            ValidationIssue::MissingParentLink { rule_name, child_type, parent_type, .. }
-                if rule_name == "stories-must-implement-rfcs"
-                && child_type == "story"
-                && parent_type == "rfc"
+            ValidationIssue::UnsatisfiedEdge { edge_name, from_type, to, .. }
+                if edge_name == "stories-must-implement-rfcs"
+                && from_type == "story"
+                && to.names() == ["rfc"]
         )),
-        "expected MissingParentLink error for story without RFC, got: {:?}",
+        "expected an unsatisfied-edge error for story without RFC, got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn custom_relation_existence_rule_fires_for_type_with_no_relations() {
+fn custom_relation_existence_row_fires_for_type_with_no_relations() {
     let fixture = TestFixture::new();
     fixture.write_rfc("RFC-001.md", "Lonely RFC", "draft");
 
-    let config = config_with_rules(vec![ValidationRule::RelationExistence {
-        name: "rfcs-need-relations".to_string(),
-        doc_type: "rfc".to_string(),
-        require: "any-relation".to_string(),
-        severity: Severity::Error,
-    }]);
+    let config = config_with_edges(vec![relation_existence_row(
+        "rfcs-need-relations",
+        "rfc",
+        Severity::Error,
+    )]);
 
-    let store = fixture.store();
-    let result = store.validate_full(&config);
+    let result = fixture.store_with(&config).validate_full(&config);
 
     assert!(
         result.errors.iter().any(|e| matches!(
             e,
-            ValidationIssue::MissingRelation { rule_name, doc_type, .. }
-                if rule_name == "rfcs-need-relations"
-                && doc_type == "rfc"
+            ValidationIssue::UnsatisfiedEdge { edge_name, from_type, .. }
+                if edge_name == "rfcs-need-relations" && from_type == "rfc"
         )),
-        "expected MissingRelation error for RFC without relations, got: {:?}",
+        "expected an unsatisfied-edge error for RFC without relations, got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn custom_rule_with_warning_severity_produces_warning_not_error() {
+fn a_row_required_at_warning_severity_produces_warning_not_error() {
     let fixture = TestFixture::new();
     fixture.write_story("STORY-001.md", "Orphan Story", "draft", None);
 
-    let config = config_with_rules(vec![ValidationRule::ParentChild {
-        name: "soft-story-check".to_string(),
-        child: "story".to_string(),
-        parent: "rfc".to_string(),
-        severity: Severity::Warning,
-    }]);
+    let config = config_with_edges(vec![parent_child_row(
+        "soft-story-check",
+        "story",
+        "rfc",
+        Severity::Warning,
+    )]);
 
-    let store = fixture.store();
-    let result = store.validate_full(&config);
+    let result = fixture.store_with(&config).validate_full(&config);
 
     assert!(
         result.warnings.iter().any(|w| matches!(
             w,
-            ValidationIssue::MissingParentLink { rule_name, .. }
-                if rule_name == "soft-story-check"
+            ValidationIssue::UnsatisfiedEdge { edge_name, .. }
+                if edge_name == "soft-story-check"
         )),
-        "expected MissingParentLink warning, got warnings: {:?}",
+        "expected an unsatisfied-edge warning, got warnings: {:?}",
         result.warnings
     );
     assert!(
         !result
             .errors
             .iter()
-            .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
-        "expected no MissingParentLink errors when severity is warning, got: {:?}",
+            .any(|e| matches!(e, ValidationIssue::UnsatisfiedEdge { .. })),
+        "expected no unsatisfied-edge errors when required is warning, got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn custom_rules_replace_defaults_so_default_checks_do_not_fire() {
+fn declared_rows_are_the_only_demands_so_the_standard_ones_do_not_fire() {
     let fixture = TestFixture::new();
-    // Iteration without a story link would fail with default rules
+    // Without a story link, `iterations-need-stories` would fail this document.
     fixture.write_iteration("ITERATION-001.md", "Orphan", "draft", None);
-    // ADR without relations would fail with default rules
+    // Without relations, `adrs-need-relations` would fail this one.
     fixture.write_adr("ADR-001.md", "Orphan ADR", "draft", None);
 
-    // Only define an unrelated rule
-    let config = config_with_rules(vec![ValidationRule::RelationExistence {
-        name: "rfcs-need-relations".to_string(),
-        doc_type: "rfc".to_string(),
-        require: "any-relation".to_string(),
-        severity: Severity::Error,
-    }]);
+    // One unrelated row, and no standard set behind it.
+    let config = config_with_edges(vec![relation_existence_row(
+        "rfcs-need-relations",
+        "rfc",
+        Severity::Error,
+    )]);
 
-    let store = fixture.store();
-    let result = store.validate_full(&config);
+    let result = fixture.store_with(&config).validate_full(&config);
 
     assert!(
         !result
             .errors
             .iter()
-            .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. })),
-        "expected no MissingParentLink since default iteration rule was replaced, got: {:?}",
-        result.errors
-    );
-    assert!(
-        !result.errors.iter().any(|e| matches!(
-            e,
-            ValidationIssue::MissingRelation { doc_type, .. }
-                if doc_type == "adr"
-        )),
-        "expected no MissingRelation for ADR since default rule was replaced, got: {:?}",
+            .any(|e| matches!(e, ValidationIssue::UnsatisfiedEdge { .. })),
+        "a config declares its whole DAG, so no unnamed demand may fire, got: {:?}",
         result.errors
     );
 }
@@ -383,7 +398,6 @@ fn custom_rules_replace_defaults_so_default_checks_do_not_fire() {
 /// (ADR-035), so the row is the whole story.
 fn config_with_one_chain_row() -> Config {
     Config {
-        rules: Vec::new(),
         edges: vec![EdgeDef {
             name: "stories-implement-rfcs".to_string(),
             from: TypeSelector::Types(vec!["story".to_string()]),

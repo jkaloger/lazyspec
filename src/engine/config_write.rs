@@ -1083,6 +1083,26 @@ name = "related-to"
         assert_eq!(s.min_length, 7);
     }
 
+    /// The same source without the rule, for the tests whose assertion is
+    /// about a type or a relationship and never needed a constraint. Strict
+    /// load refuses `[[rules]]` (STORY-259), so a rule the assertion does not
+    /// use would only cost the test its strict reparse.
+    const RULE_FREE_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+
+    /// A legacy source declaring one `[[rules]]` block, for the writer paths
+    /// that are about the rule table itself. Only [`Config::parse_lenient`]
+    /// reads it — the read `fix --config` uses (ADR-012) — because strict load
+    /// refuses the shape. `write_rules` outlives the loader's rule path by one
+    /// slice (ITERATION-385 takes both).
     const RULES_SRC: &str = r#"[[types]]
 name = "rfc"
 plural = "rfcs"
@@ -1104,7 +1124,7 @@ severity = "error"
     #[test]
     fn shape_change_clears_stale_variant_keys() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.rules[0] = ValidationRule::RelationExistence {
                 name: "story-has-rfc".to_string(),
                 doc_type: "story".to_string(),
@@ -1122,7 +1142,7 @@ severity = "error"
         assert!(!out.contains("child"));
         assert!(!out.contains("parent"));
         assert!(!out.contains("link"));
-        Config::parse(&out).unwrap();
+        Config::parse_lenient(&out).unwrap();
     }
 
     #[test]
@@ -1224,7 +1244,7 @@ name = "related-to"
     fn add_and_delete_in_one_render() {
         // Buffer: add a type AND remove the one rule.
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.documents.types.push(TypeDef {
                 name: "spec".to_string(),
                 plural: "specs".to_string(),
@@ -1268,11 +1288,11 @@ name = "related-to"
         // value (Some -> other), then to None (Some -> None). This closes the latent
         // slice-3 gap where relationship scalar edits were never written.
         let buffer_some = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships[0].inverse = Some("done-by".to_string());
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer_some).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer_some).unwrap();
         assert!(out.contains(r#"inverse = "done-by""#));
         assert!(!out.contains(r#"inverse = "implemented-by""#));
         let reparsed = Config::parse(&out).unwrap();
@@ -1282,11 +1302,11 @@ name = "related-to"
         );
 
         let buffer_none = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships[0].inverse = None;
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer_none).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer_none).unwrap();
         assert!(!out.contains("inverse"));
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(
@@ -1298,7 +1318,7 @@ name = "related-to"
     #[test]
     fn adding_a_relationship_appends_and_reparses() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships.push(RelationshipDef {
                 name: "blocks".to_string(),
                 inverse: Some("blocked-by".to_string()),
@@ -1307,7 +1327,7 @@ name = "related-to"
             });
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer).unwrap();
         assert!(out.contains(r#"name = "blocks""#));
         assert!(out.contains(r#"inverse = "blocked-by""#));
         let reparsed = Config::parse(&out).unwrap();
@@ -1318,7 +1338,7 @@ name = "related-to"
     #[test]
     fn github_native_sub_issue_round_trips_through_writer() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships.push(RelationshipDef {
                 name: "child".to_string(),
                 inverse: Some("parent".to_string()),
@@ -1327,7 +1347,7 @@ name = "related-to"
             });
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer).unwrap();
         assert!(out.contains(r#"github_native = "sub-issue""#), "got: {out}");
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(
@@ -1343,7 +1363,7 @@ name = "related-to"
     #[test]
     fn adding_a_rule_appends_and_reparses() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.rules.push(ValidationRule::RelationExistence {
                 name: "adrs-need-relations".to_string(),
                 doc_type: "adr".to_string(),
@@ -1353,7 +1373,7 @@ name = "related-to"
             c
         };
         let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-        let reparsed = Config::parse(&out).unwrap();
+        let reparsed = Config::parse_lenient(&out).unwrap();
         assert_eq!(reparsed.rules.len(), 2);
         assert!(matches!(
             &reparsed.rules[1],
@@ -1758,7 +1778,7 @@ repo = "owner/repo"
     #[test]
     fn clearing_every_rule_takes_the_rules_key_off_the_document() {
         let buffer = {
-            let mut c = Config::parse(TRAVERSAL_SRC).unwrap();
+            let mut c = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
             c.rules.clear();
             c
         };
@@ -1776,7 +1796,7 @@ repo = "owner/repo"
     #[test]
     fn clearing_a_relationship_traversal_removes_the_key() {
         let buffer = {
-            let mut c = Config::parse(TRAVERSAL_SRC).unwrap();
+            let mut c = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
             for relationship in &mut c.relationships {
                 relationship.traversal = None;
             }
@@ -1786,7 +1806,9 @@ repo = "owner/repo"
         let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
 
         assert!(!out.contains("traversal"), "got: {out}");
-        let reparsed = Config::parse(&out).unwrap();
+        // Lenient: this buffer keeps the source's rule, which the rewrite
+        // clears separately (`clearing_every_rule_takes_the_rules_key_off_the_document`).
+        let reparsed = Config::parse_lenient(&out).unwrap();
         assert!(reparsed.relationships.iter().all(|r| r.traversal.is_none()));
     }
 

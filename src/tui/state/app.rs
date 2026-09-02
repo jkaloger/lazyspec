@@ -3831,7 +3831,6 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
@@ -4171,7 +4170,6 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
@@ -7747,47 +7745,12 @@ name = "related-to"
         assert_eq!(app.settings_footer_error, None);
     }
 
-    // STORY-259: with the rules editor gone the panel is read-only about
-    // `[[rules]]`, not destructive. A save driven by an unrelated edit leaves a
-    // config that still declares rules with those rules intact.
-    #[test]
-    fn save_preserves_rules_the_panel_no_longer_edits() {
-        const RULES_SRC: &str = r#"[naming]
-pattern = "{type}-{n:03}-{title}.md"
-
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-
-[[rules]]
-shape = "parent-child"
-name = "stories-need-rfcs"
-child = "story"
-parent = "rfc"
-severity = "warning"
-"#;
-        let (tmp, mut app) = save_app(RULES_SRC);
-        let on_disk = Config::parse(RULES_SRC).unwrap();
-        assert_eq!(on_disk.rules.len(), 1, "fixture declares a rule");
-
-        app.settings_buffer.documents.naming.pattern = "{type}-{title}.md".to_string();
-        app.settings_dirty = true;
-        app.settings_save(tmp.path(), &on_disk);
-
-        assert_eq!(app.settings_footer_error, None, "save succeeds");
-        let out = read_config_file(&tmp);
-        assert!(out.contains(r#"shape = "parent-child""#));
-        assert_eq!(
-            Config::parse(&out).unwrap().rules,
-            on_disk.rules,
-            "the rules table round-trips untouched"
-        );
-    }
+    // ITERATION-382 asserted that a save left a rules-carrying config's rules
+    // intact, the panel having lost its rules editor. STORY-259 deletes the
+    // question rather than the answer: strict load refuses such a config, so
+    // the panel — which only ever renders a `Config` the load path handed it —
+    // can no longer be given one. `strict_load_refuses_a_config_declaring_rules_and_names_fix_config`
+    // in `engine::config` is where that now lives.
 
     // --- RFC-023 slice 7 / ITERATION-192: Interface category + zone ordering ---
 

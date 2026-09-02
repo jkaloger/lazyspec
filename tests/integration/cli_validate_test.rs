@@ -27,36 +27,52 @@ fn validate_passes_clean_repo() {
     assert!(result.errors.is_empty());
 }
 
+/// The three standard constraints, stated the one way that loads: as
+/// `[[edges]]` rows (STORY-259). `Config::default()` declares no DAG, so a test
+/// about an unsatisfied demand has to say which demand it means.
+fn config_with_starter_edges() -> Config {
+    Config {
+        edges: lazyspec::engine::config::starter_edges(),
+        ..Config::default()
+    }
+}
+
 #[test]
 fn validate_catches_unlinked_iteration() {
     let fixture = crate::common::TestFixture::new();
     fixture.write_iteration("ITERATION-001.md", "Orphan Iteration", "draft", None);
+    let config = config_with_starter_edges();
 
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = fixture.store_with(&config).validate_full(&config);
 
-    assert!(!result.errors.is_empty());
-    let has_unlinked = result
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. }));
-    assert!(has_unlinked);
+    assert!(
+        result.errors.iter().any(|e| matches!(
+            e,
+            ValidationIssue::UnsatisfiedEdge { edge_name, .. }
+                if edge_name == "iterations-need-stories"
+        )),
+        "got: {:?}",
+        result.errors
+    );
 }
 
 #[test]
 fn validate_catches_unlinked_adr() {
     let fixture = crate::common::TestFixture::new();
     fixture.write_adr("ADR-001.md", "Orphan ADR", "draft", None);
+    let config = config_with_starter_edges();
 
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = fixture.store_with(&config).validate_full(&config);
 
-    assert!(!result.errors.is_empty());
-    let has_unlinked = result
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationIssue::MissingRelation { .. }));
-    assert!(has_unlinked);
+    assert!(
+        result.errors.iter().any(|e| matches!(
+            e,
+            ValidationIssue::UnsatisfiedEdge { edge_name, .. }
+                if edge_name == "adrs-need-relations"
+        )),
+        "got: {:?}",
+        result.errors
+    );
 }
 
 #[test]

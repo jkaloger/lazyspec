@@ -440,7 +440,7 @@ Unresolvable refs render as:
 
 `lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it runs an interactive wizard: by default it designs a **blank** type DAG from scratch (prompting for each type and its lifecycle, and declaring no `[[edges]]` — write those yourself), or pass `--template starter` to tweak the built-in starter set instead. `--non-interactive`, `--json`, or a non-TTY writes the starter config unchanged, whose three `[[edges]]` are `stories-need-rfcs`, `iterations-need-stories` and `adrs-need-relations`. Dropping a starter type in the wizard drops the edge rows that name it.
 
-The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[edges]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]` points you at `lazyspec fix --config`.
+The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[edges]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]`, or one still declaring the retired `[[rules]]`, points you at `lazyspec fix --config`.
 
 > [!NOTE]
 > `lazyspec config schema` prints a JSON Schema for `.lazyspec.toml`, derived from the actual parser so it never drifts from the binary. It is the authoritative key reference: point [taplo](https://taplo.tamasfe.dev/) or Even Better TOML at it for editor autocomplete, or read it instead of inferring keys from this README. The sections below cover the main blocks with examples.
@@ -469,18 +469,20 @@ pattern = "{type}-{n:03}-{title}.md"
 
 ### Migrating an existing config
 
-Projects created before relationships and rules became config-driven have a `.lazyspec.toml` with no `[[relationships]]` or `[[rules]]` blocks. Strict load now rejects such a config on every command, pointing you at the migration:
+Two shapes of `.lazyspec.toml` no longer load, and both point you at the same migration. A project created before relationships became config-driven has no `[[relationships]]` block. A project created before the edge table has a `[[rules]]` block, which is retired: the document DAG is declared in `[[edges]]` and nowhere else, so a config declaring both would declare it twice. Strict load rejects either shape on **every** command:
 
 ```sh
 lazyspec fix --config --dry-run  # print the whole plan, including what it destroys, without writing
 lazyspec fix --config            # apply it
 ```
 
-`fix --config` reads the config leniently (the one place strict load is bypassed) and then does two different things to it.
+Run the `--dry-run` first. The migration is a rewrite, not an addition, and the plan is the only place it says what it takes away.
+
+`fix --config` reads the config leniently (the one place strict load is bypassed — which is what lets it read a config every other command refuses) and then does two different things to it.
 
 **Append-only, for relationships and lifecycles.** It adds the standard `[[relationships]]` that are missing, comparing by name, so user-added relationships are kept and nothing is duplicated. It injects the default `lifecycle` into any `[[types]]` entry that lacks one (a type that already declares a lifecycle is left untouched); migrated types are reported under `lifecycles_added`. Nothing the file already said is taken away.
 
-Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the three standard constraints. They land as `[[edges]]` rows, since a `[[rules]]` block is what the same run would then translate away. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
+Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the three standard constraints. They land as `[[edges]]` rows, which is the only shape that loads; no run of `fix --config` ever writes a `[[rules]]` block. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
 
 **A translating rewrite, for the edge migration.** `[[rules]]` blocks and `[[relationships]].traversal` markers become `[[edges]]` rows, and the source declarations are then deleted — a config cannot declare its DAG twice. A `parent-child` rule becomes one row whose `via` names every relationship the config marks `traversal = "chain"`; if it marks none, the rule was satisfiable by nothing and the row carries `via = []`, which is satisfied by nothing too. Two things do not survive the deletion:
 
@@ -623,7 +625,7 @@ A relationship may also declare `traversal`, the walk it joins where no `[[edges
 
 `traversal` here is blanket: it applies to every pair of document types the relationship links, and it is the fallback for relationships that no `[[edges]]` row assigns a role to. A relationship named by the `via` of a row that states a `traversal` takes its membership in both walks from the rows instead, source type and target type included. See [Edges](#edges).
 
-What `validate` calls a parent follows the same declaration. The status-hierarchy findings — `implements rejected document`, `implements superseded document`, `accepted but parent not accepted`, `accepted child but parent not accepted` and `all children accepted but parent not accepted` — read the `traversal = "chain"` rows of the edge table, asking each link the whole triple: the child's type, the relationship, and the parent's type. A blanket `traversal = "chain"` marker still answers for a relationship no row mentions, and it answers for every pair of types, since a marker names no types at all. The two findings that group a parent's children by type additionally need a row naming concrete endpoints: a blanket marker declares no child type for anything. The one check that still reads only the blanket marker is a `parent-child` rule's own missing-link finding.
+What `validate` calls a parent follows the same declaration. The status-hierarchy findings — `implements rejected document`, `implements superseded document`, `accepted but parent not accepted`, `accepted child but parent not accepted` and `all children accepted but parent not accepted` — read the `traversal = "chain"` rows of the edge table, asking each link the whole triple: the child's type, the relationship, and the parent's type. A blanket `traversal = "chain"` marker still answers for a relationship no row mentions, and it answers for every pair of types, since a marker names no types at all. The two findings that group a parent's children by type additionally need a row naming concrete endpoints: a blanket marker declares no child type for anything.
 
 ```toml
 [[relationships]]
@@ -642,7 +644,10 @@ traversal = "related"
 
 ### Validation rules
 
-Validation rules define structural constraints between document types. Two shapes are supported:
+> [!WARNING]
+> `[[rules]]` is retired. A config declaring one is rejected on every command; declare constraints as [`[[edges]]`](#edges) instead, and run `lazyspec fix --config` to translate an existing `[[rules]]` block. This section documents the old shape only so you can recognise it in a config you are migrating.
+
+Validation rules defined structural constraints between document types. Two shapes were supported:
 
 - `parent-child`: the child type must link to a parent type via any chain relationship (a relationship marked `traversal = "chain"` in `[[relationships]]`).
 - `relation-existence`: documents of a given type must have at least one relationship.
@@ -665,7 +670,7 @@ severity = "error"
 
 ### Edges
 
-An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. Where a `parent-child` rule is satisfied by any chain relationship, an edge is satisfied only by a relationship its `via` names.
+An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. Where a retired `parent-child` rule was satisfied by any chain relationship, an edge is satisfied only by a relationship its `via` names.
 
 | Key        | Meaning                                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -781,7 +786,7 @@ traversal = "chain"
 
 Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row suppresses the global marker of every relationship its `via` names, and a row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. Suppression is also blind to which role the row names: a row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`, and a row with `traversal = "chain"` suppresses its global `traversal = "related"`. The row has assigned that relationship a role, and the two declarations do not combine.
 
-A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them, plus the `child` of each `parent-child` rule whose `parent` matches. Only a row that names its source types contributes a concrete child type.
+A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them. Only a row that names its source types contributes a concrete child type.
 
 The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
 
@@ -789,9 +794,9 @@ The wildcard also has one spelling: the bare string. A list is read as names, so
 
 An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
 
-`[[edges]]` and `[[rules]]` are enforced independently; a project may declare either or both. Edges describe the DAG and drive findings; they never refuse a command.
+`[[edges]]` is the whole declaration of the DAG. Rows describe it and drive findings; they never refuse a command.
 
-That independence is a statement about findings, and findings stack: one document may be reported by a rule and by an edge, and neither declaration suppresses the other. A walk cannot stack, because a link either is hierarchy or is not, so traversal takes the narrower rule described above: an `[[edges]]` row that states a `traversal` suppresses the relationship's blanket marker instead of adding to it. The suppression reaches the walks and everything that reads them, `validate`'s status-hierarchy findings included: a row that suppresses a blanket marker changes both what `context` walks and which documents are reported as hanging off a rejected, superseded or unaccepted parent. A `parent-child` rule's missing-link finding is the exception — it keeps reading `traversal = "chain"` on `[[relationships]]`, suppressed or not.
+Findings stack: one document may be reported by several rows, and no row silences another's finding. A walk cannot stack, because a link either is hierarchy or is not, so traversal takes the narrower rule described above: an `[[edges]]` row that states a `traversal` suppresses the relationship's blanket marker instead of adding to it. The suppression reaches the walks and everything that reads them, `validate`'s status-hierarchy findings included: a row that suppresses a blanket marker changes both what `context` walks and which documents are reported as hanging off a rejected, superseded or unaccepted parent.
 
 ### Numbering
 

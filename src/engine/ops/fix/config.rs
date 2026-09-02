@@ -177,9 +177,9 @@ fn translate_to_edges(config: &Config) -> anyhow::Result<Vec<EdgeDef>> {
 }
 
 /// The relationships this config marks as chain, in declared order. They are
-/// what a `parent-child` rule is satisfied through today — `validation.rs`
-/// reads exactly this set off `Store::chain_relationships` — so they are what
-/// its translation has to name.
+/// what a `parent-child` rule was satisfied through — the checker asked whether
+/// a link used ANY chain-marked relationship — so they are what its translation
+/// has to name.
 fn chain_relationships(config: &Config) -> Vec<&str> {
     config
         .relationships
@@ -255,6 +255,8 @@ fn traversal_edge_name(relationship: &str) -> String {
 }
 
 /// The standard constraints to seed into a config that declares none of its own.
+/// Stated as [`ValidationRule`] because they are seeded through the translation
+/// and land as `[[edges]]`; nothing writes them back as a `[[rules]]` block.
 ///
 /// Seeded only into a config that has said nothing about its DAG — neither
 /// `[[edges]]` nor `[[rules]]`. A config carrying `[[edges]]` has stated it on
@@ -315,6 +317,11 @@ fn reject_unloadable_rewrite(rendered: &str, written: &[String]) -> anyhow::Resu
 
 /// Plan (and optionally apply) the repairs an existing `.lazyspec.toml` needs.
 ///
+/// The one caller of [`Config::parse_lenient`], and since STORY-259 the only
+/// way into a config that declares `[[rules]]` at all: strict load refuses one,
+/// naming this command as the remedy (ADR-011, ADR-012). Whatever else changes
+/// here, that read stays lenient, or the remedy could not read what it repairs.
+///
 /// Two kinds of repair, and they are not the same shape. Adding the standard
 /// `[[relationships]]` and the default lifecycles is append-only: nothing the
 /// file already says is taken away, so `[github]`, comments and ordering
@@ -325,11 +332,12 @@ fn reject_unloadable_rewrite(rendered: &str, written: &[String]) -> anyhow::Resu
 /// is read off the source by [`losses_from_source`] so the plan can name it
 /// before applying. Nothing else about the file changes, but that much is lost.
 ///
-/// The two meet on the standard rule set, and the rewrite wins: `default_rules`
-/// is seeded through the translation, so the standard constraints land as
-/// `[[edges]]` rather than as `[[rules]]` this run would write and the next
-/// would delete. That also makes one run enough — a second finds nothing
-/// missing and nothing left to translate, and does not write at all. See
+/// The two meet on the standard constraint set, and the rewrite wins:
+/// `default_rules` is seeded through the translation, so the standard
+/// constraints land as `[[edges]]` — the only spelling that loads. Nothing here
+/// ever writes a `[[rules]]` block, so no result field claims one was added.
+/// That also makes one run enough: a second finds nothing missing and nothing
+/// left to translate, and does not write at all. See
 /// [`standard_rules_to_seed`] for which configs are seeded at all.
 pub fn collect_config_fixes(
     root: &Path,
@@ -358,11 +366,6 @@ pub fn collect_config_fixes(
         .iter()
         .map(|r| r.name.clone())
         .collect();
-    let rules_added: Vec<String> = missing_rules
-        .iter()
-        .map(|r| rule_name(r).to_string())
-        .collect();
-
     let lifecycles_added: Vec<String> = config
         .documents
         .types
@@ -425,7 +428,6 @@ pub fn collect_config_fixes(
 
     Ok(ConfigFixResult {
         relationships_added,
-        rules_added,
         lifecycles_added,
         edges_written,
         rules_removed,

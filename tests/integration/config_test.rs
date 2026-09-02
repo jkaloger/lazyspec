@@ -117,8 +117,16 @@ pattern = "{type}-{n:03}-{title}.md"
     assert!(config.rules.is_empty());
 }
 
+// The three tests below read through `Config::parse_lenient`. Strict load
+// refuses a config that declares `[[rules]]` at all (STORY-259), so the lenient
+// read is the only remaining reader of the shape — and it has to stay one, or
+// `fix --config`, the remedy the refusal names, could not translate what it
+// finds. `declared_rules_are_the_only_rules` went with the strict path: under
+// it, a declared rule is a rejection rather than a rule, which
+// `strict_load_refuses_a_config_declaring_rules_and_names_fix_config` asserts.
+
 #[test]
-fn parse_parent_child_rule() {
+fn the_lenient_read_parses_a_parent_child_rule() {
     let toml_str = r#"
 [[types]]
 name = "rfc"
@@ -134,7 +142,7 @@ parent = "theme"
 severity = "warning"
 "#;
 
-    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    let config = Config::parse_lenient(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.rules.len(), 1);
     assert_eq!(
         config.rules[0],
@@ -148,7 +156,7 @@ severity = "warning"
 }
 
 #[test]
-fn parse_relation_existence_rule() {
+fn the_lenient_read_parses_a_relation_existence_rule() {
     let toml_str = r#"
 [[types]]
 name = "rfc"
@@ -164,7 +172,7 @@ require = "any-relation"
 severity = "error"
 "#;
 
-    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+    let config = Config::parse_lenient(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
     assert_eq!(config.rules.len(), 1);
     assert_eq!(
         config.rules[0],
@@ -177,36 +185,8 @@ severity = "error"
     );
 }
 
-#[test]
-fn declared_rules_are_the_only_rules() {
-    let toml_str = r#"
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[rules]]
-shape = "relation-existence"
-name = "only-this-rule"
-type = "rfc"
-require = "any-relation"
-severity = "warning"
-"#;
-
-    let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
-    assert_eq!(config.rules.len(), 1);
-    assert_eq!(
-        config.rules[0],
-        ValidationRule::RelationExistence {
-            name: "only-this-rule".to_string(),
-            doc_type: "rfc".to_string(),
-            require: "any-relation".to_string(),
-            severity: Severity::Warning,
-        }
-    );
-}
-
+// Deserialization rejects the value before any of the load path's own
+// diagnostics run, which is why the lenient read still fails here.
 #[test]
 fn invalid_severity_returns_parse_error() {
     let toml_str = r#"
@@ -218,7 +198,7 @@ parent = "story"
 severity = "fatal"
 "#;
 
-    let result = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"));
+    let result = Config::parse_lenient(&format!("{toml_str}{RELATIONSHIPS}"));
     assert!(
         result.is_err(),
         "Expected parse error for invalid severity 'fatal'"

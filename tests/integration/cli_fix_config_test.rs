@@ -103,23 +103,17 @@ impl ConfigFixture {
     }
 }
 
-/// What a finding is, for the purpose of comparing a repository's validation
-/// state across the migration.
+/// What a finding is, for the purpose of naming a migrated repository's
+/// validation state.
 ///
-/// Not the rendered message: `MissingParentLink` and `MissingRelation` become
+/// Not the rendered message: a rule's `MissingParentLink` became an
 /// `UnsatisfiedEdge`, whose `Display` reads differently by construction. What
-/// has to survive is which document is in trouble, how loudly, and under which
-/// named rule — which is why the translation carries the rule's own `name` onto
-/// the edge it becomes. A finding of any other kind is compared whole, since
-/// the migration is not supposed to touch one at all.
+/// had to survive is which document is in trouble, how loudly, and under which
+/// named constraint — which is why the translation carries the rule's own
+/// `name` onto the edge it becomes. A finding of any other kind is compared
+/// whole, since the migration is not supposed to touch one at all.
 fn fingerprint(severity: &str, issue: &ValidationIssue) -> String {
     match issue {
-        ValidationIssue::MissingParentLink {
-            path, rule_name, ..
-        }
-        | ValidationIssue::MissingRelation {
-            path, rule_name, ..
-        } => format!("{severity} {} {rule_name}", path.display()),
         ValidationIssue::UnsatisfiedEdge {
             path, edge_name, ..
         } => format!("{severity} {} {edge_name}", path.display()),
@@ -310,17 +304,23 @@ severity = "error"
 url = "https://example.invalid"
 "#;
 
-// AC5 — the fixture the preservation claim rests on. Set equality between two
-// empty sets proves nothing, and equality between two wrong sets proves less,
-// so the findings are named before they are compared.
+// The finding set the migration has to produce.
+//
+// ITERATION-379 proved this set equal before and after `fix --config`, reading
+// the "before" half off the legacy config's own checkers. STORY-259 deletes
+// those checkers and refuses to load the config that fed them, so the "before"
+// half is no longer measurable and the proof is spent — it did its work in
+// ITERATION-379, on the code that was there to be proved. What survives is the
+// half that still has a subject: the migrated config's findings, named
+// document by document rather than compared to an unnameable predecessor.
 #[test]
-fn the_legacy_project_finds_each_unsatisfied_rule_and_nothing_for_the_near_misses() {
+fn the_migrated_legacy_project_finds_each_unsatisfied_rule_and_nothing_for_the_near_misses() {
     let fixture = legacy_project();
 
-    let before = findings(fixture.root());
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
 
     assert_eq!(
-        before,
+        findings(fixture.root()),
         BTreeSet::from([
             "error docs/adrs/ADR-001-no-relations.md adrs-need-relations".to_string(),
             "warning docs/stories/STORY-001-no-link-at-all.md stories-need-rfcs".to_string(),
@@ -331,39 +331,22 @@ fn the_legacy_project_finds_each_unsatisfied_rule_and_nothing_for_the_near_misse
     );
 }
 
-// AC5 — the whole justification for calling the migration safe: one project,
-// validated before and after `fix --config` rewrites its rules and traversal
-// keys into edges, produces the same finding set.
-#[test]
-fn the_finding_set_survives_the_migration() {
-    let fixture = legacy_project();
-    let before = findings(fixture.root());
-    assert!(
-        !before.is_empty(),
-        "a fixture that finds nothing before proves nothing after"
-    );
-
-    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
-
-    assert_eq!(findings(fixture.root()), before);
-}
-
-// AC5 — the case ADR-032's original wildcard would have widened: a story whose
-// only link to an RFC is `blocks`, which this config does not mark chain. The
-// old checker is satisfied by a chain relationship and by nothing else, so the
-// document is a finding; naming the chain relationship in `via` is what keeps
+// The case ADR-032's original wildcard would have widened: a story whose only
+// link to an RFC is `blocks`, which this config does not mark chain. The old
+// checker was satisfied by a chain relationship and by nothing else, so the
+// document was a finding; naming the chain relationship in `via` is what keeps
 // it one.
 #[test]
-fn a_non_chain_link_to_the_right_parent_type_is_a_finding_on_both_sides() {
+fn a_non_chain_link_to_the_right_parent_type_is_still_a_finding_after_the_migration() {
     let fixture = legacy_project();
-    let non_chain = "warning docs/stories/STORY-004-blocks-the-rfc.md stories-need-rfcs";
-    assert!(findings(fixture.root()).contains(non_chain));
 
     lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
 
     assert!(
-        findings(fixture.root()).contains(non_chain),
-        "a relationship the config never marked chain must not start satisfying the rule"
+        findings(fixture.root())
+            .contains("warning docs/stories/STORY-004-blocks-the-rfc.md stories-need-rfcs"),
+        "a relationship the config never marked chain must not satisfy the row, got: {:?}",
+        findings(fixture.root())
     );
 }
 
@@ -425,26 +408,23 @@ fn no_chain_relationship_project() -> ConfigFixture {
     fixture
 }
 
-// AC5 — the rule no chain relationship can satisfy. It fires on every story
-// before the migration, so it must fire on every story after: dropping it would
-// be the migration silencing a finding rather than translating it.
+// The rule no chain relationship can satisfy. It fired on every story before
+// the migration, so it must fire on every story after: dropping it would be the
+// migration silencing a finding rather than translating it.
 #[test]
-fn a_rule_no_chain_relationship_can_satisfy_keeps_firing_across_the_migration() {
+fn a_rule_no_chain_relationship_can_satisfy_goes_on_firing_on_every_story() {
     let fixture = no_chain_relationship_project();
 
-    let before = findings(fixture.root());
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
     assert_eq!(
-        before,
+        findings(fixture.root()),
         BTreeSet::from([
             "warning docs/stories/STORY-001-no-link-at-all.md stories-need-rfcs".to_string(),
             "warning docs/stories/STORY-002-implements-the-rfc.md stories-need-rfcs".to_string(),
         ]),
-        "a rule satisfiable by nothing fires on every child document"
+        "a row satisfiable by nothing fires on every source document"
     );
-
-    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
-
-    assert_eq!(findings(fixture.root()), before);
 }
 
 // AC1/AC2 — the row such a rule translates to: an empty `via`, which is the
@@ -519,15 +499,15 @@ parent = "rfc"
 severity = "warning"
 "#;
 
-// AC5 — the hole the migration is required to leave open. A story satisfying
-// `stories-need-rfcs` through `targets` rather than `implements` is no finding
-// today, and must be no finding after: closing it would be the migration
+// The hole the migration is required to leave open. A story satisfying
+// `stories-need-rfcs` through `targets` rather than `implements` was no finding
+// before, and must be no finding after: closing it would be the migration
 // deciding what the author meant.
 //
 // The disjunction is what the set in `via` carries: one row naming both chain
 // relationships is satisfied by either, where a row apiece demanded both.
 #[test]
-fn a_rule_satisfied_through_targets_rather_than_implements_is_no_finding_on_either_side() {
+fn a_rule_satisfied_through_targets_rather_than_implements_is_no_finding_after_the_migration() {
     let fixture = ConfigFixture::new(TWO_CHAIN_RELATIONSHIPS_CONFIG);
     fixture.write_doc("docs/rfcs/RFC-001-the-parent.md", "rfc", &[]);
     fixture.write_doc(
@@ -540,7 +520,6 @@ fn a_rule_satisfied_through_targets_rather_than_implements_is_no_finding_on_eith
         "story",
         &[("implements", "RFC-001")],
     );
-    assert_eq!(findings(fixture.root()), BTreeSet::new());
 
     lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
 
@@ -787,9 +766,10 @@ fn fix_config_names_the_chain_relationship_on_a_translated_parent_child_row() {
     assert_eq!(row.required, Some(Severity::Warning));
 }
 
-// AC1 — injects standard blocks.
+// AC1 — injects standard blocks. The standard constraints arrive as
+// `[[edges]]`, the only shape that loads, so nothing here is "injecting rules".
 #[test]
-fn fix_config_injects_relationships_and_rules() {
+fn fix_config_injects_relationships_and_the_standard_constraints() {
     let fixture = ConfigFixture::pre_migration();
 
     let code = lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
@@ -938,6 +918,35 @@ fn strict_load_error_names_fix() {
         msg.contains("lazyspec fix"),
         "strict-load error should name the remedy, got: {msg}"
     );
+}
+
+// STORY-259 AC1 end to end: the refusal names `fix --config`, and `fix
+// --config` has to be able to read the very config the refusal is about. It
+// dispatches ahead of `Config::load` (`main.rs`) and reads leniently
+// (ADR-012), so the remedy bypasses the rejection that names it. A config the
+// tool rejects and cannot repair would be a dead end.
+#[test]
+fn a_config_strict_load_refuses_is_still_repairable_by_fix_config() {
+    let fixture = ConfigFixture::new(LEGACY_DAG_CONFIG);
+
+    let refusal = Config::load(fixture.root(), &RealFileSystem)
+        .expect_err("a config declaring [[rules]] must not strict-load")
+        .to_string();
+    assert!(refusal.contains("[[rules]]"), "got: {refusal}");
+    assert!(refusal.contains("fix --config"), "got: {refusal}");
+
+    // The plan reads the same file and reports the migration, writing nothing.
+    let plan = lazyspec::cli::fix::run_config_human(fixture.root(), true, &RealFileSystem);
+    assert!(
+        plan.contains("Would write edge stories-need-rfcs"),
+        "got: {plan}"
+    );
+
+    assert_eq!(
+        lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem),
+        0
+    );
+    Config::load(fixture.root(), &RealFileSystem).expect("the repaired config strict-loads");
 }
 
 // AC6 — idempotent (run twice, no change).
@@ -1192,7 +1201,7 @@ traversal = "chain"
 
     assert!(!parsed["written"].as_bool().unwrap(), "{json}");
     assert!(
-        parsed["rules_added"].as_array().unwrap().is_empty(),
+        parsed["edges_written"].as_array().unwrap().is_empty(),
         "{json}"
     );
     assert_eq!(

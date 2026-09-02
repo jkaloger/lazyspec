@@ -539,11 +539,16 @@ mod tests {
     // AC6: child_types comes only from ParentChild rules whose parent matches.
     #[test]
     fn child_types_resolve_from_parent_child_rules() {
-        // Default config carries rfc->story and story->iteration; the second
-        // rule (a different parent) proves filtering.
+        // `default_rules` carries rfc->story and story->iteration; the second
+        // rule (a different parent) proves filtering. Stated here rather than
+        // taken from `Config::default()`, which declares no rules now that
+        // strict load refuses them (STORY-259).
         let (_tmp, store) =
             store_from(&[("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]"))]);
-        let config = Config::default();
+        let config = Config {
+            rules: crate::engine::config::default_rules(),
+            ..Config::default()
+        };
         let doc = store.resolve_shorthand("RFC-001").unwrap();
         let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
 
@@ -561,9 +566,13 @@ mod tests {
     // renders empty rather than raising an undefined error.
     #[test]
     fn child_types_empty_renders_empty_not_undefined() {
-        // `adr` has no ParentChild parent rule in the default config.
+        // `adr` is the one type `default_rules` names no child for, so the
+        // empty list is a filtering result rather than an empty declaration.
         let (_tmp, store) = store_from(&[("docs/adrs/ADR-001-x.md", &doc_md("X", "adr", "[]"))]);
-        let config = Config::default();
+        let config = Config {
+            rules: crate::engine::config::default_rules(),
+            ..Config::default()
+        };
         let doc = store.resolve_shorthand("ADR-001").unwrap();
         let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
 
@@ -788,17 +797,27 @@ mod tests {
         );
     }
 
-    // Task 8: end-to-end parse -> build_render_context -> render.
+    // Task 8: end-to-end parse -> build_render_context -> render. The
+    // hierarchy is stated as `[[edges]]`, the one declaration strict load
+    // accepts (STORY-259): `iterations-implement-stories` is what makes
+    // `iteration` story's child type, and the blanket row keeps `implements`
+    // walking the chain for `context.ancestors`.
     #[test]
     fn end_to_end_parse_build_render() {
-        let (_tmp, store) = store_from(&[
-            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
-            (
-                "docs/stories/STORY-001-mid.md",
-                &doc_md("Mid", "story", "- implements: RFC-001"),
-            ),
-        ]);
-        let config = Config::default();
+        let config = Config {
+            edges: crate::engine::config::starter_hierarchy_edges(),
+            ..Config::default()
+        };
+        let (_tmp, store) = store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+                (
+                    "docs/stories/STORY-001-mid.md",
+                    &doc_md("Mid", "story", "- implements: RFC-001"),
+                ),
+            ],
+            &config,
+        );
         let doc = store.resolve_shorthand("STORY-001").unwrap();
         let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
 

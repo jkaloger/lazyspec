@@ -1383,8 +1383,9 @@ pub fn starter_edges() -> Vec<EdgeDef> {
 /// The starter hierarchy stated the way ITERATION-380 made the five surviving
 /// hierarchy findings read it: as `[[edges]]` rows. This is what `fix --config`
 /// writes when it migrates [`default_rules`] and the starter `implements`
-/// marker (ADR-032), minus `required` -- the rules table still raises the
-/// missing-link findings, and a demanding row would raise them twice.
+/// marker (ADR-032), minus `required` -- these rows exist to declare the walk,
+/// and a fixture that wants the missing-link findings too states `required`
+/// itself.
 ///
 /// A fixture opts in rather than getting this from `Config::default()`: the
 /// blanket row suppresses `implements`'s global marker (ADR-035), so handing it
@@ -1435,7 +1436,12 @@ impl Default for Config {
             },
             relationships: starter_relationships(),
             ui: UiConfig::default(),
-            rules: default_rules(),
+            // No rules. Strict load refuses a config that declares any
+            // (STORY-259), so a default fixture carrying them would serialize
+            // through `to_toml` into a config that cannot be loaded back --
+            // and nothing reads them, since `ParentLinkRule` is gone. A
+            // fixture that needs the legacy declaration states it itself.
+            rules: Vec::new(),
             edges: Vec::new(),
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
@@ -1559,7 +1565,24 @@ impl Config {
             );
         }
 
+        // RFC-067: the DAG is declared in `[[edges]]` and nowhere else, so a
+        // config still declaring it as `[[rules]]` declares it twice. ADR-011:
+        // a hard error naming the remedy, no silent fallback to one of the two
+        // declarations. `parse_lenient` -- the read `fix --config` itself
+        // depends on (ADR-012) -- goes on parsing them, or the remedy this
+        // names could not read the config it repairs.
+        //
+        // Non-empty, because `rules = []` declares nothing and there is nothing
+        // in it for the remedy to translate: refusing it would name a fix that
+        // makes no change.
         let rules = raw.rules.unwrap_or_default();
+        if !lenient && !rules.is_empty() {
+            bail!(
+                "[[rules]] is retired: the document DAG is declared in [[edges]]. Run \
+                 `lazyspec fix --config --dry-run` to see what migrating this config \
+                 destroys, then `lazyspec fix --config` to migrate it"
+            );
+        }
 
         let edges = raw
             .edges
@@ -2058,6 +2081,107 @@ inverse = "implemented-by"
 name = "related-to"
 inverse = "related-to"
 "#;
+
+    /// One `parent-child` constraint stated the old way, and the same
+    /// constraint stated as the `[[edges]]` row it translates to. The pair is
+    /// one predicate over two config shapes: strict load refuses the first and
+    /// accepts the second.
+    fn rules_declaration() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning"
+"#
+        )
+    }
+
+    fn edges_declaration() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "warning"
+"#
+        )
+    }
+
+    // STORY-259 AC1: the DAG is declared in one place, so a config still
+    // declaring it as `[[rules]]` does not load. ADR-011's pattern: a hard
+    // error whose one sentence names the remedy.
+    #[test]
+    fn strict_load_refuses_a_config_declaring_rules_and_names_fix_config() {
+        let error = Config::parse(&rules_declaration()).expect_err("[[rules]] must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("[[rules]]"),
+            "the error must name the table it refuses, got: {message}"
+        );
+        assert!(
+            message.contains("fix --config"),
+            "the error must name the remedy, got: {message}"
+        );
+    }
+
+    // STORY-259 AC2: the other half of the same predicate. The constraint
+    // restated as a row loads, and the row is the one the config declared.
+    #[test]
+    fn strict_load_accepts_the_same_constraint_stated_as_an_edge() {
+        let config = Config::parse(&edges_declaration()).expect("[[edges]] must load");
+
+        assert!(config.rules.is_empty());
+        assert_eq!(
+            config.edges,
+            vec![EdgeDef {
+                name: "stories-need-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: Some(Severity::Warning),
+                traversal: None,
+            }]
+        );
+    }
+
+    // ADR-012: the lenient read is the one place strict load is bypassed, and
+    // `fix --config` is the only caller. It has to go on parsing the table the
+    // refusal above names, or the remedy the refusal points at could not read
+    // the config it is meant to repair.
+    #[test]
+    fn the_lenient_read_still_parses_the_rules_the_strict_load_refuses() {
+        let config =
+            Config::parse_lenient(&rules_declaration()).expect("the lenient read accepts rules");
+
+        assert_eq!(
+            config.rules,
+            vec![ValidationRule::ParentChild {
+                name: "stories-need-rfcs".to_string(),
+                child: "story".to_string(),
+                parent: "rfc".to_string(),
+                severity: Severity::Warning,
+            }]
+        );
+    }
+
+    // An empty array declares nothing, and `fix --config` finds nothing in it
+    // to translate — so refusing it would leave the user with a config the
+    // remedy cannot repair.
+    #[test]
+    fn strict_load_accepts_an_empty_rules_array() {
+        let config = Config::parse(&format!("{EDGE_PREAMBLE}\nrules = []\n"))
+            .expect("an empty rules array declares nothing");
+
+        assert!(config.rules.is_empty());
+    }
 
     #[test]
     fn edge_to_reads_a_scalar_as_a_single_element_list() {

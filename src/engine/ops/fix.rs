@@ -97,10 +97,10 @@ pub struct LostComment {
 /// The two halves never name the same thing. `*_added` is what the file was
 /// missing; `*_removed` / `*_lost` / `*_dropped` is what the translating
 /// rewrite deletes from it, read off the source alone (ADR-032).
-/// `edges_written` names the `[[edges]]` rows the translation produces, which
-/// include the standard constraints seeded through it — those appear in
-/// `rules_added` too, because the constraint is what was missing and the row is
-/// how it is now spelled.
+/// `edges_written` names the `[[edges]]` rows the translation produces, and
+/// that includes the standard constraints seeded through it: there is no
+/// `rules_added` beside it, because a constraint's only spelling is now a row
+/// and a config declaring `[[rules]]` no longer loads (STORY-259).
 ///
 /// `comments_lost` and `gates_dropped` are the destructions nothing else here
 /// would disclose: a comment leaves no trace in the parsed config, and a
@@ -109,7 +109,6 @@ pub struct LostComment {
 #[derive(Debug, Serialize)]
 pub struct ConfigFixResult {
     pub relationships_added: Vec<String>,
-    pub rules_added: Vec<String>,
     pub lifecycles_added: Vec<String>,
     pub edges_written: Vec<String>,
     pub rules_removed: Vec<String>,

@@ -1,7 +1,7 @@
 ---
 title: Refuse a config that declares the rules table
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

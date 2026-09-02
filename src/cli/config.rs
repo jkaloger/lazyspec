@@ -718,10 +718,11 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
 
-    // A config carrying lifecycles, a directional relationship, a parent-child
-    // rule, and a relation-existence rule -- with standalone and inline comments
-    // and a non-default section order -- so the preservation tests have decor and
-    // ordering to protect.
+    // A config carrying lifecycles and a directional relationship -- with
+    // standalone and inline comments and a non-default section order -- so the
+    // preservation tests have decor and ordering to protect. It declares no
+    // `[[edges]]`, which `show_json_emits_an_empty_edge_array_when_none_are_declared`
+    // reads, and no `[[rules]]`, which strict load refuses (STORY-259).
     const SRC: &str = r#"# lazyspec configuration
 [naming]
 pattern = "{type}-{n:03}-{title}.md"  # filename template
@@ -746,24 +747,10 @@ prefix = "STORY"
 parent_type = "rfc"
 lifecycle = { states = ["draft", "done"], edges = [{ from = "draft", to = "done" }] }
 
+# the relationship the hierarchy runs on
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
-
-# the parent-child rule
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-
-[[rules]]
-name = "adrs-need-relations"
-shape = "relation-existence"
-type = "adr"
-require = "any-relation"
-severity = "error"
 "#;
 
     fn fixture(src: &str) -> (tempfile::TempDir, PathBuf, RealFileSystem) {
@@ -784,15 +771,6 @@ severity = "error"
             .unwrap()
             .iter()
             .find(|t| t["name"] == name)
-            .unwrap()
-    }
-
-    fn rule_named<'a>(json: &'a Value, name: &str) -> &'a Value {
-        json["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == name)
             .unwrap()
     }
 
@@ -862,17 +840,19 @@ traversal = "chain"
         assert_eq!(rfc["lifecycle"]["edges"][0]["to"], "review");
     }
 
-    // AC2: relationships and rules arrays serialize out. Guards against a future
+    // AC2: the relationships array serializes out. Guards against a future
     // #[serde(skip)].
+    //
+    // `rules` is not asserted here any more. Strict load refuses a config that
+    // declares any (STORY-259), so every loaded config's is empty, and an
+    // empty one is skipped by the serializer — there is no fixture that can
+    // put a rule in it to name.
     #[test]
-    fn show_json_emits_relationships_and_rules() {
+    fn show_json_emits_relationships() {
         let json = show(SRC);
         assert!(json["relationships"].is_array());
-        assert!(json["rules"].is_array());
-        assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["shape"],
-            "parent-child"
-        );
+        assert_eq!(json["relationships"][0]["name"], "implements");
+        assert_eq!(json["relationships"][0]["inverse"], "implemented-by");
     }
 
     // AC3: add-type appends the type with the supplied fields and is idempotent
@@ -1351,15 +1331,20 @@ traversal = "chain"
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# filename template"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the parent-child rule"));
+        assert!(after.contains("# the relationship the hierarchy runs on"));
         // The new block is appended to the [[types]] array (after the last type,
-        // before [[relationships]]); the relationship comment still follows it.
+        // before [[relationships]]); the relationship comment still precedes it.
         let spike_at = after.find(r#"name = "spike""#).unwrap();
         let rels_at = after.find("[[relationships]]").unwrap();
         assert!(spike_at < rels_at, "new type sits inside the types array");
-        // Untouched blocks keep their order: types -> relationships -> rules.
+        // Untouched blocks keep their order: types -> relationships.
         assert!(after.find("# document types follow").unwrap() < rels_at);
-        assert!(rels_at < after.find("# the parent-child rule").unwrap());
+        assert!(
+            after
+                .find("# the relationship the hierarchy runs on")
+                .unwrap()
+                < rels_at
+        );
         Config::parse(&after).unwrap();
     }
 
@@ -1377,7 +1362,7 @@ traversal = "chain"
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the parent-child rule"));
+        assert!(after.contains("# the relationship the hierarchy runs on"));
         // The other type's lifecycle is untouched.
         assert!(after
             .contains(r#"states = ["draft", "done"], edges = [{ from = "draft", to = "done" }]"#));
