@@ -2247,9 +2247,12 @@ pub fn settings_fields(
                     ));
                     // The two type positions take the member-at-a-time picker
                     // (AC3), whose vocabulary is `*` plus the declared type
-                    // names. `via` keeps the comma editor: its vocabulary is the
-                    // relationships, and see `rel_selector_from` for why it is
-                    // not a cycler.
+                    // names. `via` keeps the comma editor rather than a cycler
+                    // over the declared relationship names: `via` is a
+                    // disjunction over its members (ADR-032) and a
+                    // single-position cycler cannot spell one -- it would
+                    // silently narrow `via = ["a", "b"]` to one name on the
+                    // next press.
                     fields.push(field(
                         "from",
                         e.from.spelling(),

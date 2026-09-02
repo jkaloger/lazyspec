@@ -282,6 +282,83 @@ via = "implements"
     );
 }
 
+/// Run `lazyspec config <args>` in `fixture` and parse its stdout as the one
+/// JSON object a mutation's success envelope is. Anything else on stdout -- a
+/// spinner frame, a second document, a human line -- fails the parse, which is
+/// the contract an agent piping the output relies on.
+fn config_json(fixture: &crate::common::TestFixture, args: &[&str]) -> serde_json::Value {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .arg("config")
+        .args(args)
+        .current_dir(fixture.root())
+        .output()
+        .expect("the lazyspec binary runs");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "`config {args:?}` failed: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("`config {args:?}` printed one JSON object, got {stdout:?}: {e}")
+    })
+}
+
+// STORY-261 AC4 through the binary. The unit tests call the envelope builders
+// directly, so they cannot see whether the process actually prints one -- or
+// whether `--json` is accepted after the subcommand, which is the form the
+// README documents and the only one an agent composing a command would reach
+// for. All three mutators run against one config in sequence, because that is
+// also what proves the row each envelope names is still addressable by the next
+// command.
+#[test]
+fn the_three_edge_mutators_print_their_success_envelope_on_stdout() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_doc(".lazyspec.toml", PREAMBLE);
+
+    let added = config_json(
+        &fixture,
+        &[
+            "add-edge",
+            "stories-implement-rfcs",
+            "--from",
+            "story",
+            "--to",
+            "rfc",
+            "--via",
+            "implements",
+            "--json",
+        ],
+    );
+    assert_eq!(added["action"], "edge-added");
+    assert_eq!(added["name"], "stories-implement-rfcs");
+    assert_eq!(added["edge"]["to"], "rfc");
+
+    let updated = config_json(
+        &fixture,
+        &[
+            "set-edge",
+            "stories-implement-rfcs",
+            "--required",
+            "warning",
+            "--json",
+        ],
+    );
+    assert_eq!(updated["action"], "edge-updated");
+    assert_eq!(updated["edge"]["required"], "warning");
+
+    let removed = config_json(
+        &fixture,
+        &["remove-edge", "stories-implement-rfcs", "--json"],
+    );
+    assert_eq!(removed["action"], "edge-removed");
+    assert_eq!(
+        removed["edge"], updated["edge"],
+        "the removal reports the row as it stood after the edit"
+    );
+}
+
 /// The row `a_refused_edge_mutation_under_json_...` asks for, written out so the
 /// message it expects comes from the loader rather than from the writer.
 const UNDECLARED_TARGET_ROW: &str = r#"

@@ -211,54 +211,52 @@ fn rel_position_raw(selector: &RelSelector) -> String {
     }
 }
 
-/// A picker commit for an edge type position. `["*"]` is the wildcard and not a
-/// type named `*`: [`type_selector_members`] seeds the wildcard as that one row,
-/// so committing an untouched wildcard has to give the wildcard back.
-fn type_selector_from(names: Vec<String>) -> TypeSelector {
-    if names == [WILDCARD] {
-        return TypeSelector::Any;
-    }
-    TypeSelector::Types(names)
-}
-
-/// [`type_selector_from`] for `via`. A cycler over the declared relationship
-/// names would keep the user inside the set strict load accepts, but `via` is a
-/// disjunction over its members (ADR-032) and a single-position cycler cannot
-/// spell one: it would silently narrow `via = ["a", "b"]` to one name on the
-/// next press. So `via` keeps the comma editor -- unlike the two type positions
-/// beside it, which take the picker -- and `EnumCycle`'s `&'static` variant
-/// carrier is left alone.
-fn rel_selector_from(names: Vec<String>) -> RelSelector {
-    if names == [WILDCARD] {
-        return RelSelector::Any;
-    }
-    RelSelector::Named(names)
-}
-
-/// An edge selector position that names nothing matches nothing, and the loader
-/// does not catch it: its declared-name checks iterate `names()`, and an empty
-/// list iterates nothing. So the panel refuses the empty set at commit rather
-/// than reading it as `*`, which is a different claim the user did not make.
-/// Shared by both commit paths -- `via`'s comma editor and the two type
-/// positions' picker -- because two wordings for one refusal is the drift AC4
-/// exists to prevent, one layer down.
-fn empty_edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<String> {
-    if !names.is_empty() {
-        return None;
-    }
-    let (position, kind) = match path {
+/// Why the panel will not take `names` as the edge position `path` addresses,
+/// or `None` if it will. Two refusals share the one channel, because two
+/// wordings for one refusal is the drift AC4 exists to prevent, one layer down:
+///
+/// A position that names nothing matches nothing, and the loader does not catch
+/// it -- its declared-name checks iterate `names()`, and an empty list iterates
+/// nothing. So the panel refuses the empty set at commit rather than reading it
+/// as `*`, which is a different claim the user did not make.
+///
+/// A wildcard mixed with a name is neither selector, and the position's own
+/// engine-side constructor is what says so -- the same one the CLI's repeated
+/// flags and the `init` wizard's prompts assemble through -- so no surface can
+/// word it differently or let a mix through.
+fn edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<String> {
+    let (position, kind, assembled) = match path {
         FieldPath::Edge {
             key: EdgeKey::From, ..
-        } => ("from", "type"),
+        } => ("from", "type", selector_refusal(from_type_names(names))),
         FieldPath::Edge {
             key: EdgeKey::To, ..
-        } => ("to", "type"),
+        } => ("to", "type", selector_refusal(from_type_names(names))),
         FieldPath::Edge {
             key: EdgeKey::Via, ..
-        } => ("via", "relationship"),
+        } => (
+            "via",
+            "relationship",
+            selector_refusal(from_rel_names(names)),
+        ),
         _ => return None,
     };
-    Some(format!("`{position}` must name a {kind}, or `*` for any"))
+    if names.is_empty() {
+        return Some(format!("`{position}` must name a {kind}, or `*` for any"));
+    }
+    assembled
+}
+
+fn from_type_names(names: &[String]) -> Result<TypeSelector> {
+    TypeSelector::from_names(names.to_vec())
+}
+
+fn from_rel_names(names: &[String]) -> Result<RelSelector> {
+    RelSelector::from_names(names.to_vec())
+}
+
+fn selector_refusal<T>(assembled: Result<T>) -> Option<String> {
+    assembled.err().map(|e| e.to_string())
 }
 
 /// An `[[edges]]` name no row in `edges` already holds. A row is addressed by
@@ -1332,9 +1330,31 @@ impl App {
                 if let Some(e) = buf.edges.get_mut(*index) {
                     match (key, value) {
                         (EdgeKey::Name, SettingsValue::Text(s)) => e.name = s,
-                        (EdgeKey::From, SettingsValue::List(v)) => e.from = type_selector_from(v),
-                        (EdgeKey::To, SettingsValue::List(v)) => e.to = type_selector_from(v),
-                        (EdgeKey::Via, SettingsValue::List(v)) => e.via = rel_selector_from(v),
+                        // A committed `["*"]` is the wildcard and not a type
+                        // named `*` -- `type_selector_members` seeds the
+                        // wildcard as that one row, so an untouched wildcard
+                        // has to come back as one -- and the constructor is
+                        // what folds it. Its one refusal, a wildcard beside a
+                        // name, is reported by `edge_position_refusal` before
+                        // either commit path reaches here, so a position that
+                        // could not be assembled keeps the spelling it had
+                        // rather than the writer asserting an invariant it
+                        // does not own.
+                        (EdgeKey::From, SettingsValue::List(v)) => {
+                            if let Ok(from) = TypeSelector::from_names(v) {
+                                e.from = from;
+                            }
+                        }
+                        (EdgeKey::To, SettingsValue::List(v)) => {
+                            if let Ok(to) = TypeSelector::from_names(v) {
+                                e.to = to;
+                            }
+                        }
+                        (EdgeKey::Via, SettingsValue::List(v)) => {
+                            if let Ok(via) = RelSelector::from_names(v) {
+                                e.via = via;
+                            }
+                        }
                         (EdgeKey::Required, SettingsValue::OptSeverity(o)) => e.required = o,
                         (EdgeKey::Traversal, SettingsValue::OptTraversal(o)) => e.traversal = o,
                         _ => {}
@@ -1450,15 +1470,16 @@ impl App {
 
     /// Commit the active picker into the buffer at its `path`. A status-bar zone
     /// writes `Some(order)` -- an empty list included, which is an explicit clear
-    /// distinct from an untouched zone's `None`. An edge type position refuses the
-    /// empty set and leaves the picker open -- in the same words `via`'s comma
-    /// editor refuses it -- because a position that names nothing matches nothing
-    /// and the loader does not catch it.
+    /// distinct from an untouched zone's `None`. An edge type position runs
+    /// [`edge_position_refusal`] first and leaves the picker open on a refusal --
+    /// in the same words `via`'s comma editor refuses it. `SetPicker`'s
+    /// wildcard exclusivity means only the empty set can arise here, but the
+    /// check is the shared one so the two paths cannot drift.
     pub fn settings_commit_picker(&mut self) {
         let Some(picker) = self.settings_set_picker.take() else {
             return;
         };
-        if let Some(message) = empty_edge_position_refusal(&picker.path, &picker.selected) {
+        if let Some(message) = edge_position_refusal(&picker.path, &picker.selected) {
             self.settings_edit_error = Some(message);
             self.settings_set_picker = Some(picker);
             return;
@@ -1524,7 +1545,7 @@ impl App {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
-                if let Some(message) = empty_edge_position_refusal(&focused.path, &list) {
+                if let Some(message) = edge_position_refusal(&focused.path, &list) {
                     self.settings_edit_error = Some(message);
                     return;
                 }
@@ -7065,6 +7086,38 @@ mod tests {
 
         app.settings_write(&via, SettingsValue::List(vec!["*".to_string()]));
         assert_eq!(app.settings_buffer.edges[0].via, RelSelector::Any);
+    }
+
+    // `via`'s comma editor is the one edge position a wildcard can be typed
+    // beside a name in -- the two type positions take a picker that enforces
+    // exclusivity -- and a mix is neither selector. It is refused at commit in
+    // the engine constructor's own words, and edit mode stays open so the value
+    // can be corrected rather than the edit being lost.
+    #[test]
+    fn typing_a_wildcard_beside_a_relationship_name_is_refused_at_commit() {
+        let mut app = edge_field_app(config_one_edge(), "via");
+        let before = app.settings_buffer.edges[0].via.clone();
+
+        app.settings_start_edit();
+        app.settings_edit_input = format!("implements, {WILDCARD}");
+        app.settings_confirm_edit();
+
+        assert_eq!(app.settings_buffer.edges[0].via, before);
+        assert!(!app.settings_dirty, "a refused commit writes nothing");
+        assert!(
+            app.settings_editing,
+            "a refused commit keeps the editor open so the value can be corrected"
+        );
+        assert_eq!(
+            app.settings_edit_error.as_deref(),
+            Some(
+                RelSelector::from_names(vec!["implements".to_string(), WILDCARD.to_string()])
+                    .expect_err("a wildcard beside a name is neither selector")
+                    .to_string()
+                    .as_str()
+            ),
+            "the constructor's own words reach the panel"
+        );
     }
 
     // An absent `required` states no requiredness at all (RFC-067), so the

@@ -359,7 +359,10 @@ pub enum RelSelector {
 }
 
 impl RelSelector {
-    /// [`TypeSelector::from_names`] for the `via` position.
+    /// [`TypeSelector::from_names`] for the `via` position, which no surface
+    /// offers a picker for: repeated `--via` flags, the wizard's prompt and the
+    /// settings panel's comma editor can each type a wildcard beside a name, so
+    /// this is where all three are refused.
     pub fn from_names(names: Vec<String>) -> Result<Self> {
         if fold_wildcard(&names)? {
             return Ok(RelSelector::Any);
@@ -1494,14 +1497,14 @@ pub fn starter_edges() -> Vec<EdgeDef> {
     ]
 }
 
-/// The starter vocabulary carrying the traversal markers a config with no
-/// `[[edges]]` needs. [`Config::default`] declares no edge rows, so the walks its
-/// consumers exercise come from `RelationshipDef.traversal` -- the legacy
-/// fallback the loader still honours where no row assigns a relationship a role
-/// (ADR-035). A scaffolded project states those walks as [`starter_edges`] rows
-/// instead, which is why [`starter_relationships`] itself marks nothing.
+/// The starter vocabulary with the ADR-035 traversal markers put back on it.
+/// This is not what `init` scaffolds -- a scaffolded project states its walks as
+/// [`starter_edges`] rows, which is why [`starter_relationships`] itself marks
+/// nothing. It is the marker fallback: the legacy spelling the loader still
+/// honours where no row assigns a relationship a role, which is the only thing
+/// [`Config::default`]'s edge-less fixture can walk on.
 #[cfg(any(test, feature = "test-support"))]
-fn marked_starter_relationships() -> Vec<RelationshipDef> {
+fn legacy_marked_relationships() -> Vec<RelationshipDef> {
     starter_relationships()
         .into_iter()
         .map(|rel| {
@@ -1533,7 +1536,7 @@ impl Default for Config {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
-            relationships: marked_starter_relationships(),
+            relationships: legacy_marked_relationships(),
             ui: UiConfig::default(),
             edges: Vec::new(),
             ref_count_ceiling: 15,

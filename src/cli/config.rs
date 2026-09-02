@@ -166,7 +166,7 @@ pub enum ConfigCommand {
 /// What an edit says about one optional field. `Option<T>` cannot say it: a
 /// missing flag and a flag that clears the field are different instructions,
 /// and both would be `None`.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub enum FieldEdit<T> {
     #[default]
     Leave,
@@ -977,7 +977,7 @@ pub fn run_set_edge(
     root: &Path,
     fs: &dyn FileSystem,
     name: &str,
-    edit: &EdgeEdit,
+    edit: EdgeEdit,
 ) -> Result<EdgeDef> {
     let path = root.join(".lazyspec.toml");
     let src = fs.read_to_string(&path)?;
@@ -987,24 +987,24 @@ pub fn run_set_edge(
         bail!("unknown edge \"{}\"", name);
     };
 
-    if let Some(from) = &edit.from {
-        edge.from = TypeSelector::from_names(from.clone()).context("reading the `--from` flags")?;
+    if let Some(from) = edit.from {
+        edge.from = TypeSelector::from_names(from).context("reading the `--from` flags")?;
     }
-    if let Some(to) = &edit.to {
-        edge.to = TypeSelector::from_names(to.clone()).context("reading the `--to` flags")?;
+    if let Some(to) = edit.to {
+        edge.to = TypeSelector::from_names(to).context("reading the `--to` flags")?;
     }
-    if let Some(via) = &edit.via {
-        edge.via = RelSelector::from_names(via.clone()).context("reading the `--via` flags")?;
+    if let Some(via) = edit.via {
+        edge.via = RelSelector::from_names(via).context("reading the `--via` flags")?;
     }
-    match &edit.required {
+    match edit.required {
         FieldEdit::Leave => {}
         FieldEdit::Unset => edge.required = None,
-        FieldEdit::Set(value) => edge.required = Some(parse_severity(value)?),
+        FieldEdit::Set(value) => edge.required = Some(parse_severity(&value)?),
     }
-    match &edit.traversal {
+    match edit.traversal {
         FieldEdit::Leave => {}
         FieldEdit::Unset => edge.traversal = None,
-        FieldEdit::Set(value) => edge.traversal = Some(parse_traversal(value)?),
+        FieldEdit::Set(value) => edge.traversal = Some(parse_traversal(&value)?),
     }
     let edited = edge.clone();
 
@@ -1274,24 +1274,11 @@ inverse = "implemented-by"
 
     #[test]
     fn show_json_emits_declared_edges_with_every_field() {
-        let src = format!(
-            "{SRC}{}",
-            r#"
-[[edges]]
-name = "stories-implement-rfcs"
-from = "story"
-to = ["rfc", "story"]
-via = "implements"
-required = "error"
-traversal = "chain"
-"#
-        );
-
-        let edge = &show(&src)["edges"][0];
+        let edge = &show(&edged_src())["edges"][0];
 
         assert_eq!(edge["name"], "stories-implement-rfcs");
         assert_eq!(edge["from"], "story");
-        assert_eq!(edge["to"], serde_json::json!(["rfc", "story"]));
+        assert_eq!(edge["to"], serde_json::json!(["rfc", "spike", "bug"]));
         assert_eq!(edge["via"], "implements");
         assert_eq!(edge["required"], "error");
         assert_eq!(edge["traversal"], "chain");
@@ -1982,11 +1969,12 @@ prefix = "BUG"
 lifecycle = { states = ["draft"], edges = [] }
 "#;
 
-    // The row the edit and removal tests address, decorated both ways a block
-    // can be: a standalone comment above it and an inline comment on a key
-    // inside it, so a mutation has decor to lose.
+    // The row every edge test addresses, decorated both ways a block can be: a
+    // standalone comment above it and an inline comment on a key inside it, so
+    // a mutation has decor to lose. It states all six fields, which is what
+    // lets `show_json_emits_declared_edges_with_every_field` read it too.
     const EDGE_BLOCK: &str = r#"
-# the edge the set-edge and remove-edge tests address
+# the edge the show, set-edge and remove-edge tests address
 [[edges]]
 name = "stories-implement-rfcs"
 from = "story"
@@ -2165,7 +2153,7 @@ traversal = "related"
     }
 
     fn set_edge(root: &Path, fs: &dyn FileSystem, edit: EdgeEdit) -> Result<EdgeDef> {
-        run_set_edge(root, fs, "stories-implement-rfcs", &edit)
+        run_set_edge(root, fs, "stories-implement-rfcs", edit)
     }
 
     fn owned(values: &[&str]) -> Vec<String> {
@@ -2219,6 +2207,44 @@ traversal = "related"
         );
         let loaded = Config::parse(&after).unwrap();
         assert_eq!(loaded.edges, vec![updated]);
+    }
+
+    // STORY-261 AC2 the other way round: the merge is per-field, not per-kind,
+    // so a call naming three of the six fields lands all three and still leaves
+    // the rest -- and the file -- alone. `traversal` is set to a value rather
+    // than unset, which the tests below cover, because the two spellings write
+    // through different arms.
+    #[test]
+    fn set_edge_lands_every_field_it_was_given_in_one_call() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                from: names(&["bug"]),
+                via: names(&[WILDCARD]),
+                traversal: FieldEdit::Set("related".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.from, TypeSelector::Types(vec!["bug".to_string()]));
+        assert_eq!(updated.via, RelSelector::Any);
+        assert_eq!(updated.traversal, Some(Traversal::Related));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            changed_lines(&src, &after),
+            [
+                (r#"from = "story""#, r#"from = "bug""#),
+                (r#"via = "implements""#, r#"via = "*""#),
+                (r#"traversal = "chain""#, r#"traversal = "related""#),
+            ],
+            "got: {after}"
+        );
+        assert_eq!(Config::parse(&after).unwrap().edges, vec![updated]);
     }
 
     // The target set replaces; it does not accumulate. Shrinking it to one name
@@ -2333,7 +2359,7 @@ traversal = "related"
             path.parent().unwrap(),
             &fs,
             "stories-implement-spikes",
-            &EdgeEdit {
+            EdgeEdit {
                 required: FieldEdit::Unset,
                 ..EdgeEdit::default()
             },
@@ -2680,7 +2706,7 @@ traversal = "related"
                         root,
                         fs,
                         "bugs-implement-stories",
-                        &EdgeEdit {
+                        EdgeEdit {
                             from: names(&["story"]),
                             to: names(&["rfc"]),
                             ..EdgeEdit::default()
@@ -2747,7 +2773,7 @@ traversal = "related"
             root,
             &fs,
             "notes-implement-rfcs",
-            &EdgeEdit {
+            EdgeEdit {
                 required: FieldEdit::Set("warning".to_string()),
                 ..EdgeEdit::default()
             },
@@ -2820,7 +2846,7 @@ traversal = "related"
 
     // The wildcard `parent_type` half of the note above, pinned so the day the
     // loader grows the check, this test is the one that says the guard now
-    // surfaces it.
+    // surfaces it. The missing check is tracked as BUG-018.
     #[test]
     fn an_unknown_parent_type_is_written_because_the_loader_has_no_check_for_it() {
         let (_dir, path, fs) = fixture(&edged_src());

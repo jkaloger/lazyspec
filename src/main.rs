@@ -825,7 +825,7 @@ fn main() -> anyhow::Result<()> {
                             no_traversal,
                         ),
                     };
-                    match lazyspec::cli::config::run_set_edge(&cwd, &fs, &name, &edit) {
+                    match lazyspec::cli::config::run_set_edge(&cwd, &fs, &name, edit) {
                         Ok(edge) => {
                             lazyspec::cli::spinner::finish_ok(pb, "edge updated");
                             if json {
