@@ -609,8 +609,9 @@ pub enum RelKey {
 }
 
 /// An edge-key inside a drilled [[edges]] entry -- one key per `EdgeDef` field,
-/// so the drilled view is the row (RFC-067). Every key is read-only in
-/// ITERATION-386, which lists the DAG; ITERATION-387 makes them editable.
+/// so the drilled view is the row (RFC-067). Every key is editable: `name` and
+/// the three selector positions through text entry, the two optional qualifiers
+/// through the enum cycler's unset-leading variant list.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeKey {
     Name,

@@ -12,9 +12,9 @@ pub use crate::engine::graph::GraphNode;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
-    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
+    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy, RelSelector,
     RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend,
-    Traversal, TypeDef,
+    Traversal, TypeDef, TypeSelector, WILDCARD,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -25,6 +25,7 @@ use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
 use crate::tui::views::keybinds::KeyContext;
+use crate::tui::views::panels::UNSET_VARIANT;
 use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -45,6 +46,11 @@ enum SettingsValue {
     Numbering(NumberingStrategy),
     Store(StoreBackend),
     ReservedFormat(ReservedFormat),
+    /// An edge's `required`, whose absence states no requiredness at all
+    /// (RFC-067) -- so the carrier is the `Option`, not the severity.
+    OptSeverity(Option<Severity>),
+    /// An edge's `traversal`, absent when the row names no walk role (ADR-030).
+    OptTraversal(Option<Traversal>),
 }
 
 /// Parse and bounds-check a numeric settings input. Pure and unit-testable.
@@ -154,6 +160,101 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
         "git-ref" => Some(StoreBackend::GitRef),
         _ => None,
     }
+}
+
+fn severity_from_variant(v: &str) -> Option<Severity> {
+    match v {
+        "error" => Some(Severity::Error),
+        "warning" => Some(Severity::Warning),
+        _ => None,
+    }
+}
+
+fn traversal_from_variant(v: &str) -> Option<Traversal> {
+    match v {
+        "chain" => Some(Traversal::Chain),
+        "related" => Some(Traversal::Related),
+        _ => None,
+    }
+}
+
+/// Parse a variant drawn from an optional field's list, whose first entry is
+/// `UNSET_VARIANT`. `Some(None)` is the unset entry, which clears the key; the
+/// outer `None` is an unrecognised variant, which writes nothing at all --
+/// preserving `settings_set_enum_variant`'s no-op on a variant it cannot parse.
+fn optional_variant<T>(variant: &str, parse: fn(&str) -> Option<T>) -> Option<Option<T>> {
+    if variant == UNSET_VARIANT {
+        return Some(None);
+    }
+    parse(variant).map(Some)
+}
+
+/// The comma editor's seed for an edge type position: the wildcard as the `*`
+/// its author wrote, a set as its bare names. Unlike `TypeSelector::spelling`
+/// a multi-name set carries no brackets, because `FieldEditor::List` splits the
+/// seed on commas and would keep them inside the first and last name.
+fn type_position_raw(selector: &TypeSelector) -> String {
+    match selector {
+        TypeSelector::Any => WILDCARD.to_string(),
+        TypeSelector::Types(names) => names.join(", "),
+    }
+}
+
+/// [`type_position_raw`] for the `via` position, a relationship set on the same
+/// terms (ADR-032).
+fn rel_position_raw(selector: &RelSelector) -> String {
+    match selector {
+        RelSelector::Any => WILDCARD.to_string(),
+        RelSelector::Named(names) => names.join(", "),
+    }
+}
+
+/// A comma-editor commit for an edge type position. `["*"]` is the wildcard and
+/// not a type named `*`: the editor seeds from the position's own spelling, so
+/// confirming an untouched wildcard has to give the wildcard back.
+fn type_selector_from(names: Vec<String>) -> TypeSelector {
+    if names == [WILDCARD] {
+        return TypeSelector::Any;
+    }
+    TypeSelector::Types(names)
+}
+
+/// [`type_selector_from`] for `via`. A cycler over the declared relationship
+/// names would keep the user inside the set strict load accepts, but `via` is a
+/// disjunction over its members (ADR-032) and a single-position cycler cannot
+/// spell one: it would silently narrow `via = ["a", "b"]` to one name on the
+/// next press. So `via` shares the comma editor its two neighbours use, and
+/// `EnumCycle`'s `&'static` variant carrier is left alone.
+fn rel_selector_from(names: Vec<String>) -> RelSelector {
+    if names == [WILDCARD] {
+        return RelSelector::Any;
+    }
+    RelSelector::Named(names)
+}
+
+/// An edge selector position that names nothing matches nothing, and the loader
+/// does not catch it: its declared-name checks iterate `names()`, and an empty
+/// list iterates nothing. So the panel refuses the empty set at commit rather
+/// than reading it as `*`, which is a different claim the user did not make.
+/// ITERATION-391 replaces this editor for `from`/`to` and has to carry the same
+/// refusal.
+fn empty_edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<String> {
+    if !names.is_empty() {
+        return None;
+    }
+    let (position, kind) = match path {
+        FieldPath::Edge {
+            key: EdgeKey::From, ..
+        } => ("from", "type"),
+        FieldPath::Edge {
+            key: EdgeKey::To, ..
+        } => ("to", "type"),
+        FieldPath::Edge {
+            key: EdgeKey::Via, ..
+        } => ("via", "relationship"),
+        _ => return None,
+    };
+    Some(format!("`{position}` must name a {kind}, or `*` for any"))
 }
 
 fn reserved_format_variant(f: &ReservedFormat) -> &'static str {
@@ -990,20 +1091,24 @@ impl App {
                 .get(*index)
                 .map(|e| match key {
                     EdgeKey::Name => e.name.clone(),
-                    EdgeKey::From => e.from.spelling(),
-                    EdgeKey::To => e.to.spelling(),
-                    EdgeKey::Via => e.via.spelling(),
+                    EdgeKey::From => type_position_raw(&e.from),
+                    EdgeKey::To => type_position_raw(&e.to),
+                    EdgeKey::Via => rel_position_raw(&e.via),
+                    // An optional enum's raw string has to be a member of its
+                    // variant list, so absence reads back as the unset entry
+                    // the cycler indexes -- not as the empty string a Nullable
+                    // text field would want.
                     EdgeKey::Required => e
                         .required
                         .as_ref()
                         .map(Severity::as_str)
-                        .unwrap_or_default()
+                        .unwrap_or(UNSET_VARIANT)
                         .to_string(),
                     EdgeKey::Traversal => e
                         .traversal
                         .as_ref()
                         .map(Traversal::as_str)
-                        .unwrap_or_default()
+                        .unwrap_or(UNSET_VARIANT)
                         .to_string(),
                 })
                 .unwrap_or_default(),
@@ -1189,9 +1294,19 @@ impl App {
                     buf.ui.multiline.max_expanded_height = n as usize;
                 }
             }
-            // An edge field is ReadOnly this slice, so nothing reaches here;
-            // ITERATION-387 fills the arm in and makes the fields editable.
-            FieldPath::Edge { .. } => {}
+            FieldPath::Edge { index, key } => {
+                if let Some(e) = buf.edges.get_mut(*index) {
+                    match (key, value) {
+                        (EdgeKey::Name, SettingsValue::Text(s)) => e.name = s,
+                        (EdgeKey::From, SettingsValue::List(v)) => e.from = type_selector_from(v),
+                        (EdgeKey::To, SettingsValue::List(v)) => e.to = type_selector_from(v),
+                        (EdgeKey::Via, SettingsValue::List(v)) => e.via = rel_selector_from(v),
+                        (EdgeKey::Required, SettingsValue::OptSeverity(o)) => e.required = o,
+                        (EdgeKey::Traversal, SettingsValue::OptTraversal(o)) => e.traversal = o,
+                        _ => {}
+                    }
+                }
+            }
             // Statusbar slot ordering and unset placeholders are not editable here.
             FieldPath::StatusbarLeft
             | FieldPath::StatusbarCenter
@@ -1301,6 +1416,10 @@ impl App {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
+                if let Some(message) = empty_edge_position_refusal(&focused.path, &list) {
+                    self.settings_edit_error = Some(message);
+                    return;
+                }
                 self.settings_write(&focused.path, SettingsValue::List(list));
                 self.settings_dirty = true;
                 self.settings_editing = false;
@@ -1397,6 +1516,24 @@ impl App {
             FieldPath::ReservedFormat => {
                 if let Some(f) = reserved_format_from_variant(variant) {
                     self.settings_write(path, SettingsValue::ReservedFormat(f));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Edge {
+                key: EdgeKey::Required,
+                ..
+            } => {
+                if let Some(severity) = optional_variant(variant, severity_from_variant) {
+                    self.settings_write(path, SettingsValue::OptSeverity(severity));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Edge {
+                key: EdgeKey::Traversal,
+                ..
+            } => {
+                if let Some(traversal) = optional_variant(variant, traversal_from_variant) {
+                    self.settings_write(path, SettingsValue::OptTraversal(traversal));
                     self.settings_dirty = true;
                 }
             }
@@ -6543,32 +6680,255 @@ mod tests {
         }
     }
 
-    // STORY-260 AC1: the Edges category lists the DAG and refuses to change it
-    // this slice, so Enter on a drilled edge field opens no editor of any kind
-    // -- an editor whose commit is dropped is worse than no editor.
-    // ITERATION-387 is what makes these fields editable.
-    #[test]
-    fn ac1_enter_on_an_edge_field_opens_no_editor() {
-        let mut app = settings_app(config_one_edge(), "Edges", 1);
+    /// A settings app focused on the labelled field of drilled edge row 0.
+    /// Tests address the field by label because an index does not fail when
+    /// `EdgeDef` gains a key -- it silently addresses the neighbour.
+    fn edge_field_app(config: Config, label: &str) -> App {
+        let mut app = settings_app(config, "Edges", 0);
         app.settings_drill = Some(0);
+        let fields = crate::tui::views::panels::settings_fields(
+            app.settings_category,
+            app.settings_entry,
+            app.settings_drill,
+            &app.settings_buffer,
+        );
+        app.settings_field = fields
+            .iter()
+            .position(|f| f.label == label)
+            .unwrap_or_else(|| panic!("no edge field labelled {label}: {fields:?}"));
+        app
+    }
 
+    fn edge_path(key: EdgeKey) -> FieldPath {
+        FieldPath::Edge { index: 0, key }
+    }
+
+    // STORY-260 AC2: `name` is a plain string on the row, so it takes the text
+    // write and reads straight back.
+    #[test]
+    fn edge_name_write_lands_in_the_buffer() {
+        let mut app = edge_field_app(config_one_edge(), "name");
+
+        app.settings_write(
+            &edge_path(EdgeKey::Name),
+            SettingsValue::Text("a-relates-a".to_string()),
+        );
+
+        assert_eq!(app.settings_buffer.edges[0].name, "a-relates-a");
+        assert_eq!(app.settings_focused_raw(), "a-relates-a");
+    }
+
+    // A type position is a set or the wildcard, and the comma editor's seed has
+    // to round-trip both -- `*` back to the wildcard, names back to the set.
+    #[test]
+    fn edge_type_position_write_round_trips_set_and_wildcard() {
+        let mut app = edge_field_app(config_one_edge(), "to");
+        let to = edge_path(EdgeKey::To);
+
+        app.settings_write(
+            &to,
+            SettingsValue::List(vec!["story".to_string(), "bug".to_string()]),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "bug".to_string()])
+        );
         assert_eq!(
             app.settings_focused_raw(),
-            type_a(),
-            "the focused field resolves to the row's `from`"
+            "story, bug",
+            "the raw seed is what the comma editor splits, so it carries no list brackets"
         );
 
-        app.handle_settings_key(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-            Path::new("."),
-            &Config::default(),
+        app.settings_write(&to, SettingsValue::List(vec!["*".to_string()]));
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Any,
+            "`*` is the wildcard, not a type named `*`"
+        );
+        assert_eq!(app.settings_focused_raw(), "*");
+    }
+
+    // `via` is a relationship set on the same terms (ADR-032), so it takes the
+    // same editor and the same wildcard round-trip.
+    #[test]
+    fn edge_via_write_round_trips_set_and_wildcard() {
+        let mut app = edge_field_app(config_one_edge(), "via");
+        let via = edge_path(EdgeKey::Via);
+
+        app.settings_write(
+            &via,
+            SettingsValue::List(vec!["blocks".to_string(), "implements".to_string()]),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].via,
+            RelSelector::Named(vec!["blocks".to_string(), "implements".to_string()])
+        );
+        assert_eq!(app.settings_focused_raw(), "blocks, implements");
+
+        app.settings_write(&via, SettingsValue::List(vec!["*".to_string()]));
+        assert_eq!(app.settings_buffer.edges[0].via, RelSelector::Any);
+    }
+
+    // An absent `required` states no requiredness at all (RFC-067), so the
+    // write has to be able to clear the key and read the cleared state back as
+    // the cycler's unset position.
+    #[test]
+    fn edge_required_write_lands_and_reads_back_unset() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        let required = edge_path(EdgeKey::Required);
+
+        app.settings_write(
+            &required,
+            SettingsValue::OptSeverity(Some(Severity::Warning)),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Warning)
+        );
+        assert_eq!(app.settings_focused_raw(), "warning");
+
+        app.settings_write(&required, SettingsValue::OptSeverity(None));
+        assert_eq!(app.settings_buffer.edges[0].required, None);
+        assert_eq!(app.settings_focused_raw(), UNSET_VARIANT);
+    }
+
+    // An absent `traversal` names no role, leaving the triple to any other
+    // matching row (ADR-030) -- again a claim, not a default.
+    #[test]
+    fn edge_traversal_write_lands_and_reads_back_unset() {
+        let mut app = edge_field_app(config_one_edge(), "traversal");
+        let traversal = edge_path(EdgeKey::Traversal);
+
+        app.settings_write(
+            &traversal,
+            SettingsValue::OptTraversal(Some(Traversal::Related)),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].traversal,
+            Some(Traversal::Related)
+        );
+        assert_eq!(app.settings_focused_raw(), "related");
+
+        app.settings_write(&traversal, SettingsValue::OptTraversal(None));
+        assert_eq!(app.settings_buffer.edges[0].traversal, None);
+        assert_eq!(app.settings_focused_raw(), UNSET_VARIANT);
+    }
+
+    // The cycler has to reach unset, because absence is reachable in the file
+    // and means something the panel would otherwise be unable to say.
+    #[test]
+    fn cycling_required_passes_through_unset_and_wraps_to_error() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        assert_eq!(app.settings_buffer.edges[0].required, Some(Severity::Error));
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Warning)
         );
 
-        assert!(!app.settings_editing, "no text editor opened");
-        assert!(app.settings_variant_picker.is_none(), "no variant picker");
-        assert!(app.settings_zone_editor.is_none(), "no zone editor");
-        assert!(!app.settings_dirty, "nothing was written to the buffer");
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required, None,
+            "the unset position is reachable by cycling"
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Error),
+            "cycling wraps past unset back to the first severity"
+        );
+    }
+
+    // Cycling to unset must remove the key rather than write a default.
+    // `EdgeDef.required` is `skip_serializing_if = "Option::is_none"`, so the
+    // rendered TOML is where the difference is visible.
+    #[test]
+    fn cycling_required_to_unset_renders_no_required_key() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        app.settings_space();
+        app.settings_space();
+
+        let toml = app.settings_buffer.to_toml().expect("buffer renders");
+
+        assert!(
+            !toml.contains("required ="),
+            "an unset qualifier writes no key: {toml}"
+        );
+    }
+
+    // Clearing a type position yields the empty set, which matches nothing. The
+    // loader does not catch it -- its declared-type check iterates `names()`,
+    // and an empty list iterates nothing -- so the panel refuses it at commit
+    // rather than reading it as `*`, a claim the user did not make.
+    #[test]
+    fn clearing_an_edge_target_set_is_refused_and_leaves_the_buffer_alone() {
+        let mut app = edge_field_app(config_one_edge(), "to");
+        let before = app.settings_buffer.edges[0].to.clone();
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+
+        assert_eq!(app.settings_buffer.edges[0].to, before);
+        assert!(!app.settings_dirty, "a refused edit writes nothing");
+        assert!(app.settings_edit_error.is_some());
+        assert!(app.settings_editing, "a refused edit stays in edit mode");
+    }
+
+    // The refusal is scoped to edge positions: `types[].agents` shares the
+    // comma editor, and an empty agents list is how that key is unset.
+    #[test]
+    fn clearing_the_agents_list_is_still_accepted() {
+        let mut config = config_one_type();
+        config.documents.types[0].agents = vec!["claude".to_string()];
+        let mut app = settings_app(config, "Document Types", 10); // agents
+        app.settings_drill = Some(0);
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+
+        assert!(app.settings_buffer.documents.types[0].agents.is_empty());
+        assert!(app.settings_dirty);
+        assert!(app.settings_edit_error.is_none());
+    }
+
+    // A field's editor picks the commit path, and `settings_write` no-ops on a
+    // carrier mismatch by design -- so an editor paired with the wrong carrier
+    // is a silently dropped edit. Drive every edge key through the editor its
+    // own row declares and assert the buffer moved.
+    #[test]
+    fn every_edge_field_commits_through_the_editor_its_row_declares() {
+        for label in ["name", "from", "to", "via", "required", "traversal"] {
+            let mut app = edge_field_app(config_one_edge(), label);
+            let before = app.settings_buffer.edges[0].clone();
+            let editor = app
+                .settings_focused_field()
+                .expect("a drilled edge row has fields")
+                .editor;
+
+            match editor {
+                FieldEditor::Text | FieldEditor::List => {
+                    app.settings_start_edit();
+                    assert!(app.settings_editing, "{label} opens the text editor");
+                    app.settings_edit_input = "changed".to_string();
+                    app.settings_confirm_edit();
+                }
+                FieldEditor::EnumCycle { .. } => app.settings_space(),
+                other => panic!("{label} carries an editor with no edge commit path: {other:?}"),
+            }
+
+            assert_ne!(
+                app.settings_buffer.edges[0], before,
+                "the {label} edit was dropped"
+            );
+            assert!(
+                app.settings_dirty,
+                "the {label} edit did not dirty the buffer"
+            );
+        }
     }
 
     #[test]

@@ -2057,6 +2057,18 @@ const STORE_VARIANTS: &[&str] = &[
 ];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
 
+/// How the panel spells a value that is not set. Shared by the render and by
+/// the optional enum cyclers' first entry, so the string a row shows and the
+/// variant the cycler matches against are one string.
+pub const UNSET_VARIANT: &str = "(unset)";
+
+/// `required` and `traversal` lead with the unset entry. Absence is a claim on
+/// an edge row -- no requiredness, no traversal role (RFC-067) -- so the cycler
+/// has to reach it, and `EnumCycle` indexes a flat variant list with no `Option`
+/// spelling of its own.
+const EDGE_REQUIRED_VARIANTS: &[&str] = &[UNSET_VARIANT, "error", "warning"];
+const EDGE_TRAVERSAL_VARIANTS: &[&str] = &[UNSET_VARIANT, "chain", "related"];
+
 fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> EditableField {
     EditableField {
         label: label.to_string(),
@@ -2067,7 +2079,7 @@ fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> Ed
 }
 
 fn nullable_value(opt: Option<&str>) -> String {
-    opt.unwrap_or("(unset)").to_string()
+    opt.unwrap_or(UNSET_VARIANT).to_string()
 }
 
 fn statusbar_value(slot: Option<&Vec<String>>) -> String {
@@ -2227,26 +2239,51 @@ pub fn settings_fields(
             if let Some(d) = drill {
                 if let Some(e) = config.edges.get(d) {
                     let key = |k| FieldPath::Edge { index: d, key: k };
-                    // Every row is ReadOnly until ITERATION-387: a Text field
-                    // whose write arm does nothing would open an editor and
-                    // silently drop the commit.
-                    let mut row = |label: &str, value: String, k| {
-                        fields.push(field(label, value, FieldEditor::ReadOnly, key(k)));
-                    };
-                    row("name", e.name.clone(), EdgeKey::Name);
-                    row("from", e.from.spelling(), EdgeKey::From);
-                    row("to", e.to.spelling(), EdgeKey::To);
-                    row("via", e.via.spelling(), EdgeKey::Via);
-                    row(
+                    fields.push(field(
+                        "name",
+                        e.name.clone(),
+                        FieldEditor::Text,
+                        key(EdgeKey::Name),
+                    ));
+                    // All three selector positions are name sets, so all three
+                    // take the comma editor `types[].agents` uses. ITERATION-391
+                    // replaces it for `from`/`to` with the member-at-a-time
+                    // picker AC3 asks for; `via` keeps it (see
+                    // `rel_selector_from` for why it is not a cycler).
+                    fields.push(field(
+                        "from",
+                        e.from.spelling(),
+                        FieldEditor::List,
+                        key(EdgeKey::From),
+                    ));
+                    fields.push(field(
+                        "to",
+                        e.to.spelling(),
+                        FieldEditor::List,
+                        key(EdgeKey::To),
+                    ));
+                    fields.push(field(
+                        "via",
+                        e.via.spelling(),
+                        FieldEditor::List,
+                        key(EdgeKey::Via),
+                    ));
+                    fields.push(field(
                         "required",
                         nullable_value(e.required.as_ref().map(Severity::as_str)),
-                        EdgeKey::Required,
-                    );
-                    row(
+                        FieldEditor::EnumCycle {
+                            variants: EDGE_REQUIRED_VARIANTS,
+                        },
+                        key(EdgeKey::Required),
+                    ));
+                    fields.push(field(
                         "traversal",
                         nullable_value(e.traversal.as_ref().map(Traversal::as_str)),
-                        EdgeKey::Traversal,
-                    );
+                        FieldEditor::EnumCycle {
+                            variants: EDGE_TRAVERSAL_VARIANTS,
+                        },
+                        key(EdgeKey::Traversal),
+                    ));
                 }
             }
         }
@@ -4102,11 +4139,9 @@ mod tests {
         );
     }
 
-    // STORY-260 AC1: drilling an edge shows its keys in `EdgeDef`'s order, all
-    // read-only -- ITERATION-387 is what makes them editable, and a `Text`
-    // field with no write arm would open an editor whose commit is dropped.
+    // STORY-260 AC1: drilling an edge shows its keys in `EdgeDef`'s order.
     #[test]
-    fn settings_fields_edge_keys_are_read_only_in_declaration_order() {
+    fn settings_fields_edge_keys_render_in_declaration_order() {
         let fields = settings_fields(3, 0, Some(0), &edges_fixture());
 
         assert_eq!(
@@ -4124,10 +4159,6 @@ mod tests {
                 "chain",
             ]
         );
-        assert!(
-            fields.iter().all(|f| f.editor == FieldEditor::ReadOnly),
-            "no edge field is editable this slice: {fields:?}"
-        );
         assert_eq!(
             fields.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
             [
@@ -4139,6 +4170,27 @@ mod tests {
                 EdgeKey::Traversal,
             ]
             .map(|key| FieldPath::Edge { index: 0, key })
+        );
+    }
+
+    // STORY-260 AC2: the optional qualifiers cycle over a list that leads with
+    // the unset entry, so the cycler can say everything the file can -- an
+    // absent key included.
+    #[test]
+    fn settings_fields_edge_optional_qualifiers_cycle_through_unset() {
+        let fields = settings_fields(3, 0, Some(0), &edges_fixture());
+
+        assert_eq!(
+            field_by_label(&fields, "required").editor,
+            FieldEditor::EnumCycle {
+                variants: &["(unset)", "error", "warning"]
+            }
+        );
+        assert_eq!(
+            field_by_label(&fields, "traversal").editor,
+            FieldEditor::EnumCycle {
+                variants: &["(unset)", "chain", "related"]
+            }
         );
     }
 
