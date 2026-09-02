@@ -677,7 +677,11 @@ fn set_rel_selector(entry: &mut Table, key: &str, selector: &RelSelector) {
         }
         RelSelector::Named(names) => names,
     };
-    if array_matches(entry.get(key).and_then(Item::as_array), names) {
+    // `array_matches` reads an absent key as an empty set, which is how an
+    // OPTIONAL array key avoids being fabricated. `via` is mandatory, and the
+    // empty set is a `via` a migrated rule really carries (ADR-032), so the
+    // empty case has to be written rather than skipped.
+    if !names.is_empty() && array_matches(entry.get(key).and_then(Item::as_array), names) {
         return;
     }
     match names.as_slice() {
@@ -1917,6 +1921,34 @@ repo = "owner/repo"
             "got: {out}"
         );
         assert_eq!(Config::parse(&out).unwrap().edges[0].via, via);
+    }
+
+    // ADR-032: a rule the config marks no chain relationship for translates to
+    // an empty `via`. `via` is mandatory, so the empty set has to reach the file
+    // as `via = []` — skipping the key the way an optional array key is skipped
+    // would render a config that no longer loads.
+    #[test]
+    fn an_edge_naming_no_relationship_is_written_as_an_empty_list_and_round_trips() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "stories-reach-nothing".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec![]),
+                required: Some(Severity::Warning),
+                traversal: Some(Traversal::Chain),
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains("via = []"), "got: {out}");
+        assert_eq!(
+            Config::parse(&out).unwrap().edges[0].via,
+            RelSelector::Named(vec![])
+        );
     }
 
     // AC6 at the writer's level: a config already carrying `[[edges]]` is what a

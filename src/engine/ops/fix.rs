@@ -58,13 +58,36 @@ pub struct FieldFixResult {
     pub written: bool,
 }
 
-/// A comment the RFC-067 rewrite deletes along with the `[[rules]]` block it
-/// sits on. ADR-032 §Consequences accepts the loss; naming the rule is what
-/// lets the plan say which block loses what, so the reader can copy the text
-/// somewhere it will survive.
+/// The kind of block a lost comment was attached to. The rewrite destroys decor
+/// in two places, and a name alone does not distinguish them: it deletes a
+/// `[[rules]]` table whole, and it deletes the `traversal` key off a
+/// `[[relationships]]` table that otherwise survives.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum LostBlock {
+    Rule,
+    Relationship,
+}
+
+impl LostBlock {
+    /// How the block reads in the plan, matching the TOML the reader will look
+    /// for it in.
+    pub fn label(self) -> &'static str {
+        match self {
+            LostBlock::Rule => "rule",
+            LostBlock::Relationship => "relationship",
+        }
+    }
+}
+
+/// A comment the RFC-067 rewrite deletes along with the declaration it sits on.
+/// ADR-032 §Consequences accepts the loss; naming the block and the declaration
+/// is what lets the plan say which one loses what, so the reader can copy the
+/// text somewhere it will survive.
 #[derive(Debug, Serialize)]
 pub struct LostComment {
-    pub rule: String,
+    pub block: LostBlock,
+    pub name: String,
     pub comment: String,
 }
 

@@ -4,7 +4,7 @@
 
 Code is the source of truth for what the game _does_. Docs never mirror current behaviour -- they hold either **judgment** (durable, rarely changes) or **work** (disposable, consumed then archived). Two invariants make the loop safe:
 
-1. **No orphan work.** Every `delta` must `serves` an _accepted_ `pillar`, and every `iteration` must `implements` a delta or prototype, or the engine refuses them. Scope creep is structurally impossible.
+1. **No orphan work.** Every `delta` must `serves` a `pillar`, and every `iteration` must `implements` a delta or prototype, or `lazyspec validate` errors on it. Scope creep does not go unnoticed.
 2. **Fun is discovered, not specified.** No `delta` reaches `done` without a human playtest. Failing the playtest routes work _back to code_, not forward.
 
 ## The two-level split
@@ -31,11 +31,11 @@ The build agent lives entirely at the iteration level. The delta never gets buil
 
 ```
 lazyspec init
-lazyspec create convention   # coding principles; accept it
-lazyspec create pillars       # the 3-5 experience goals; ACCEPT it
+lazyspec create convention   # coding principles
+lazyspec create pillars       # the 3-5 experience goals
 ```
 
-Until a pillar is `accepted`, nothing can be built. That is deliberate -- commit to what the game _is_ before building toward it.
+Write the pillars before anything else. Every `delta` has to name one as its parent -- `validate` errors on a delta that names none -- so nothing gets built that no experience goal asked for. Nothing checks which _status_ a pillar sits at; accepting it is a judgement you make, not a lock the tool holds.
 
 ## The inner loop (per feature)
 

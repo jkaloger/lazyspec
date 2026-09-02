@@ -80,13 +80,11 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
-    for name in &result.rules_added {
-        if dry_run {
-            out.push_str(&format!("Would add rule {}\n", name));
-        } else {
-            out.push_str(&format!("Added rule {}\n", name));
-        }
-    }
+    // `rules_added` gets no line of its own. A standard constraint the config
+    // was missing is seeded through the translation and lands as an `[[edges]]`
+    // row, so the "Wrote edge" line below already names it; a second line
+    // calling the same name a rule would point the reader at a `[[rules]]`
+    // block this run does not write.
 
     for name in &result.lifecycles_added {
         if dry_run {
@@ -131,17 +129,13 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
     // comment leaves no trace in the migrated config, and the retired gate
     // changes no finding on either side of the rewrite.
     for lost in &result.comments_lost {
-        if dry_run {
-            out.push_str(&format!(
-                "Would lose comment on rule {}: {}\n",
-                lost.rule, lost.comment
-            ));
-        } else {
-            out.push_str(&format!(
-                "Lost comment on rule {}: {}\n",
-                lost.rule, lost.comment
-            ));
-        }
+        let verb = if dry_run { "Would lose" } else { "Lost" };
+        out.push_str(&format!(
+            "{verb} comment on {} {}: {}\n",
+            lost.block.label(),
+            lost.name,
+            lost.comment
+        ));
     }
 
     for name in &result.gates_dropped {

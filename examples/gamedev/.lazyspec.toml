@@ -162,13 +162,15 @@ inverse = "superseded-by"
 
 # ── THE SCOPE-CREEP GATE ────────────────────────────────────────────
 
+# Every shippable change traces to an experience goal, so nothing gets built
+# that no pillar asked for. Which STATUS the pillar sits at is not checked:
+# status-conditioned `create` gating was retired with no successor (ADR-033).
 [[rules]]
 shape = "parent-child"
 name = "deltas-serve-pillars"
 child = "delta"
 parent = "pillars"
 severity = "error"
-require_parent_status = "accepted"   # can't build toward an unratified experience goal
 
 [[rules]]
 shape = "parent-child"

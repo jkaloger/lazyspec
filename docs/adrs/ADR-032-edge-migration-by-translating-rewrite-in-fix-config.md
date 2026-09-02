@@ -32,6 +32,8 @@ It is also the only shape that loads. A `via = "*"` row carrying `traversal = "c
 
 `via` takes a set of relationship names, exactly as `to` takes a set of type names, and a config marking two relationships as chain yields one translated row naming both. This is the second amendment to this decision, made when a row per relationship was measured against the checker it replaces.
 
+A config marking *no* relationship chain yields `via = []`. Such a rule is satisfied by nothing today, so `validation.rs` fires it on every child document; the empty set is the `via` that goes on doing that, where dropping the rule would silence the whole set of findings the migration promises to preserve. The row loads: an empty `via` names no relationship for the declared-relationship check to look up, and it intersects nothing, so it can neither tie on requiredness nor disagree on traversal.
+
 One row per chain relationship changes the quantifier. `validation.rs:583` satisfies a parent-child rule if *any* chain relationship reaches a parent of the right type — a disjunction. Two rows are two independent demands: equal specificity and disjoint `via` means neither displaces the other in `undisplaced_demands` (`validation.rs:641`), so both stand and the document needs *both* links. On this repository's own config, which marks `implements` and `targets` chain, that gives every story a warning naming whichever of the two it did not use.
 
 A set in `via` is a disjunction over its members, which is what `to` already means and what the old checker meant. It also keeps the overlap argument above intact: the row names relationships rather than matching by wildcard, so it still cannot collide with a `related` relationship's marker row.

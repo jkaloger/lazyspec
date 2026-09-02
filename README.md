@@ -480,10 +480,14 @@ lazyspec fix --config            # apply it
 
 **Append-only, for relationships and lifecycles.** It adds the standard `[[relationships]]` that are missing, comparing by name, so user-added relationships are kept and nothing is duplicated. It injects the default `lifecycle` into any `[[types]]` entry that lacks one (a type that already declares a lifecycle is left untouched); migrated types are reported under `lifecycles_added`. Nothing the file already said is taken away.
 
-**A translating rewrite, for the edge migration.** `[[rules]]` blocks and `[[relationships]].traversal` markers become `[[edges]]` rows, and the source declarations are then deleted — a config cannot declare its DAG twice. Two things do not survive that deletion:
+Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the three standard constraints. They land as `[[edges]]` rows, since a `[[rules]]` block is what the same run would then translate away. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
 
-- **Comments attached to a translated `[[rules]]` block**, whether above its header or trailing one of its keys. Each is reported under `comments_lost`, naming the rule it belonged to, so you can move the text somewhere it will keep.
+**A translating rewrite, for the edge migration.** `[[rules]]` blocks and `[[relationships]].traversal` markers become `[[edges]]` rows, and the source declarations are then deleted — a config cannot declare its DAG twice. A `parent-child` rule becomes one row whose `via` names every relationship the config marks `traversal = "chain"`; if it marks none, the rule was satisfiable by nothing and the row carries `via = []`, which is satisfied by nothing too. Two things do not survive the deletion:
+
+- **Comments attached to a declaration the rewrite deletes** — a whole `[[rules]]` block, header and keys alike, or the `traversal` key of a `[[relationships]]` block that otherwise survives. Each is reported under `comments_lost`, naming the block and the declaration it belonged to, so you can move the text somewhere it will keep.
 - **`require_parent_status` gates.** ADR-033 retired status-conditioned `create` gating with no successor, so the key is dropped rather than translated. Each is reported under `gates_dropped`. Nothing validates differently afterwards; that is why the plan has to say it.
+
+The rewritten text is parsed strictly before it replaces the file. If a row the migration writes collides with one already there — a hand-written `via = "*"` row carrying a `traversal` overlaps every marker row, and the loader refuses the pair — nothing is written and the error names both rows.
 
 `--dry-run` prints that whole plan — additions, translations, deletions, and both losses — before anything is applied, and writes nothing. Everything the human output says is a field in `--json`.
 

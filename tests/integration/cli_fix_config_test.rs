@@ -246,11 +246,12 @@ require = "any-relation"
 severity = "error"
 "#;
 
-/// A legacy config whose `[[rules]]` blocks carry the two things the
-/// translating rewrite deletes without trace: comments on a translated block,
-/// and the `require_parent_status` gate ADR-033 retired. `adrs-need-relations`
-/// carries neither and is the control — a plan that warns about every block
-/// teaches the reader to skip the warning.
+/// A legacy config carrying everything the translating rewrite deletes without
+/// trace: a comment on a translated `[[rules]]` block, a comment on a
+/// `traversal` key the rewrite strips off a relationship it otherwise keeps, and
+/// the `require_parent_status` gate ADR-033 retired. `adrs-need-relations` and
+/// the `blocks` relationship carry none of it and are the control — a plan that
+/// warns about every block teaches the reader to skip the warning.
 const COMMENTED_LEGACY_CONFIG: &str = r#"[[types]]
 name = "rfc"
 plural = "rfcs"
@@ -275,7 +276,7 @@ lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "a
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
-traversal = "chain"
+traversal = "chain" # the marker this project walks its chain by
 
 [[relationships]]
 name = "supersedes"
@@ -283,7 +284,7 @@ inverse = "superseded-by"
 
 [[relationships]]
 name = "blocks"
-inverse = "blocked-by"
+inverse = "blocked-by" # a key the rewrite keeps
 
 [[relationships]]
 name = "related-to"
@@ -364,6 +365,109 @@ fn a_non_chain_link_to_the_right_parent_type_is_a_finding_on_both_sides() {
         findings(fixture.root()).contains(non_chain),
         "a relationship the config never marked chain must not start satisfying the rule"
     );
+}
+
+/// A legacy config with a `parent-child` rule and NOT ONE relationship marked
+/// `traversal = "chain"`. Every standard relationship is already declared, so
+/// the append step adds none and cannot supply the missing marker — a marker is
+/// only ever written onto a relationship the file did not already have.
+///
+/// `validation.rs` satisfies a parent-child rule only through a chain-marked
+/// relationship, so this rule is satisfiable by nothing: it fires on every
+/// `story` in the repository, whatever that story links to.
+const NO_CHAIN_RELATIONSHIP_CONFIG: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning"
+"#;
+
+fn no_chain_relationship_project() -> ConfigFixture {
+    let fixture = ConfigFixture::new(NO_CHAIN_RELATIONSHIP_CONFIG);
+    fixture.write_doc("docs/rfcs/RFC-001-the-parent.md", "rfc", &[]);
+    fixture.write_doc("docs/stories/STORY-001-no-link-at-all.md", "story", &[]);
+    fixture.write_doc(
+        "docs/stories/STORY-002-implements-the-rfc.md",
+        "story",
+        &[("implements", "RFC-001")],
+    );
+    fixture
+}
+
+// AC5 — the rule no chain relationship can satisfy. It fires on every story
+// before the migration, so it must fire on every story after: dropping it would
+// be the migration silencing a finding rather than translating it.
+#[test]
+fn a_rule_no_chain_relationship_can_satisfy_keeps_firing_across_the_migration() {
+    let fixture = no_chain_relationship_project();
+
+    let before = findings(fixture.root());
+    assert_eq!(
+        before,
+        BTreeSet::from([
+            "warning docs/stories/STORY-001-no-link-at-all.md stories-need-rfcs".to_string(),
+            "warning docs/stories/STORY-002-implements-the-rfc.md stories-need-rfcs".to_string(),
+        ]),
+        "a rule satisfiable by nothing fires on every child document"
+    );
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    assert_eq!(findings(fixture.root()), before);
+}
+
+// AC1/AC2 — the row such a rule translates to: an empty `via`, which is the
+// spelling of "no relationship realizes this edge". It has to strict-load.
+#[test]
+fn a_rule_no_chain_relationship_can_satisfy_becomes_a_row_naming_no_relationship() {
+    let fixture = no_chain_relationship_project();
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    assert!(
+        fixture.config_text().contains("via = []"),
+        "got: {}",
+        fixture.config_text()
+    );
+    let config = Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
+    let row = config
+        .edges
+        .iter()
+        .find(|e| e.name == "stories-need-rfcs")
+        .expect("the rule's row survives translation");
+    assert!(row.via.names().is_empty());
+    assert_eq!(row.required, Some(Severity::Warning));
 }
 
 /// A config marking two relationships chain, which is what this project's own
@@ -474,6 +578,29 @@ fn fix_config_dry_run_names_the_comments_the_rewrite_destroys() {
     );
 }
 
+// AC7, ITERATION-378 — the rewrite strips the `traversal` key off a
+// relationship it otherwise keeps, so the comment on that key dies too. The
+// line names the relationship, because "rule X" would send the reader looking
+// for a `[[rules]]` block that never held it.
+#[test]
+fn fix_config_dry_run_names_the_comment_on_a_traversal_key_it_removes() {
+    let fixture = ConfigFixture::new(COMMENTED_LEGACY_CONFIG);
+
+    let output = lazyspec::cli::fix::run_config_human(fixture.root(), true, &RealFileSystem);
+
+    assert!(
+        output.contains(
+            "Would lose comment on relationship implements: \
+             # the marker this project walks its chain by"
+        ),
+        "{output}"
+    );
+    assert!(
+        !output.contains("a key the rewrite keeps"),
+        "a comment on a key that survives must not be reported: {output}"
+    );
+}
+
 // AC7 — the warning is true: exactly the comments named are the ones gone from
 // the file afterwards, and a comment on a section the migration does not
 // translate is untouched.
@@ -486,6 +613,14 @@ fn the_comments_the_plan_names_are_the_ones_the_rewrite_removes() {
     let text = fixture.config_text();
     assert!(!text.contains("# every story traces to an rfc"), "{text}");
     assert!(!text.contains("# loud enough to notice"), "{text}");
+    assert!(
+        !text.contains("the marker this project walks its chain by"),
+        "the traversal key's comment goes with the key: {text}"
+    );
+    assert!(
+        text.contains("# a key the rewrite keeps"),
+        "a comment on a surviving key of a rewritten relationship stays: {text}"
+    );
     assert!(
         text.contains("# the tracker this project files against"),
         "a comment outside the translated blocks survives: {text}"
@@ -504,7 +639,7 @@ fn fix_config_reports_no_lost_comment_for_an_uncommented_rule() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| c["rule"].as_str().unwrap())
+        .map(|c| c["name"].as_str().unwrap())
         .collect();
     assert!(!named.contains(&"adrs-need-relations"), "{json}");
 }
@@ -535,17 +670,32 @@ fn fix_config_json_carries_the_lost_comments_and_dropped_gates() {
     let json = lazyspec::cli::fix::run_config_json(fixture.root(), true, &RealFileSystem);
 
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let lost: Vec<(&str, &str)> = parsed["comments_lost"]
+    let lost: Vec<(&str, &str, &str)> = parsed["comments_lost"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| (c["rule"].as_str().unwrap(), c["comment"].as_str().unwrap()))
+        .map(|c| {
+            (
+                c["block"].as_str().unwrap(),
+                c["name"].as_str().unwrap(),
+                c["comment"].as_str().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         lost,
         vec![
-            ("stories-need-rfcs", "# every story traces to an rfc"),
-            ("stories-need-rfcs", "# loud enough to notice"),
+            (
+                "relationship",
+                "implements",
+                "# the marker this project walks its chain by"
+            ),
+            (
+                "rule",
+                "stories-need-rfcs",
+                "# every story traces to an rfc"
+            ),
+            ("rule", "stories-need-rfcs", "# loud enough to notice"),
         ],
         "{json}"
     );
@@ -712,17 +862,24 @@ fn fix_config_dry_run_leaves_file_unchanged() {
         output.contains("Would add relationship related-to"),
         "{output}"
     );
+    // The standard constraints are reported as the `[[edges]]` rows they land
+    // as, once each. No `[[rules]]` block is written, so no line calls them
+    // rules.
     assert!(
-        output.contains("Would add rule stories-need-rfcs"),
+        output.contains("Would write edge stories-need-rfcs"),
         "{output}"
     );
     assert!(
-        output.contains("Would add rule iterations-need-stories"),
+        output.contains("Would write edge iterations-need-stories"),
         "{output}"
     );
     assert!(
-        output.contains("Would add rule adrs-need-relations"),
+        output.contains("Would write edge adrs-need-relations"),
         "{output}"
+    );
+    assert!(
+        !output.contains("Would add rule"),
+        "no line may name a [[rules]] block this run does not write: {output}"
     );
 
     // File is byte-for-byte unchanged.
@@ -798,8 +955,8 @@ fn fix_config_idempotent() {
         "second run should add no relationships, got: {output}"
     );
     assert!(
-        !output.contains("Added rule"),
-        "second run should add no rules, got: {output}"
+        !output.contains("Wrote edge"),
+        "second run should write no edges, got: {output}"
     );
     assert!(
         output.contains("already up to date"),
@@ -824,8 +981,8 @@ fn fix_config_idempotent_dry_run() {
         "dry-run on migrated config should add no relationships, got: {output}"
     );
     assert!(
-        !output.contains("Would add rule"),
-        "dry-run on migrated config should add no rules, got: {output}"
+        !output.contains("Would write edge"),
+        "dry-run on migrated config should write no edges, got: {output}"
     );
     assert!(
         output.contains("already up to date"),
@@ -1042,6 +1199,69 @@ traversal = "chain"
         fixture.config_bytes(),
         original,
         "a config already on the edge table's terms is not rewritten"
+    );
+}
+
+// The rewrite must never replace a config that loads with one that does not.
+// A hand-written `via = "*"` row carrying `traversal = "chain"` overlaps the
+// marker row that the appended `related-to` relationship translates to on all
+// three positions, and the loader refuses that pair. The rendered text is
+// parsed before it is written, so the file survives and the error says why.
+#[test]
+fn fix_config_refuses_to_write_a_config_that_would_no_longer_load() {
+    let collides = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[edges]]
+name = "everything-is-chain"
+from = "story"
+to = "*"
+via = "*"
+traversal = "chain"
+"#;
+    let fixture = ConfigFixture::new(collides);
+    let original = fixture.config_bytes();
+
+    let error =
+        lazyspec::engine::ops::fix::collect_config_fixes(fixture.root(), false, &RealFileSystem)
+            .expect_err("a rewrite that would not load is refused");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("everything-is-chain"),
+        "the failure must name the row already in the file, got: {message}"
+    );
+    assert!(
+        message.contains("The rows the migration writes are: related-to-traversal"),
+        "the failure must name the row the migration wrote, got: {message}"
+    );
+    assert_eq!(
+        fixture.config_bytes(),
+        original,
+        "nothing is written when the result would not load"
     );
 }
 
