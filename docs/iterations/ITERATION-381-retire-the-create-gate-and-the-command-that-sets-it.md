@@ -1,7 +1,7 @@
 ---
 title: Retire the create gate and the command that sets it
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
