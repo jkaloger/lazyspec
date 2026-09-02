@@ -438,9 +438,9 @@ Unresolvable refs render as:
 <details>
 <summary><h2>Configuration</h2></summary>
 
-`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it runs an interactive wizard: by default it designs a **blank** type DAG from scratch (prompting for each type, its lifecycle, and parent-child rules), or pass `--template starter` to tweak the built-in starter set instead. `--non-interactive`, `--json`, or a non-TTY writes the starter config unchanged.
+`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it runs an interactive wizard: by default it designs a **blank** type DAG from scratch (prompting for each type and its lifecycle, and declaring no `[[edges]]` — write those yourself), or pass `--template starter` to tweak the built-in starter set instead. `--non-interactive`, `--json`, or a non-TTY writes the starter config unchanged, whose three `[[edges]]` are `stories-need-rfcs`, `iterations-need-stories` and `adrs-need-relations`. Dropping a starter type in the wizard drops the edge rows that name it.
 
-The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[rules]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]` points you at `lazyspec fix --config`.
+The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[edges]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]` points you at `lazyspec fix --config`.
 
 > [!NOTE]
 > `lazyspec config schema` prints a JSON Schema for `.lazyspec.toml`, derived from the actual parser so it never drifts from the binary. It is the authoritative key reference: point [taplo](https://taplo.tamasfe.dev/) or Even Better TOML at it for editor autocomplete, or read it instead of inferring keys from this README. The sections below cover the main blocks with examples.

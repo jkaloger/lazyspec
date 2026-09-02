@@ -1,11 +1,9 @@
-use crate::cli::config::{
-    apply_collected_type, collect_parent_child_rule, collect_type_interactive,
-};
+use crate::cli::config::{apply_collected_type, collect_type_interactive};
 use crate::cli::style::{bold, dim, section_header, success_line, warning_prefix};
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
-    default_rules, starter_relationships, starter_types, CertificationConfig, Config,
-    DocumentConfig, FilesystemConfig, Naming, Templates, UiConfig, ValidationRule,
+    starter_edges, starter_relationships, starter_types, CertificationConfig, Config,
+    DocumentConfig, EdgeDef, FilesystemConfig, Naming, Severity, Templates, Traversal, UiConfig,
 };
 use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
@@ -18,7 +16,8 @@ use std::path::Path;
 use std::process::Command;
 
 /// The starter config `init` writes into a fresh project. Per ADR-011 this is the
-/// sole home for default types and rules; the engine load path carries none.
+/// sole home for default types and for the starter DAG; the engine load path
+/// carries none. The DAG is stated as `[[edges]]` and nothing else (STORY-259).
 pub fn starter_config() -> Config {
     Config {
         documents: DocumentConfig {
@@ -37,8 +36,8 @@ pub fn starter_config() -> Config {
         },
         relationships: starter_relationships(),
         ui: UiConfig::default(),
-        rules: default_rules(),
-        edges: Vec::new(),
+        rules: Vec::new(),
+        edges: starter_edges(),
         ref_count_ceiling: 15,
         certification: CertificationConfig::default(),
         agents: Default::default(),
@@ -175,6 +174,7 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
             }
         }
         config.documents.types = kept;
+        drop_edges_naming_undefined_types(&mut config);
 
         while prompter.confirm("Add another type", false)? {
             let collected = collect_type_interactive(&config, prompter)?;
@@ -188,31 +188,49 @@ pub fn design_config_interactive(base: Config, prompter: &mut dyn Prompter) -> R
     }
 }
 
+/// Drop every `[[edges]]` row that names a type `config` no longer defines. The
+/// keep/drop walk can retire a starter type an edge row names, and such a row
+/// fails strict load outright, so the config the wizard writes would not load
+/// back. A wildcard position names no type and keeps its row.
+fn drop_edges_naming_undefined_types(config: &mut Config) {
+    let defined = |name: &String| config.documents.types.iter().any(|t| &t.name == name);
+    let retained = config
+        .edges
+        .iter()
+        .filter(|edge| edge.from.names().iter().all(defined) && edge.to.names().iter().all(defined))
+        .cloned()
+        .collect();
+    config.edges = retained;
+}
+
 /// The empty base the from-scratch designer builds on: the starter config's
 /// non-type scaffolding (naming pattern, filesystem, ui, ceiling, certification)
 /// and the type-agnostic starter relationship vocabulary, but with NO types and
-/// NO rules. Rules must start empty so the from-scratch DAG never inherits a rule
-/// referencing a type it does not define (the dangling-rule trap); every rule is
-/// built from the user's own parent-child steps, whose endpoints are types they
-/// just defined. Relationships are safe to keep because they name no types.
+/// NO edges. Edges must start empty so the from-scratch DAG never inherits a row
+/// naming a type it does not define -- the dangling-edge trap, which strict load
+/// rejects outright. Relationships are safe to keep because they name no types.
 pub fn blank_config() -> Config {
     Config {
         documents: DocumentConfig {
             types: vec![],
             ..starter_config().documents
         },
-        rules: vec![],
+        edges: vec![],
         ..starter_config()
     }
 }
 
 /// Design a whole type DAG from nothing, interactively: author (prompted, not
-/// persisted), naming pattern, a types loop (at least one type required), then --
-/// once two or more types exist -- a parent-child rules loop with severity.
-/// Renders a DAG summary and asks to write; a `no`
-/// discards the session and starts over. Pure -- no disk IO -- so it is fully
-/// driveable by a `ScriptedPrompter`. The returned `Config` owes nothing to
-/// `starter_config()`'s types or rules and validates clean via `write_project`.
+/// persisted), naming pattern, and a types loop (at least one type required).
+/// Renders a DAG summary and asks to write; a `no` discards the session and
+/// starts over. Pure -- no disk IO -- so it is fully driveable by a
+/// `ScriptedPrompter`. The returned `Config` owes nothing to `starter_config()`'s
+/// types or edges and validates clean via `write_project`.
+///
+/// The wizard designs types and lifecycles but not the DAG: it declares no
+/// `[[edges]]`, and there is no prompt that would. Authoring edges here is
+/// STORY-261's, and until it lands a from-scratch project starts with an empty
+/// edge table (ITERATION-383 §Out of scope).
 pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config> {
     let author_default = git_user_name();
     let base = blank_config();
@@ -241,16 +259,6 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
             }
         }
 
-        // Parent-child rules only make sense once at least two types exist. Each
-        // rule's endpoints are chosen from the defined types, so no rule can
-        // dangle. Gates attach here (after rules exist), not in the types loop.
-        if config.documents.types.len() >= 2 {
-            while prompter.confirm("Add a parent-child rule", false)? {
-                let rule = collect_parent_child_rule(&config, prompter)?;
-                config.rules.push(rule);
-            }
-        }
-
         print!("{}", render_dag_summary(&config));
         if prompter.confirm("Write this config", true)? {
             return Ok(config);
@@ -259,10 +267,53 @@ pub fn design_config_from_scratch(prompter: &mut dyn Prompter) -> Result<Config>
     }
 }
 
+/// How one position of an `[[edges]]` row reads back in the summary. A selector
+/// that names nothing is the wildcard, and reads as the `"*"` its author wrote;
+/// a set reads as the list it was written as.
+fn position_spelling(names: &[String]) -> String {
+    match names {
+        [] => crate::engine::config::WILDCARD.to_string(),
+        [only] => only.clone(),
+        many => format!("[{}]", many.join(", ")),
+    }
+}
+
+/// The parenthesised tail of an edge line: whichever of `required` and
+/// `traversal` the row states, or nothing at all when it states neither.
+fn edge_qualifiers(edge: &EdgeDef) -> String {
+    let mut parts = Vec::new();
+    if let Some(required) = &edge.required {
+        parts.push(format!(
+            "required: {}",
+            match required {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            }
+        ));
+    }
+    if let Some(traversal) = edge.traversal {
+        parts.push(format!(
+            "traversal: {}",
+            match traversal {
+                Traversal::Chain => "chain",
+                Traversal::Related => "related",
+            }
+        ));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" ({})", parts.join(", "))
+}
+
 /// A human-readable summary of the designed DAG: every type with its plural,
-/// directory, prefix, store, and effective lifecycle (states and edges); every
-/// parent-child rule with its child, parent, and severity; and the relation
-/// vocabulary. Rendered before the final write confirmation.
+/// directory, prefix, store, and effective lifecycle (states and transitions);
+/// every `[[edges]]` row; and the relation vocabulary. Rendered before the final
+/// write confirmation.
+///
+/// Two unrelated things are called an edge here -- a lifecycle transition and a
+/// row of the document DAG -- so the lifecycle lines read `transition:` and only
+/// the DAG rows are called edges.
 fn render_dag_summary(config: &Config) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -280,40 +331,31 @@ fn render_dag_summary(config: &Config) -> String {
         );
         let lifecycle = type_def.effective_lifecycle();
         let _ = writeln!(out, "    lifecycle: {}", lifecycle.states.join(", "));
-        for edge in &lifecycle.edges {
+        for transition in &lifecycle.edges {
             let _ = writeln!(
                 out,
-                "      edge: {}",
-                dim(&format!("{} -> {}", edge.from, edge.to))
+                "      transition: {}",
+                dim(&format!("{} -> {}", transition.from, transition.to))
             );
         }
     }
 
-    let _ = writeln!(out, "{}", section_header("Parent-child rules:"));
-    let mut any_rule = false;
-    for rule in &config.rules {
-        if let ValidationRule::ParentChild {
-            name,
-            child,
-            parent,
-            severity,
-        } = rule
-        {
-            any_rule = true;
-            let severity = match severity {
-                crate::engine::config::Severity::Error => "error",
-                crate::engine::config::Severity::Warning => "warning",
-            };
-            let _ = writeln!(
-                out,
-                "  {}: {} (severity: {})",
-                bold(name),
-                dim(&format!("{child} -> {parent}")),
-                dim(severity),
-            );
-        }
+    let _ = writeln!(out, "{}", section_header("DAG edges:"));
+    for edge in &config.edges {
+        let _ = writeln!(
+            out,
+            "  {}: {} via {}{}",
+            bold(&edge.name),
+            dim(&format!(
+                "{} -> {}",
+                position_spelling(edge.from.names()),
+                position_spelling(edge.to.names())
+            )),
+            dim(&position_spelling(edge.via.names())),
+            dim(&edge_qualifiers(edge)),
+        );
     }
-    if !any_rule {
+    if config.edges.is_empty() {
         out.push_str("  (none)\n");
     }
 
@@ -481,13 +523,17 @@ by agent skills. For example, a dictum about testing philosophy would have
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
-    use crate::engine::config::{Severity, StoreBackend, TypeDef};
+    use crate::engine::config::{StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
     use crate::engine::validation::validate_full;
 
     fn scripted(answers: &[&str]) -> ScriptedPrompter {
         ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn plain_summary(config: &Config) -> String {
+        console::strip_ansi_codes(&render_dag_summary(config)).to_string()
     }
 
     // Enough blank answers to accept every default in the wizard: author, naming,
@@ -638,6 +684,44 @@ mod tests {
         let spike = config.type_by_name("spike").unwrap();
         assert_eq!(spike.dir, "docs/spikes");
         assert_eq!(spike.prefix, "SPIKE");
+        assert_eq!(
+            config.edges,
+            starter_edges(),
+            "dropping a type no edge names leaves the starter edges alone"
+        );
+    }
+
+    // Dropping a type a starter edge names takes the row with it: such a row
+    // names an undeclared type, which strict load refuses, so the wizard would
+    // otherwise write a config it cannot read back.
+    #[test]
+    fn design_dropping_a_type_drops_the_edges_naming_it() {
+        let mut answers = vec![String::new(), String::new()]; // author, naming
+        for type_def in &starter_config().documents.types {
+            let keep = if type_def.name == "story" { "n" } else { "y" };
+            answers.push(keep.to_string());
+        }
+        answers.push("n".to_string()); // add another type? no
+        answers.push("y".to_string()); // write? yes
+
+        let mut prompter = ScriptedPrompter::new(answers);
+        let config = design_config_interactive(starter_config(), &mut prompter).unwrap();
+
+        let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["adrs-need-relations"],
+            "only the row naming no dropped type survives"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        write_project(dir.path(), &config).unwrap();
+        let loaded = Config::load(dir.path(), &RealFileSystem);
+        assert!(
+            loaded.is_ok(),
+            "the written config must load back, got: {:?}",
+            loaded.err()
+        );
     }
 
     // AC5: scaffolding a designed config round-trips to a project that validates
@@ -669,6 +753,11 @@ mod tests {
         let loaded = Config::load(root, &fs).unwrap();
         assert!(loaded.type_by_name("spike").is_some());
         assert!(loaded.type_by_name("spec").is_none());
+        assert_eq!(
+            loaded.edges,
+            starter_edges(),
+            "the starter DAG round-trips through the written config"
+        );
 
         let store = Store::load(root, &loaded).unwrap();
         let result = validate_full(&store, &loaded);
@@ -681,15 +770,15 @@ mod tests {
 
     // --- STORY-228: from-scratch (blank slate) DAG designer ---
 
-    // Blank base parity: no types, no rules, but the type-agnostic starter
+    // Blank base parity: no types, no edges, but the type-agnostic starter
     // relationship vocabulary and the `.md`-suffixed starter naming pattern.
     #[test]
     fn scratch_blank_config_parity() {
         let blank = blank_config();
         assert!(blank.documents.types.is_empty(), "types start empty");
         assert!(
-            blank.rules.is_empty(),
-            "rules start empty (no dangling rules)"
+            blank.edges.is_empty(),
+            "edges start empty (no dangling edges)"
         );
         assert_eq!(
             blank.relationships,
@@ -702,8 +791,9 @@ mod tests {
     }
 
     // A full from-scratch happy-path script: rfc (custom lifecycle draft ->
-    // accepted), story (inherited lifecycle, parent rfc), and a story -> rfc
-    // parent-child rule with severity=error.
+    // accepted) and story (inherited lifecycle). The wizard asks nothing about
+    // the DAG, so the script ends at the write confirmation right after the
+    // types loop.
     fn full_scratch_answers() -> Vec<String> {
         [
             "",               // author
@@ -734,14 +824,9 @@ mod tests {
             "",               // singleton -> false
             "",               // authorship -> default
             "n",              // add an attribute? no
-            "n",              // set a parent type? no (the DAG edge is the rule below)
+            "n",              // set a parent type? no
             "n",              // design a custom lifecycle? no (inherits preset)
             "n",              // add another type? no
-            "y",              // add a parent-child rule? yes
-            "story",          // child
-            "rfc",            // parent
-            "error",          // severity
-            "n",              // add another rule? no
             "y",              // write this config? yes
         ]
         .iter()
@@ -784,15 +869,10 @@ mod tests {
             "",
             "",  // core fields
             "n", // no attribute
-            "n", // set a parent type? no (the DAG edge is the rule below)
+            "n", // set a parent type? no
             "n", // no custom lifecycle
             "n", // add another type? no
-            "y", // add a parent-child rule
-            "beta",
-            "alpha", // child, parent
-            "",      // severity -> warning
-            "n",     // add another rule? no
-            "y",     // write
+            "y", // write
         ]
         .iter()
         .map(|s| s.to_string())
@@ -808,10 +888,12 @@ mod tests {
         assert_eq!(alpha.lifecycle.edges[0].to, "done");
     }
 
-    // AC2: a parent-child rule draws child and parent from the defined types
-    // (an unknown child re-asks) and records the chosen severity.
+    // STORY-259 AC4: two types are enough for a DAG, and the wizard still asks
+    // nothing about one -- it goes straight from the types loop to the write
+    // confirmation, and declares neither a rule nor an edge. A surviving prompt
+    // would consume the `y` below as its own answer and desync the script.
     #[test]
-    fn scratch_parent_child_rule_defined_types_and_severity() {
+    fn scratch_two_types_are_not_asked_about_the_dag() {
         let answers = [
             "", "",  // author, naming
             "y", // add a type -> alpha
@@ -819,18 +901,12 @@ mod tests {
             "n", // no attribute
             "n", // no custom lifecycle
             "y", // add a type -> beta
-            "beta", "betas", "", "", "", "", "", "", "",      // core fields
-            "n",     // no attribute
-            "n",     // no parent
-            "n",     // no custom lifecycle
-            "n",     // add another type? no
-            "y",     // add a parent-child rule
-            "ghost", // not a defined type -> re-ask child
-            "beta",  // child
-            "alpha", // parent
-            "error", // severity
-            "n",     // add another rule? no
-            "y",     // write
+            "beta", "betas", "", "", "", "", "", "", "",  // core fields
+            "n", // no attribute
+            "n", // no parent
+            "n", // no custom lifecycle
+            "n", // add another type? no
+            "y", // write
         ]
         .iter()
         .map(|s| s.to_string())
@@ -839,27 +915,17 @@ mod tests {
         let mut prompter = ScriptedPrompter::new(answers);
         let config = design_config_from_scratch(&mut prompter).unwrap();
 
-        let rule = config
-            .rules
-            .iter()
-            .find_map(|r| match r {
-                ValidationRule::ParentChild {
-                    child,
-                    parent,
-                    severity,
-                    ..
-                } => Some((child.clone(), parent.clone(), severity.clone())),
-                _ => None,
-            })
-            .expect("a parent-child rule exists");
-        assert_eq!(rule.0, "beta", "child from defined types");
-        assert_eq!(rule.1, "alpha", "parent from defined types");
-        assert_eq!(rule.2, Severity::Error, "chosen severity recorded");
+        assert!(config.type_by_name("alpha").is_some());
+        assert!(config.type_by_name("beta").is_some());
+        assert!(config.edges.is_empty(), "the wizard declares no edges");
+        assert!(config.rules.is_empty(), "the wizard declares no rules");
     }
 
-    // AC3: the DAG summary names every type, its lifecycle, every rule, and the
-    // relation vocabulary. (The write confirmation is exercised by the
-    // decline test below and by every happy-path script ending in `write? yes`.)
+    // AC3: the DAG summary names every type, its lifecycle transitions, its
+    // edges and the relation vocabulary. A from-scratch design declares no
+    // edges, so its edge section says so rather than going missing. (The write
+    // confirmation is exercised by the decline test below and by every
+    // happy-path script ending in `write? yes`.)
     #[test]
     fn scratch_summary_lists_dag() {
         let mut prompter = ScriptedPrompter::new(full_scratch_answers());
@@ -869,18 +935,64 @@ mod tests {
         assert!(summary.contains("rfc"), "type rfc: {summary}");
         assert!(summary.contains("story"), "type story: {summary}");
         assert!(
-            summary.contains("draft -> accepted"),
-            "rfc lifecycle edge: {summary}"
+            summary.contains("transition: draft -> accepted"),
+            "rfc lifecycle transition, named as a transition: {summary}"
         );
+        assert!(summary.contains("DAG edges:"), "edge section: {summary}");
         assert!(
-            summary.contains("stories-need-rfcs"),
-            "rule name: {summary}"
-        );
-        assert!(
-            summary.contains("story -> rfc"),
-            "rule endpoints: {summary}"
+            summary.contains("DAG edges:\n  (none)"),
+            "an edgeless design says so: {summary}"
         );
         assert!(summary.contains("implements"), "relation vocab: {summary}");
+    }
+
+    // STORY-259 AC4: the summary reads the edge table -- each row's name, its
+    // endpoints, the relationships that realize it, and its requiredness --
+    // rather than a rules table. The wildcard positions read back as `*`.
+    #[test]
+    fn summary_lists_edges_with_positions_and_requiredness() {
+        // Styling wraps individual tokens, and whether it is on at all is a
+        // process-global the colour-parity test toggles; strip it so the
+        // assertion is about the line rather than the palette.
+        let summary = plain_summary(&starter_config());
+
+        assert!(
+            summary.contains("stories-need-rfcs: story -> rfc via implements (required: warning)"),
+            "chain edge row: {summary}"
+        );
+        assert!(
+            summary.contains(
+                "iterations-need-stories: iteration -> story via implements (required: error)"
+            ),
+            "second chain edge row: {summary}"
+        );
+        assert!(
+            summary.contains("adrs-need-relations: adr -> * via * (required: error)"),
+            "wildcard positions read back as `*`: {summary}"
+        );
+        assert!(
+            !summary.contains("Parent-child rules:"),
+            "the rules section is gone: {summary}"
+        );
+    }
+
+    // A row's `traversal` is rendered when it states one, and only then; the
+    // starter rows state none, so the fixture that does comes from the engine.
+    #[test]
+    fn summary_renders_traversal_only_when_stated() {
+        let mut config = starter_config();
+        config.edges = crate::engine::config::starter_hierarchy_edges();
+
+        let summary = plain_summary(&config);
+
+        assert!(
+            summary.contains("implements-traversal: * -> * via implements (traversal: chain)"),
+            "traversal row: {summary}"
+        );
+        assert!(
+            !plain_summary(&starter_config()).contains("traversal:"),
+            "rows stating no traversal render none"
+        );
     }
 
     // ITERATION-331: colour parity. With colours forced off the summary carries
@@ -888,8 +1000,7 @@ mod tests {
     // substring survives because styling wraps whole tokens (never splits them).
     #[test]
     fn dag_summary_colour_parity() {
-        let mut prompter = ScriptedPrompter::new(full_scratch_answers());
-        let config = design_config_from_scratch(&mut prompter).unwrap();
+        let config = starter_config();
 
         console::set_colors_enabled(false);
         let plain = render_dag_summary(&config);
@@ -908,7 +1019,7 @@ mod tests {
         );
         for needle in [
             "rfc",
-            "draft -> accepted",
+            "draft -> review",
             "stories-need-rfcs",
             "story -> rfc",
             "implements",
@@ -921,8 +1032,9 @@ mod tests {
     }
 
     // AC4: a full from-scratch design scaffolds into a temp dir that loads and
-    // validates with zero errors -- including no dangling rule (every rule
-    // endpoint is a defined type).
+    // validates with zero errors. Its DAG is empty by construction (the wizard
+    // asks about no edge), so there is no row that could dangle -- which strict
+    // load, not `validate`, is what would reject.
     #[test]
     fn scratch_scaffold_validates_clean() {
         let mut prompter = ScriptedPrompter::new(full_scratch_answers());
@@ -942,22 +1054,11 @@ mod tests {
         let fs = RealFileSystem;
         let loaded = Config::load(root, &fs).unwrap();
 
-        // Explicit no-dangling-rule check: every rule endpoint is a defined type.
-        let defined: Vec<&str> = loaded
-            .documents
-            .types
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect();
-        for rule in &loaded.rules {
-            if let ValidationRule::ParentChild { child, parent, .. } = rule {
-                assert!(defined.contains(&child.as_str()), "child {child} defined");
-                assert!(
-                    defined.contains(&parent.as_str()),
-                    "parent {parent} defined"
-                );
-            }
-        }
+        assert!(
+            loaded.edges.is_empty(),
+            "the from-scratch DAG declares no edges: {:?}",
+            loaded.edges
+        );
 
         let store = Store::load(root, &loaded).unwrap();
         let result = validate_full(&store, &loaded);

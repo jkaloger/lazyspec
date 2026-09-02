@@ -1,5 +1,5 @@
 use lazyspec::engine::config::{
-    default_rules, starter_relationships, starter_types, Config, RelSelector, RelationshipDef,
+    starter_edges, starter_relationships, starter_types, Config, RelSelector, RelationshipDef,
     Traversal, TypeSelector,
 };
 use lazyspec::engine::store::Store;
@@ -131,9 +131,11 @@ fn init_related_to_is_symmetric_no_inverse() {
     );
 }
 
-// AC3: init emits the 3 historical rules, byte-equal (by value) to default_rules().
+// STORY-259 AC4: init states the three starter constraints as `[[edges]]`, and
+// says nothing at all about `[[rules]]` -- not a block, not a bare `rules = []`
+// key (which would collide with any `[[rules]]` header appended after it).
 #[test]
-fn init_writes_rules_block() {
+fn init_writes_edges_and_no_rules() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
@@ -141,16 +143,32 @@ fn init_writes_rules_block() {
 
     let config = parse_written_config(root);
     assert_eq!(
-        config.rules,
-        default_rules(),
-        "init rules must equal the canonical default_rules()"
+        config.edges,
+        starter_edges(),
+        "init edges must equal the canonical starter_edges()"
     );
+    assert_eq!(config.edges.len(), 3, "three starter constraints");
+    assert!(config.rules.is_empty(), "init declares no rules");
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
     assert!(
-        content.contains("[[rules]]"),
-        "config should contain a [[rules]] block"
+        content.contains("[[edges]]"),
+        "config should contain an [[edges]] block, got:\n{content}"
     );
+    assert!(
+        !content.contains("[[rules]]") && !content.contains("rules ="),
+        "config must carry no rules key at all, got:\n{content}"
+    );
+    for name in [
+        "stories-need-rfcs",
+        "iterations-need-stories",
+        "adrs-need-relations",
+    ] {
+        assert!(
+            content.contains(name),
+            "written config should name the {name} edge, got:\n{content}"
+        );
+    }
 }
 
 // AC4: a freshly init-ed project loads under strict load, round-trips identically
@@ -179,9 +197,9 @@ fn init_project_loads_strict_and_validates_clean() {
         "types must round-trip to starter_types()"
     );
     assert_eq!(
-        config.rules,
-        default_rules(),
-        "rules must round-trip to default_rules()"
+        config.edges,
+        starter_edges(),
+        "edges must round-trip to starter_edges()"
     );
     let mut rels = config.relationships.clone();
     rels.sort_by(|a, b| a.name.cmp(&b.name));
@@ -203,9 +221,9 @@ fn init_project_loads_strict_and_validates_clean() {
     );
 }
 
-// A fresh config must leave room for the `[[edges]]` array of tables: TOML
-// rejects a bare `edges = []` key alongside an `[[edges]]` header in the same
-// document, so an empty edge set must serialize to nothing at all.
+// A fresh config must leave room for further `[[edges]]` rows: the starter set
+// is written as array-of-tables headers, so a hand-appended row parses beside
+// them rather than colliding with a bare `edges = ...` key.
 #[test]
 fn init_config_accepts_an_appended_edges_block() {
     let dir = TempDir::new().unwrap();
@@ -216,8 +234,8 @@ fn init_config_accepts_an_appended_edges_block() {
     let config_path = root.join(".lazyspec.toml");
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(
-        !content.contains("edges = []"),
-        "empty edges must not be serialized, got:\n{content}"
+        !content.contains("edges = "),
+        "edges must serialize as [[edges]] headers, got:\n{content}"
     );
 
     fs::write(

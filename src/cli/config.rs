@@ -1,7 +1,7 @@
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, Severity,
-    StoreBackend, TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend,
+    TypeDef,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
@@ -462,72 +462,6 @@ pub fn collect_type_interactive(
     })
 }
 
-/// A stable, dedup-guarded name for the parent-child rule linking `child` to
-/// `parent`, built from their plural forms (e.g. `stories-need-rfcs`). Falls back
-/// to a naive `{name}s` plural when a type is absent, and appends `-2`, `-3`, ...
-/// if the base name already names a rule.
-fn parent_child_rule_name(config: &Config, child: &str, parent: &str) -> String {
-    let plural = |name: &str| {
-        config
-            .type_by_name(name)
-            .map(|t| t.plural.clone())
-            .unwrap_or_else(|| format!("{name}s"))
-    };
-    let base = format!("{}-need-{}", plural(child), plural(parent));
-    if !config.rules.iter().any(|r| rule_name(r) == base) {
-        return base;
-    }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{base}-{n}");
-        if !config.rules.iter().any(|r| rule_name(r) == candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
-/// Prompt for a single parent-child rule against `config` (an in-memory view of
-/// the project as designed so far). Child and parent are each chosen from the
-/// defined type names -- an unknown answer re-asks rather than aborting. Severity
-/// defaults to `warning`. Pure: no disk IO, fully driveable by a
-/// `ScriptedPrompter`.
-pub fn collect_parent_child_rule(
-    config: &Config,
-    prompter: &mut dyn Prompter,
-) -> Result<ValidationRule> {
-    let type_names: Vec<&str> = config
-        .documents
-        .types
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
-
-    let pick = |prompter: &mut dyn Prompter, label: &str| -> Result<String> {
-        loop {
-            let choice = prompter.select(label, &type_names, type_names[0])?;
-            if type_names.contains(&choice.as_str()) {
-                break Ok(choice);
-            }
-            println!("\"{choice}\" is not a defined type; choose one of the listed names");
-        }
-    };
-
-    let child = pick(prompter, "Child type")?;
-    let parent = pick(prompter, "Parent type")?;
-    let name = parent_child_rule_name(config, &child, &parent);
-
-    let severity =
-        parse_severity(&prompter.select("Severity", &["warning", "error"], "warning")?)?;
-
-    Ok(ValidationRule::ParentChild {
-        name,
-        child,
-        parent,
-        severity,
-    })
-}
-
 /// Push a collected type onto an in-memory `Config` and apply its optional
 /// lifecycle, without any disk IO. Used by the `init` wizard, which
 /// serializes the whole `Config` at the end rather than editing a file in place.
@@ -665,13 +599,6 @@ pub fn run_set_lifecycle(
     Ok(())
 }
 
-fn rule_name(rule: &ValidationRule) -> &str {
-    match rule {
-        ValidationRule::ParentChild { name, .. } => name,
-        ValidationRule::RelationExistence { name, .. } => name,
-    }
-}
-
 fn parse_edge(spec: &str) -> Result<Edge> {
     let Some((from, to)) = spec.split_once(':') else {
         bail!("edge \"{}\" must be FROM:TO", spec);
@@ -771,14 +698,6 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
         "git-ref" => Ok(StoreBackend::GitRef),
         "clickup-tasks" => Ok(StoreBackend::ClickupTasks),
         other => bail!("unknown store backend \"{}\"", other),
-    }
-}
-
-pub fn parse_severity(value: &str) -> Result<Severity> {
-    match value {
-        "warning" => Ok(Severity::Warning),
-        "error" => Ok(Severity::Error),
-        other => bail!("unknown severity \"{}\"", other),
     }
 }
 

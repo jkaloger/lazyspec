@@ -991,8 +991,11 @@ pub struct Config {
     #[serde(rename = "tui")]
     pub ui: UiConfig,
     // Serialized so `to_toml` writes `[[rules]]` into the config it emits, but
-    // deserialized via `RawConfig` in `Config::parse`, not the derive.
-    #[serde(skip_deserializing)]
+    // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
+    // set is skipped for the same reason `edges` skips one: a bare `rules = []`
+    // key would be hoisted above the tables and collide with any `[[rules]]`
+    // header appended after it.
+    #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<ValidationRule>,
     // Serialized so `to_toml` writes `[[edges]]` into the config it emits, but
     // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
@@ -1325,6 +1328,54 @@ pub fn default_rules() -> Vec<ValidationRule> {
             doc_type: "adr".to_string(),
             require: "any-relation".to_string(),
             severity: Severity::Error,
+        },
+    ]
+}
+
+/// The three starter constraints stated as `[[edges]]` rows: the config `init`
+/// writes into a fresh project (ADR-011 keeps the load path free of all three).
+/// The two chain constraints name `implements` rather than wildcarding `via`.
+/// `fix --config` translates a `parent-child` rule to `via = "*"` so a migration
+/// cannot turn a project's valid documents into findings (STORY-258 AC2), but a
+/// fresh project has no documents to protect, and a wildcard would scaffold
+/// exactly the imprecision the edge table exists to escape. `init`'s output is
+/// therefore not the migration's output.
+///
+/// No row states `traversal`. A row that did would suppress `implements`'s
+/// blanket `traversal = "chain"` marker (ADR-035) and narrow the chain to the
+/// two pairs named here, so the starter DAG would stop walking every other pair
+/// of types the relationship links.
+///
+/// `adrs-need-relations` demands a relationship without naming one, which is
+/// `to = "*"`, `via = "*"` -- the shape RFC-067 §Design gives a
+/// `relation-existence` rule. The wildcards here are the intended ones.
+pub fn starter_edges() -> Vec<EdgeDef> {
+    let implements = || RelSelector::Named(vec!["implements".to_string()]);
+    let one = |name: &str| TypeSelector::Types(vec![name.to_string()]);
+    vec![
+        EdgeDef {
+            name: "stories-need-rfcs".to_string(),
+            from: one("story"),
+            to: one("rfc"),
+            via: implements(),
+            required: Some(Severity::Warning),
+            traversal: None,
+        },
+        EdgeDef {
+            name: "iterations-need-stories".to_string(),
+            from: one("iteration"),
+            to: one("story"),
+            via: implements(),
+            required: Some(Severity::Error),
+            traversal: None,
+        },
+        EdgeDef {
+            name: "adrs-need-relations".to_string(),
+            from: one("adr"),
+            to: TypeSelector::Any,
+            via: RelSelector::Any,
+            required: Some(Severity::Error),
+            traversal: None,
         },
     ]
 }
