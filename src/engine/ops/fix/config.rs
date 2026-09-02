@@ -300,12 +300,17 @@ fn traversal_edge_name(relationship: &str) -> String {
     format!("{relationship}-traversal")
 }
 
-/// The standard constraints to seed into a config that declares none of its
-/// own, stated as the [`starter_edges`] rows they land as. They were once
-/// stated as rules and seeded through the translation; now that the retired
-/// shape exists only to be read off a legacy source, the standard set is
-/// declared where it belongs -- on the edge table's terms, next to the ones
-/// `init` scaffolds -- and this function only decides which of them apply.
+/// The standard DAG to seed into a config that declares none of its own, stated
+/// as the [`starter_edges`] rows it lands as. It was once stated as rules and
+/// read through the translation; now that the retired shape exists only to be
+/// read off a legacy source, the standard set is declared where it belongs --
+/// on the edge table's terms, next to the ones `init` scaffolds -- and this
+/// function only decides which of them apply.
+///
+/// The hierarchy comes with it, because nothing else in such a config declares
+/// one: the rows a seeded `parent-child` rule used to translate to carried
+/// `traversal = "chain"` ([`edge_from_rule`]), and a config with no markers to
+/// translate has no blanket declaration either.
 ///
 /// Seeded only into a config that has said nothing about its DAG — neither
 /// `[[edges]]` nor `[[rules]]`. A config carrying `[[edges]]` has stated it on
@@ -319,6 +324,9 @@ fn traversal_edge_name(relationship: &str) -> String {
 /// same reason — an edge row's type names are checked at load, so seeding one
 /// would write a config that no longer loads. Such a row matches no document
 /// anyway.
+///
+/// Read against the buffer, not the source: `implements` may be a relationship
+/// this same run appends, and the rows name it in `via`.
 fn standard_edges_to_seed(config: &Config, rules: &[LegacyRule]) -> Vec<EdgeDef> {
     if !config.edges.is_empty() || !rules.is_empty() {
         return Vec::new();
@@ -327,7 +335,47 @@ fn standard_edges_to_seed(config: &Config, rules: &[LegacyRule]) -> Vec<EdgeDef>
     starter_edges()
         .into_iter()
         .filter(|edge| edge_types(edge).into_iter().all(declared))
+        .filter(|edge| !a_marker_translates_to(config, &edge.name))
+        .map(|edge| drop_a_role_a_marker_contradicts(edge, config))
         .collect()
+}
+
+/// True iff this run's marker translation writes a row of this name, which only
+/// the blanket hierarchy row can collide with: its name IS
+/// [`traversal_edge_name`]'s, and its selectors and role are the ones the
+/// translation gives a chain marker. Seeding it beside the marker would abort
+/// the migration on the name clash and declare nothing the marker's own row
+/// does not, so the row is left to the translation.
+fn a_marker_translates_to(config: &Config, name: &str) -> bool {
+    config
+        .relationships
+        .iter()
+        .filter(|rel| rel.traversal.is_some())
+        .any(|rel| traversal_edge_name(&rel.name) == name)
+}
+
+/// A seeded row claims no traversal role over a relationship the config's own
+/// markers give the OTHER role. The marker's translated row wildcards all three
+/// positions, so it overlaps the seeded row on every one of them, and two
+/// overlapping rows naming different roles do not load. The config has said
+/// what it thinks `implements` is; the standard constraint is a demand for a
+/// link either way, so it is seeded as that and stays silent about the walk.
+fn drop_a_role_a_marker_contradicts(edge: EdgeDef, config: &Config) -> EdgeDef {
+    let Some(role) = edge.traversal else {
+        return edge;
+    };
+    let contradicted = config
+        .relationships
+        .iter()
+        .filter(|rel| edge.via.matches(&rel.name))
+        .any(|rel| matches!(rel.traversal, Some(marked) if marked != role));
+    if !contradicted {
+        return edge;
+    }
+    EdgeDef {
+        traversal: None,
+        ..edge
+    }
 }
 
 /// The document types an edge row names. A wildcard position names none, so it
@@ -413,7 +461,6 @@ pub fn collect_config_fixes(
     // The retired blocks are read off the SOURCE. `Config` has no rule field
     // any more (STORY-259), so the lenient load says nothing about them.
     let legacy_rules = legacy_rules_from_source(&existing)?;
-    let seeded_edges = standard_edges_to_seed(&config, &legacy_rules);
 
     let relationships_added: Vec<String> = missing_relationships
         .iter()
@@ -449,6 +496,7 @@ pub fn collect_config_fixes(
     // a relationship the same run appends.
     let mut buffer = config.clone();
     buffer.relationships.extend(missing_relationships.clone());
+    let seeded_edges = standard_edges_to_seed(&buffer, &legacy_rules);
     let translated = translate_to_edges(&buffer, &legacy_rules, &seeded_edges)?;
     let edges_written: Vec<String> = translated.iter().map(|e| e.name.clone()).collect();
 
@@ -546,6 +594,13 @@ mod tests {
             },
             rules,
         }
+    }
+
+    fn seeded_names(source: &Source) -> Vec<String> {
+        standard_edges_to_seed(&source.config, &source.rules)
+            .into_iter()
+            .map(|edge| edge.name)
+            .collect()
     }
 
     /// [`translate_to_edges`] with nothing seeded, which is every translation
@@ -1037,23 +1092,92 @@ severity = "fatal"
     /// A standard row naming a type the config never declares would not load,
     /// so it is not seeded. `Config::default()` declares no `spike`, and the
     /// starter set names none either, so the filter is exercised by removing a
-    /// type the set does name.
+    /// type the set does name. The blanket hierarchy row names no type at all,
+    /// so no missing type can take it away.
     #[test]
     fn a_standard_row_naming_an_undeclared_type_is_not_seeded() {
         let mut source = config_with(vec![], vec![]);
         source.config.documents.types.retain(|t| t.name != "adr");
 
-        let names: Vec<String> = standard_edges_to_seed(&source.config, &source.rules)
-            .into_iter()
-            .map(|edge| edge.name)
-            .collect();
+        let names: Vec<String> = seeded_names(&source);
 
         assert_eq!(
             names,
             vec![
                 "stories-need-rfcs".to_string(),
-                "iterations-need-stories".to_string()
+                "iterations-need-stories".to_string(),
+                "implements-traversal".to_string()
             ]
+        );
+    }
+
+    /// The seeded set declares the hierarchy the config does not: the blanket
+    /// row that keeps `implements` chain between any pair of types, and the
+    /// concrete rows whose `from` side names the child types the pair-walking
+    /// findings enumerate.
+    #[test]
+    fn a_config_with_no_markers_is_seeded_a_hierarchy() {
+        let source = config_with(vec![], vec![]);
+
+        let seeded = standard_edges_to_seed(&source.config, &source.rules);
+
+        let by_name = |name: &str| seeded.iter().find(|edge| edge.name == name).unwrap();
+        let blanket = by_name("implements-traversal");
+        assert_eq!(blanket.traversal, Some(Traversal::Chain));
+        assert!(blanket.from.names().is_empty() && blanket.to.names().is_empty());
+        assert_eq!(
+            by_name("stories-need-rfcs").traversal,
+            Some(Traversal::Chain)
+        );
+        assert_eq!(
+            by_name("iterations-need-stories").traversal,
+            Some(Traversal::Chain)
+        );
+    }
+
+    /// The marker translation writes the blanket row itself for a marked
+    /// relationship, under the same name, so seeding a second one would collide
+    /// and abort the run. The concrete rows agree with the marker and stay.
+    #[test]
+    fn the_blanket_row_is_left_to_a_marked_relationships_own_translation() {
+        let source = config_with(
+            vec![],
+            vec![marked_relationship("implements", Traversal::Chain)],
+        );
+
+        assert_eq!(
+            seeded_names(&source),
+            vec![
+                "stories-need-rfcs".to_string(),
+                "iterations-need-stories".to_string(),
+                "adrs-need-relations".to_string()
+            ]
+        );
+        assert!(translate_to_edges(
+            &source.config,
+            &source.rules,
+            &standard_edges_to_seed(&source.config, &source.rules)
+        )
+        .is_ok());
+    }
+
+    /// A config that marks `implements` the OTHER role has said `implements` is
+    /// not hierarchy. The marker's translated row wildcards all three
+    /// positions, so a seeded chain row would overlap it and disagree, and the
+    /// pair does not load. The standard constraints are seeded as the demands
+    /// for a link they also are, claiming nothing about the walk.
+    #[test]
+    fn a_seeded_row_claims_no_role_a_marker_contradicts() {
+        let source = config_with(
+            vec![],
+            vec![marked_relationship("implements", Traversal::Related)],
+        );
+
+        let seeded = standard_edges_to_seed(&source.config, &source.rules);
+
+        assert!(
+            seeded.iter().all(|edge| edge.traversal.is_none()),
+            "no seeded row may contradict the marker: {seeded:?}"
         );
     }
 

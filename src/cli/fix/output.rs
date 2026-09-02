@@ -81,10 +81,10 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
     }
 
     // No line names an added rule, and no result field carries one. A standard
-    // constraint the config was missing is seeded through the translation and
-    // lands as an `[[edges]]` row, so the "Wrote edge" line below is the whole
-    // report of it; a line calling the same name a rule would point the reader
-    // at a table that no longer loads.
+    // constraint the config was missing is declared as an `[[edges]]` row and
+    // seeded as one, so the "Wrote edge" line below is the whole report of it;
+    // a line calling the same name a rule would point the reader at a table
+    // that no longer loads.
 
     for name in &result.lifecycles_added {
         if dry_run {

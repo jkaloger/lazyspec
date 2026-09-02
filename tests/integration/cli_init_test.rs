@@ -3,6 +3,7 @@ use lazyspec::engine::config::{
     Traversal, TypeSelector,
 };
 use lazyspec::engine::store::Store;
+use lazyspec::engine::validation::ValidationIssue;
 use std::fs;
 use tempfile::TempDir;
 
@@ -131,9 +132,10 @@ fn init_related_to_is_symmetric_no_inverse() {
     );
 }
 
-// STORY-259 AC4: init states the three starter constraints as `[[edges]]`, and
-// says nothing at all about `[[rules]]` -- not a block, not a bare `rules = []`
-// key (which would collide with any `[[rules]]` header appended after it).
+// STORY-259 AC4: init states the three starter constraints and the hierarchy
+// they hang on as `[[edges]]`, and says nothing at all about `[[rules]]` -- not
+// a block, not a bare `rules = []` key (which would collide with any `[[rules]]`
+// header appended after it).
 #[test]
 fn init_writes_edges_and_no_rules() {
     let dir = TempDir::new().unwrap();
@@ -147,7 +149,11 @@ fn init_writes_edges_and_no_rules() {
         starter_edges(),
         "init edges must equal the canonical starter_edges()"
     );
-    assert_eq!(config.edges.len(), 3, "three starter constraints");
+    assert_eq!(
+        config.edges.len(),
+        4,
+        "three starter constraints and the blanket hierarchy row"
+    );
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
     assert!(
@@ -162,6 +168,7 @@ fn init_writes_edges_and_no_rules() {
         "stories-need-rfcs",
         "iterations-need-stories",
         "adrs-need-relations",
+        "implements-traversal",
     ] {
         assert!(
             content.contains(name),
@@ -217,6 +224,89 @@ fn init_project_loads_strict_and_validates_clean() {
         result.errors.is_empty(),
         "fresh project should validate with no errors, got: {:?}",
         result.errors
+    );
+}
+
+/// Write a document of `doc_type` at `path` under `root`, optionally implementing
+/// `parent`.
+fn write_doc(root: &std::path::Path, path: &str, doc_type: &str, status: &str, parent: &str) {
+    let related = if parent.is_empty() {
+        "related: []\n".to_string()
+    } else {
+        format!("related:\n- implements: {parent}\n")
+    };
+    fs::write(
+        root.join(path),
+        format!(
+            "---\ntitle: \"T\"\ntype: {doc_type}\nstatus: {status}\nauthor: a\n\
+             date: 2026-01-01\ntags: []\n{related}---\nbody\n"
+        ),
+    )
+    .unwrap();
+}
+
+// A scaffolded project reports the hierarchy findings, all three of them. The
+// two that iterate `(parent type, child type)` pairs -- `AllChildrenAccepted`
+// and `UpwardOrphanedAcceptance` -- read those pairs off the `from` side of a
+// chain row naming concrete endpoints, so a starter set that stated no
+// `traversal` left them dead for every new project however its documents were
+// arranged (the blanket `implements` marker names a relationship and no types
+// at all).
+#[test]
+fn a_scaffolded_project_reports_the_hierarchy_findings() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    // RFC-001 has one accepted and one draft story; RFC-002's only story is
+    // accepted. That splits the two pair-walking findings, which are exclusive
+    // per (parent, child type).
+    write_doc(root, "docs/rfcs/RFC-001-one.md", "rfc", "draft", "");
+    write_doc(root, "docs/rfcs/RFC-002-two.md", "rfc", "draft", "");
+    write_doc(
+        root,
+        "docs/stories/STORY-001-a.md",
+        "story",
+        "accepted",
+        "RFC-001",
+    );
+    write_doc(
+        root,
+        "docs/stories/STORY-002-b.md",
+        "story",
+        "draft",
+        "RFC-001",
+    );
+    write_doc(
+        root,
+        "docs/stories/STORY-003-c.md",
+        "story",
+        "accepted",
+        "RFC-002",
+    );
+
+    let config = parse_written_config(root);
+    let store = Store::load(root, &config).unwrap();
+    let warnings = store.validate_full(&config).warnings;
+
+    let count = |predicate: fn(&ValidationIssue) -> bool| {
+        warnings.iter().filter(|issue| predicate(issue)).count()
+    };
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::OrphanedAcceptance { .. })),
+        2,
+        "both accepted stories hang off a draft RFC: {warnings:?}"
+    );
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::AllChildrenAccepted { .. })),
+        1,
+        "RFC-002's only story is accepted: {warnings:?}"
+    );
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::UpwardOrphanedAcceptance { .. })),
+        1,
+        "RFC-001 has one accepted story of two: {warnings:?}"
     );
 }
 

@@ -1285,21 +1285,33 @@ pub fn starter_types() -> Vec<TypeDef> {
     ]
 }
 
-/// The three starter constraints stated as `[[edges]]` rows: what the config
-/// `init` writes into a fresh project (ADR-011 keeps the load path free of all
-/// three), and what `fix --config` seeds into a config that has declared no DAG
-/// of its own. The two chain constraints name `implements` rather than
-/// wildcarding `via`, because a wildcard would scaffold exactly the imprecision
-/// the edge table exists to escape.
+/// The starter DAG stated as `[[edges]]` rows: what `init` writes into a fresh
+/// project (ADR-011 keeps the load path free of all of it), and what
+/// `fix --config` seeds into a config that has declared no DAG of its own.
+/// Three constraints and the hierarchy they hang on, which is the shape this
+/// repository's own migrated config carries.
 ///
-/// No row states `traversal`. A row that did would suppress `implements`'s
-/// blanket `traversal = "chain"` marker (ADR-035) and narrow the chain to the
-/// two pairs named here, so the starter DAG would stop walking every other pair
-/// of types the relationship links.
+/// The two chain constraints name `implements` rather than wildcarding `via`,
+/// because a wildcard would scaffold exactly the imprecision the edge table
+/// exists to escape.
+///
+/// The blanket row is what makes the set a hierarchy rather than three demands
+/// for a link. It states `implements` chain between any pair of types, as the
+/// relationship's global `traversal` marker did -- and it suppresses that marker
+/// (ADR-035), which is why it must be here and not left implicit: the concrete
+/// rows alone would suppress the marker too and narrow the chain to the two
+/// pairs they name. The concrete rows carry the role as well, because a
+/// wildcard `from` enumerates no child types
+/// ([`TraversalWalk::child_types_for`]) and the two findings that walk
+/// `(parent type, child type)` pairs have nothing else to read.
 ///
 /// `adrs-need-relations` demands a relationship without naming one, which is
 /// `to = "*"`, `via = "*"` -- the shape RFC-067 §Design gives a
-/// `relation-existence` rule. The wildcards here are the intended ones.
+/// `relation-existence` rule. The wildcards here are the intended ones, and it
+/// states no traversal: a wildcard `via` row that did would suppress every
+/// declared relationship's marker at once (ADR-035 §Consequences).
+///
+/// [`TraversalWalk::child_types_for`]: crate::engine::traversal::TraversalWalk
 pub fn starter_edges() -> Vec<EdgeDef> {
     let implements = || RelSelector::Named(vec!["implements".to_string()]);
     let one = |name: &str| TypeSelector::Types(vec![name.to_string()]);
@@ -1310,7 +1322,7 @@ pub fn starter_edges() -> Vec<EdgeDef> {
             to: one("rfc"),
             via: implements(),
             required: Some(Severity::Warning),
-            traversal: None,
+            traversal: Some(Traversal::Chain),
         },
         EdgeDef {
             name: "iterations-need-stories".to_string(),
@@ -1318,7 +1330,7 @@ pub fn starter_edges() -> Vec<EdgeDef> {
             to: one("story"),
             via: implements(),
             required: Some(Severity::Error),
-            traversal: None,
+            traversal: Some(Traversal::Chain),
         },
         EdgeDef {
             name: "adrs-need-relations".to_string(),
@@ -1328,42 +1340,14 @@ pub fn starter_edges() -> Vec<EdgeDef> {
             required: Some(Severity::Error),
             traversal: None,
         },
-    ]
-}
-
-/// The starter hierarchy stated the way ITERATION-380 made the five surviving
-/// hierarchy findings read it: as `[[edges]]` rows. This is what `fix --config`
-/// writes when it migrates a legacy config's three standard constraints and the
-/// starter `implements` marker (ADR-032), minus `required` -- these rows exist to declare the walk,
-/// and a fixture that wants the missing-link findings too states `required`
-/// itself.
-///
-/// A fixture opts in rather than getting this from `Config::default()`: the
-/// blanket row suppresses `implements`'s global marker (ADR-035), so handing it
-/// to every test would silently retire the marker path those tests exercise.
-///
-/// The blanket row is what keeps `implements` hierarchy between any pair of
-/// types, as its global marker did. The concrete rows are the pairs
-/// `child_types_for` enumerates for `StatusConsistencyRule`.
-#[cfg(any(test, feature = "test-support"))]
-pub fn starter_hierarchy_edges() -> Vec<EdgeDef> {
-    let chain_row = |name: &str, from: TypeSelector, to: TypeSelector| EdgeDef {
-        name: name.to_string(),
-        from,
-        to,
-        via: RelSelector::Named(vec!["implements".to_string()]),
-        required: None,
-        traversal: Some(Traversal::Chain),
-    };
-    let one = |name: &str| TypeSelector::Types(vec![name.to_string()]);
-    vec![
-        chain_row("implements-traversal", TypeSelector::Any, TypeSelector::Any),
-        chain_row("stories-implement-rfcs", one("story"), one("rfc")),
-        chain_row(
-            "iterations-implement-stories",
-            one("iteration"),
-            one("story"),
-        ),
+        EdgeDef {
+            name: "implements-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: implements(),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        },
     ]
 }
 

@@ -1144,7 +1144,6 @@ traversal = "chain"
                 "n",           // add an attribute? no
                 "n",           // set a parent type? no
                 "n",           // design a custom lifecycle? no
-                "n",           // gate a parent-child rule? no
             ]
             .iter()
             .map(|s| s.to_string())

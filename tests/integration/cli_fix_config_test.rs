@@ -789,7 +789,10 @@ fn fix_config_injects_relationships_and_the_standard_constraints() {
     assert_eq!(related.inverse, None, "related-to is symmetric");
 
     // The three standard constraints arrive as `[[edges]]`, not as `[[rules]]`:
-    // seeding them through the translation is what keeps one run enough.
+    // a row is a constraint's only spelling now, which is what keeps one run
+    // enough. The two chain ones carry the role the rules they replace
+    // translated to, so the pair-walking findings have concrete endpoints to
+    // enumerate.
     let by_name = |name: &str| config.edges.iter().find(|e| e.name == name).unwrap();
 
     let stories = by_name("stories-need-rfcs");
@@ -797,11 +800,13 @@ fn fix_config_injects_relationships_and_the_standard_constraints() {
     assert_eq!(stories.to.names(), ["rfc"]);
     assert_eq!(stories.via.names(), ["implements"]);
     assert_eq!(stories.required, Some(Severity::Warning));
+    assert_eq!(stories.traversal, Some(Traversal::Chain));
 
     let iterations = by_name("iterations-need-stories");
     assert_eq!(iterations.from.names(), ["iteration"]);
     assert_eq!(iterations.to.names(), ["story"]);
     assert_eq!(iterations.required, Some(Severity::Error));
+    assert_eq!(iterations.traversal, Some(Traversal::Chain));
 
     let adrs = by_name("adrs-need-relations");
     assert_eq!(adrs.from.names(), ["adr"]);
@@ -1389,4 +1394,105 @@ url = "https://example.invalid"
         .find(|e| e.name == "stories-track-rfcs")
         .expect("the user's rule became a row");
     assert_eq!(tracked.via.names(), ["tracks"]);
+}
+
+/// A config that has said nothing whatsoever about its DAG: every standard
+/// relationship and type declared, not one `traversal` marker among them, no
+/// `[[rules]]` and no `[[edges]]`. Nothing here translates, so the seeded
+/// standard set is the config's only declaration of hierarchy — and if it
+/// declares none, the migrated project has none.
+const UNMARKED_RELATIONSHIPS_CONFIG: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[types]]
+name = "iteration"
+plural = "iterations"
+dir = "docs/iterations"
+prefix = "ITERATION"
+
+[[types]]
+name = "adr"
+plural = "adrs"
+dir = "docs/adrs"
+prefix = "ADR"
+
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+"#;
+
+// The seeded standard set has to declare a hierarchy, not just three demands
+// for a link. A config with no markers to translate gets nothing else, so the
+// rows it is seeded carry the chain role a seeded `parent-child` rule used to
+// translate to: the blanket row that keeps `implements` hierarchy between any
+// pair of types, and the concrete rows whose `from` side names the child types
+// `AllChildrenAccepted` and `UpwardOrphanedAcceptance` enumerate.
+#[test]
+fn seeding_a_config_that_declares_no_dag_declares_a_working_hierarchy() {
+    let fixture = ConfigFixture::new(UNMARKED_RELATIONSHIPS_CONFIG);
+
+    let code = lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+    assert_eq!(code, 0);
+
+    let config = Config::load(fixture.root(), &RealFileSystem).expect("strict load must succeed");
+    let by_name = |name: &str| {
+        config
+            .edges
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("seeded row {name} is missing from {:?}", config.edges))
+    };
+    let blanket = by_name("implements-traversal");
+    assert!(blanket.from.names().is_empty() && blanket.to.names().is_empty());
+    assert_eq!(blanket.via.names(), ["implements"]);
+    assert_eq!(blanket.traversal, Some(Traversal::Chain));
+    assert_eq!(
+        by_name("stories-need-rfcs").traversal,
+        Some(Traversal::Chain)
+    );
+    assert_eq!(
+        by_name("iterations-need-stories").traversal,
+        Some(Traversal::Chain)
+    );
+
+    // And the findings that declaration exists to produce.
+    fixture.write_doc("docs/rfcs/RFC-001-one.md", "rfc", &[]);
+    std::fs::write(
+        fixture.root().join("docs/stories/STORY-001-a.md"),
+        "---\ntitle: \"A\"\ntype: story\nstatus: accepted\nauthor: \"test\"\n\
+         date: 2026-01-01\ntags: []\nrelated:\n- implements: RFC-001\n---\nbody\n",
+    )
+    .unwrap();
+
+    let store = Store::load(fixture.root(), &config).unwrap();
+    let warnings = store.validate_full(&config).warnings;
+    assert!(
+        warnings
+            .iter()
+            .any(|issue| matches!(issue, ValidationIssue::AllChildrenAccepted { .. })),
+        "the story is `rfc`'s child type, so its acceptance is the RFC's finding: {warnings:?}"
+    );
 }

@@ -709,8 +709,8 @@ mod tests {
         let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["adrs-need-relations"],
-            "only the row naming no dropped type survives"
+            vec!["adrs-need-relations", "implements-traversal"],
+            "only the rows naming no dropped type survive"
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -955,12 +955,16 @@ mod tests {
         let summary = plain_summary(&starter_config());
 
         assert!(
-            summary.contains("stories-need-rfcs: story -> rfc via implements (required: warning)"),
+            summary.contains(
+                "stories-need-rfcs: story -> rfc via implements (required: warning, traversal: \
+                 chain)"
+            ),
             "chain edge row: {summary}"
         );
         assert!(
             summary.contains(
-                "iterations-need-stories: iteration -> story via implements (required: error)"
+                "iterations-need-stories: iteration -> story via implements (required: error, \
+                 traversal: chain)"
             ),
             "second chain edge row: {summary}"
         );
@@ -969,27 +973,12 @@ mod tests {
             "wildcard positions read back as `*`: {summary}"
         );
         assert!(
+            summary.contains("implements-traversal: * -> * via implements (traversal: chain)"),
+            "the blanket hierarchy row, which states no requiredness: {summary}"
+        );
+        assert!(
             !summary.contains("Parent-child rules:"),
             "the rules section is gone: {summary}"
-        );
-    }
-
-    // A row's `traversal` is rendered when it states one, and only then; the
-    // starter rows state none, so the fixture that does comes from the engine.
-    #[test]
-    fn summary_renders_traversal_only_when_stated() {
-        let mut config = starter_config();
-        config.edges = crate::engine::config::starter_hierarchy_edges();
-
-        let summary = plain_summary(&config);
-
-        assert!(
-            summary.contains("implements-traversal: * -> * via implements (traversal: chain)"),
-            "traversal row: {summary}"
-        );
-        assert!(
-            !plain_summary(&starter_config()).contains("traversal:"),
-            "rows stating no traversal render none"
         );
     }
 

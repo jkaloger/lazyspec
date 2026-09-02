@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn end_to_end_parse_build_render() {
         let config = Config {
-            edges: crate::engine::config::starter_hierarchy_edges(),
+            edges: crate::engine::config::starter_edges(),
             ..Config::default()
         };
         let (_tmp, store) = store_from_with_config(

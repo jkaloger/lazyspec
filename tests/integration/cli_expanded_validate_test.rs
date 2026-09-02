@@ -1,6 +1,6 @@
 use crate::common::TestFixture;
 use lazyspec::engine::config::{
-    starter_hierarchy_edges, Config, EdgeDef, RelSelector, Severity, Traversal, TypeSelector,
+    starter_edges, Config, EdgeDef, RelSelector, Severity, Traversal, TypeSelector,
 };
 use lazyspec::engine::validation::ValidationIssue;
 
@@ -11,7 +11,7 @@ use lazyspec::engine::validation::ValidationIssue;
 /// traversal marker names a relationship and no types at all (ITERATION-380).
 fn config_with_hierarchy_edges() -> Config {
     Config {
-        edges: starter_hierarchy_edges(),
+        edges: starter_edges(),
         ..Config::default()
     }
 }

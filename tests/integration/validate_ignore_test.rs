@@ -1,5 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{starter_hierarchy_edges, Config};
+use lazyspec::engine::config::{starter_edges, Config};
 use lazyspec::engine::validation::ValidationIssue;
 
 /// The starter config with the chain stated in `[[edges]]`, which is where the
@@ -7,7 +7,7 @@ use lazyspec::engine::validation::ValidationIssue;
 /// `UpwardOrphanedAcceptance` are read from (ITERATION-380).
 fn config_with_hierarchy_edges() -> Config {
     Config {
-        edges: starter_hierarchy_edges(),
+        edges: starter_edges(),
         ..Config::default()
     }
 }
