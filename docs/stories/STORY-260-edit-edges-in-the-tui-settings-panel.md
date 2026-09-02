@@ -1,7 +1,7 @@
 ---
 title: Edit edges in the TUI settings panel
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-29
 tags: []

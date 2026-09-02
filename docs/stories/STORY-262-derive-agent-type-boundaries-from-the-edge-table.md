@@ -1,7 +1,7 @@
 ---
 title: Derive agent type boundaries from the edge table
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-08-29
 tags: []
