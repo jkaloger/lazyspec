@@ -506,7 +506,7 @@ The rewritten text is parsed strictly before it replaces the file. If a row the 
 | `gates_dropped`       | Names of the rules whose `require_parent_status` gate was dropped                                                                                                                                           |
 | `written`             | `true` when the file was replaced; `false` under `--dry-run` and on a config that needed no repair                                                                                                           |
 
-Every section the migration does not understand (`[github]`, your own tables, their comments and ordering) is preserved, and the run is idempotent: on an up-to-date config it makes no change and reports nothing to add and nothing to migrate. The flag is config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
+A config gaining its first `[[edges]]` block gets it directly after the `[[relationships]]` its rows name, not at the end of the file. Every section the migration does not understand (`[github]`, your own tables, their comments and ordering) is preserved, and the run is idempotent: on an up-to-date config it makes no change and reports nothing to add and nothing to migrate. The flag is config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
 
 ### Inspecting and editing the config
 

@@ -1641,6 +1641,11 @@ impl Config {
                 );
             }
         }
+        // Nothing above refuses two rows sharing a `name`, even though ADR-031
+        // keeps `name` required so an error can identify a row by it -- and
+        // `config_write`'s reconciliation of `[[edges]]` addresses rows by name,
+        // so a duplicate is a config this loader accepts and that writer cannot
+        // address. The check belongs here, beside the other per-row refusals.
         reject_requiredness_ties(&edges)?;
         reject_traversal_disagreements(&edges)?;
 

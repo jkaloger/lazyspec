@@ -6695,6 +6695,16 @@ mod tests {
     /// `EdgeDef` gains a key -- it silently addresses the neighbour.
     fn edge_field_app(config: Config, label: &str) -> App {
         let mut app = settings_app(config, "Edges", 0);
+        focus_edge_field(&mut app, label);
+        app
+    }
+
+    /// Drill into edge row 0 and focus its labelled field, on an app built any
+    /// way (`settings_app` for buffer-only tests, `save_app` when the save has
+    /// to reach a real file).
+    fn focus_edge_field(app: &mut App, label: &str) {
+        app.settings_category = settings_category_index("Edges");
+        app.settings_entry = 0;
         app.settings_drill = Some(0);
         let fields = crate::tui::views::panels::settings_fields(
             app.settings_category,
@@ -6706,7 +6716,6 @@ mod tests {
             .iter()
             .position(|f| f.label == label)
             .unwrap_or_else(|| panic!("no edge field labelled {label}: {fields:?}"));
-        app
     }
 
     fn edge_path(key: EdgeKey) -> FieldPath {
@@ -7033,6 +7042,99 @@ inverse = "implemented-by"
         assert!(!app.settings_dirty, "dirty clears on success");
         assert_eq!(app.settings_footer_error, None, "footer clears on success");
         assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    /// A save fixture whose DAG is declared: a comment above the block, an
+    /// inline comment on a key inside it, and a section after it.
+    const EDGES_SAVE_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# every story hangs off an RFC
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"  # the only relationship that realizes it
+required = "warning"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // STORY-260 AC5 through the save protocol: an edge edit reaches disk on the
+    // same terms as any other field, and a footer error left by an earlier
+    // failed save clears with it.
+    #[test]
+    fn saving_a_drilled_edge_edit_writes_it_and_asks_for_a_reload() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        focus_edge_field(&mut app, "to");
+        app.settings_start_edit();
+        app.settings_edit_input = "rfc, story".to_string();
+        app.settings_confirm_edit();
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+        app.settings_footer_error = Some("an earlier save failed".to_string());
+
+        app.settings_save(tmp.path(), &Config::parse(EDGES_SAVE_SRC).unwrap());
+
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            Config::parse(&out).expect("the saved file loads").edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(
+            changed_config_lines(EDGES_SAVE_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = ["rfc", "story"]"#)],
+            "got: {out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    // Edges joining the writer's set is the moment a table that used to be left
+    // alone starts being rewritten on every save, so a save that carries no
+    // edit has to leave the file exactly as it found it -- a reformat of an
+    // untouched block would otherwise go unnoticed.
+    #[test]
+    fn saving_a_clean_buffer_leaves_a_declared_dag_byte_identical() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+
+        app.settings_save(tmp.path(), &Config::parse(EDGES_SAVE_SRC).unwrap());
+
+        assert_eq!(app.settings_footer_error, None, "the save succeeded");
+        assert_eq!(read_config_file(&tmp), EDGES_SAVE_SRC);
+    }
+
+    /// The `(before, after)` pairs of every line a save changed, positionally.
+    /// Line-for-line, because a save that reflows an untouched block is exactly
+    /// what these tests are looking for.
+    fn changed_config_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "line count moved:\n{after}"
+        );
+        before
+            .lines()
+            .zip(after.lines())
+            .filter(|(b, a)| b != a)
+            .collect()
     }
 
     // AC9: a save that would violate a cross-field constraint shows the footer,

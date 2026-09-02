@@ -567,13 +567,26 @@ fn remove_rules(doc: &mut DocumentMut) {
     doc.remove("rules");
 }
 
+/// Reconcile the `[[edges]]` blocks to the buffer, in place. Two callers share
+/// it: `fix --config`, translating a retired `[[rules]]` declaration (ADR-032),
+/// and a settings save carrying an edited row (STORY-260).
+///
+/// Reconciliation is by `name` (see [`reconcile_array_of_tables`]), and nothing
+/// at load enforces that `name` is unique -- `Config::parse`'s edge loop checks
+/// `via`'s presence, unknown types and unknown relationships, and never checks
+/// for duplicates, so two rows sharing a name are a config the loader accepts
+/// and this writer cannot address. Filling that hole is a load-time check in
+/// that loop, not a workaround here; until it lands, anything seeding a row has
+/// to pick a name no other row holds.
 fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
-    if !doc.contains_key("edges") {
+    let declared = doc.contains_key("edges");
+    if !declared {
         if buffer.edges.is_empty() {
             return;
         }
         doc.insert("edges", Item::ArrayOfTables(ArrayOfTables::new()));
     }
+    let vocabulary_position = (!declared).then(|| relationships_position(doc)).flatten();
     let Some(edges) = doc.get_mut("edges").and_then(Item::as_array_of_tables_mut) else {
         return;
     };
@@ -583,6 +596,24 @@ fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
         |def| def.name.as_str(),
         update_edge_table,
     );
+    // A key the source never declared is appended to the document's key order,
+    // which renders a first `[[edges]]` block after every unrelated section --
+    // last in the file, however far that is from the vocabulary the rows name.
+    // Giving the fresh blocks the last `[[relationships]]` position puts them
+    // directly behind it instead, where a human writing them would.
+    if let Some(position) = vocabulary_position {
+        for table in edges.iter_mut() {
+            table.set_position(position);
+        }
+    }
+}
+
+fn relationships_position(doc: &DocumentMut) -> Option<usize> {
+    doc.get("relationships")
+        .and_then(Item::as_array_of_tables)?
+        .iter()
+        .filter_map(Table::position)
+        .max()
 }
 
 fn update_edge_table(entry: &mut Table, def: &EdgeDef) {
@@ -1895,6 +1926,167 @@ required = "warning"
         let out = write_config_in_place(EDGES_SRC, &buffer).unwrap();
 
         assert_eq!(out, EDGES_SRC);
+    }
+
+    /// A DAG a human wrote: a comment above an edge block, an inline comment on
+    /// a key inside one, a recognised section after the blocks and a top-level
+    /// section the loader knows nothing about.
+    const COMMENTED_EDGES_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# every story hangs off an RFC
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"  # the only relationship that realizes it
+required = "warning"
+
+# and the walk back down
+[[edges]]
+name = "rfc-children"
+from = "rfc"
+to = "story"
+via = "implements"
+traversal = "chain"
+
+[github]
+repo = "owner/repo"
+
+[house-style]
+tone = "terse"
+"#;
+
+    // STORY-260 AC5. ADR-032 §Consequences accepts that a *translated* rule
+    // loses its comments; an *edited* edge is a different case, because
+    // `reconcile_array_of_tables` updates the table in place -- so a comment on
+    // a key the edit never touches survives, and the accepted loss on the
+    // migration path is no licence for the editor. Asserted on the text: a
+    // reparse cannot tell you a comment was dropped.
+    #[test]
+    fn editing_an_edge_target_leaves_every_other_byte_alone() {
+        let buffer = {
+            let mut c = Config::parse(COMMENTED_EDGES_SRC).unwrap();
+            c.edges[0].to = TypeSelector::Types(vec!["story".to_string()]);
+            c
+        };
+
+        let out = write_config_in_place(COMMENTED_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            changed_lines(COMMENTED_EDGES_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = "story""#)],
+            "got: {out}"
+        );
+        assert_eq!(
+            COMMENTED_EDGES_SRC.lines().count(),
+            out.lines().count(),
+            "got: {out}"
+        );
+        Config::parse(&out).expect("the rendered config strict-loads");
+    }
+
+    /// A config whose DAG has yet to be declared, ending in a section that has
+    /// nothing to do with it.
+    const NO_EDGES_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+# the relation vocabulary
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // The rows name the relationship vocabulary, so a first `[[edges]]` block
+    // belongs with it rather than after whatever section happens to end the
+    // file. Everything the source already said is left where it stood.
+    #[test]
+    fn an_inserted_edge_block_lands_with_the_vocabulary_it_names() {
+        let buffer = {
+            let mut c = Config::parse(NO_EDGES_SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(NO_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            out,
+            r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+# the relation vocabulary
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "*"
+required = "warning"
+
+[[edges]]
+name = "related-to-traversal"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[github]
+repo = "owner/repo"
+"#
+        );
+        assert_eq!(
+            Config::parse(&out)
+                .expect("the rendered config strict-loads")
+                .edges,
+            wildcard_and_concrete_edges()
+        );
     }
 
     #[test]
