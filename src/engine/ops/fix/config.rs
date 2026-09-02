@@ -101,7 +101,7 @@ fn translate_to_edges(config: &Config) -> anyhow::Result<Vec<EdgeDef>> {
     let mut edges: Vec<EdgeDef> = config
         .rules
         .iter()
-        .flat_map(|rule| edges_from_rule(rule, &chain))
+        .filter_map(|rule| edges_from_rule(rule, &chain))
         .collect();
 
     for relationship in &config.relationships {
@@ -143,62 +143,60 @@ fn chain_relationships(config: &Config) -> Vec<&str> {
         .collect()
 }
 
-/// One `[[rules]]` block as edge rows.
+/// One `[[rules]]` block as at most one edge row, keeping the rule's own name
+/// so the findings it raises go on naming what they named before.
 ///
-/// A `parent-child` rule becomes one row per chain-marked relationship, each
-/// naming that relationship in `via` (ADR-032 §Decision, as amended). Naming it
-/// is the preservation rather than a tightening: the rule is satisfied today
-/// only through a chain-marked relationship, so `via = "*"` would accept links
-/// the rule rejects. It is also the only shape that loads — a wildcard `via`
+/// A `parent-child` rule becomes one row whose `via` names every chain-marked
+/// relationship (ADR-032 §Decision, as twice amended). Naming them is the
+/// preservation rather than a tightening: the rule is satisfied today only
+/// through a chain-marked relationship, so `via = "*"` would accept links the
+/// rule rejects. It is also the only shape that loads — a wildcard `via`
 /// carrying `traversal = "chain"` overlaps the row translated from a `related`
 /// marker on all three positions, and that pair is refused at load.
 ///
+/// One row, not one per relationship: the set in `via` is a disjunction, which
+/// is the quantifier the old checker used. A row apiece would be that many
+/// independent demands of equal specificity and disjoint `via`, so none would
+/// displace the others and a document would need every one of the links.
+///
+/// A rule the config gives no chain relationship to is satisfiable by nothing
+/// today, so it becomes no row at all.
+///
 /// A `relation-existence` rule demands a relationship without naming one, so
 /// its wildcards are the shape RFC-067 gives it rather than an imprecision.
-fn edges_from_rule(rule: &ValidationRule, chain: &[&str]) -> Vec<EdgeDef> {
+fn edges_from_rule(rule: &ValidationRule, chain: &[&str]) -> Option<EdgeDef> {
     match rule {
         ValidationRule::ParentChild {
             name,
             child,
             parent,
             severity,
-        } => chain
-            .iter()
-            .map(|via| EdgeDef {
-                name: parent_child_edge_name(name, chain, via),
+        } => {
+            if chain.is_empty() {
+                return None;
+            }
+            Some(EdgeDef {
+                name: name.clone(),
                 from: TypeSelector::Types(vec![child.clone()]),
                 to: TypeSelector::Types(vec![parent.clone()]),
-                via: RelSelector::Named(vec![(*via).to_string()]),
+                via: RelSelector::Named(chain.iter().map(|via| (*via).to_string()).collect()),
                 required: Some(severity.clone()),
                 traversal: Some(Traversal::Chain),
             })
-            .collect(),
+        }
         ValidationRule::RelationExistence {
             name,
             doc_type,
             severity,
             ..
-        } => vec![EdgeDef {
+        } => Some(EdgeDef {
             name: name.clone(),
             from: TypeSelector::Types(vec![doc_type.clone()]),
             to: TypeSelector::Any,
             via: RelSelector::Any,
             required: Some(severity.clone()),
             traversal: None,
-        }],
-    }
-}
-
-/// The translation still emits one row per chain relationship, so a rule
-/// translated against two of them becomes two rows, and two rows may not share a
-/// name. A rule that becomes exactly one row keeps its own name, so the ordinary
-/// config's findings go on naming what they named before. (`via` is set-valued
-/// as of ADR-032's second amendment; folding the fan-out into one row that names
-/// the whole set is ITERATION-404's job, and retires this name suffix with it.)
-fn parent_child_edge_name(rule: &str, chain: &[&str], via: &str) -> String {
-    match chain {
-        [_] => rule.to_string(),
-        _ => format!("{rule}-via-{via}"),
+        }),
     }
 }
 
@@ -478,10 +476,12 @@ mod tests {
         assert_eq!(edges[0].required, Some(Severity::Warning));
     }
 
-    /// `via` holds one name, so a second chain relationship is a second row —
-    /// and the two must not collide on `name`.
+    /// ADR-032's second amendment: the old checker is satisfied by ANY chain
+    /// relationship, so the set in `via` carries that disjunction on one row. A
+    /// row apiece would be two independent demands — a conjunction — and every
+    /// story would be warned for the relationship it did not use.
     #[test]
-    fn a_parent_child_rule_becomes_one_row_per_chain_relationship() {
+    fn a_parent_child_rule_becomes_one_row_naming_every_chain_relationship() {
         let config = config_with(
             vec![parent_child_rule(
                 "story-parent",
@@ -504,16 +504,10 @@ mod tests {
             .collect();
         assert_eq!(
             rows,
-            vec![
-                (
-                    "story-parent-via-implements",
-                    &RelSelector::Named(vec!["implements".to_string()])
-                ),
-                (
-                    "story-parent-via-targets",
-                    &RelSelector::Named(vec!["targets".to_string()])
-                ),
-            ]
+            vec![(
+                "story-parent",
+                &RelSelector::Named(vec!["implements".to_string(), "targets".to_string()])
+            )]
         );
     }
 

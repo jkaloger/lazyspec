@@ -1,7 +1,7 @@
 ---
 title: Translate a parent-child rule to one edge naming every chain relationship
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-02
 tags: []

@@ -420,16 +420,8 @@ severity = "warning"
 // today, and must be no finding after: closing it would be the migration
 // deciding what the author meant.
 //
-// IGNORED, and deliberately not reshaped to agree with the code. It fails, and
-// the failure is the finding ITERATION-379 was written to surface: a rule is
-// satisfied today by ANY chain relationship, a disjunction, while ADR-032's
-// one-row-per-chain-relationship translation demands EVERY one of them. Both
-// documents below gain a finding they did not have — the `targets` one from the
-// `implements` row and the conforming `implements` one from the `targets` row.
-// The resolutions ADR-032 leaves available are decisions, not edits: emit one
-// row and pick a relationship, or admit that a config marking two relationships
-// chain is not migrated behaviour-preservingly.
-#[ignore = "STORY-258 AC5 divergence: two chain relationships translate to a conjunction of rows"]
+// The disjunction is what the set in `via` carries: one row naming both chain
+// relationships is satisfied by either, where a row apiece demanded both.
 #[test]
 fn a_rule_satisfied_through_targets_rather_than_implements_is_no_finding_on_either_side() {
     let fixture = ConfigFixture::new(TWO_CHAIN_RELATIONSHIPS_CONFIG);
