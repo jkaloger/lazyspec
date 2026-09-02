@@ -261,6 +261,62 @@ mod tests {
         }
     }
 
+    /// `parent_type` is containment. The authoring skills read it in preflight,
+    /// and the one sentence they read it with is the only thing any embedded
+    /// skill says about it -- nothing turns it into a link, a create or a
+    /// constraint.
+    #[test]
+    fn embedded_skills_describe_parent_type_only_as_containment() {
+        const CONTAINMENT: &str = "`parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.";
+        const BOUNDARY_DENIAL: &str = "a type's `parent_type` declares none";
+        const READERS: [&str; 3] = [
+            "co-write/SKILL.md",
+            "generate/SKILL.md",
+            "scaffold/SKILL.md",
+        ];
+
+        let mut readers = Vec::new();
+        for (path, contents) in embedded_skill_set() {
+            let key = path.to_string_lossy().into_owned();
+            let mentions = contents.matches("`parent_type`").count();
+            if mentions == 0 {
+                continue;
+            }
+            let described =
+                contents.matches(CONTAINMENT).count() + contents.matches(BOUNDARY_DENIAL).count();
+            assert_eq!(
+                described, mentions,
+                "{key} says something about `parent_type` besides containment and the boundary denial"
+            );
+            if contents.contains(CONTAINMENT) {
+                readers.push(key);
+            }
+        }
+        readers.sort();
+        assert_eq!(
+            readers, READERS,
+            "the set of skills describing `parent_type` changed; each must carry the containment sentence"
+        );
+    }
+
+    #[test]
+    fn shipped_scaffold_takes_its_link_relation_from_an_edge_row() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        run_install(root, None).unwrap();
+
+        let scaffold = fs::read_to_string(root.join(".claude/skills/scaffold/SKILL.md")).unwrap();
+        assert!(
+            !scaffold.contains("link <new-id> implements"),
+            "scaffold bakes `implements` into its link call"
+        );
+        assert!(
+            scaffold.contains("`via`"),
+            "scaffold must name the edge-row key its relation comes from"
+        );
+    }
+
     #[test]
     fn runtime_claude_skips_agents_md() {
         let dir = tempdir().unwrap();

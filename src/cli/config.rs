@@ -40,7 +40,9 @@ pub enum ConfigCommand {
         /// Icon shown in the TUI
         #[arg(long)]
         icon: Option<String>,
-        /// Parent type name, gating creation and validation
+        /// Containing type name: this type's documents live in that type's
+        /// directory and share its store backend. It must be a singleton, and
+        /// it constrains no link
         #[arg(long)]
         parent_type: Option<String>,
         /// Mark the type as a singleton (a single document, not numbered series)

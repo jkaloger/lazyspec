@@ -764,8 +764,12 @@ pub struct TypeDef {
     /// convention), so `create` and numbering treat it as a singleton.
     #[serde(default)]
     pub singleton: bool,
-    /// The name of another declared type that documents of this type belong
-    /// under, if any. A child must share its parent's store backend.
+    /// The name of another declared type that contains this one, if any. This
+    /// type's documents live under that type's `dir` and share its store
+    /// backend, and that type must be a `singleton`; `validate` reports
+    /// `ParentTypeNotSingleton` and `ParentTypeViolation` otherwise. Containment
+    /// only: it constrains no relationship, since linking is governed by
+    /// `[[edges]]` alone.
     #[serde(default)]
     pub parent_type: Option<String>,
     /// The ordered list of agent action skill names offered for this type. An

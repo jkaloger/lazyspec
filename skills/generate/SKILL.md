@@ -43,7 +43,7 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 ## Preflight
 
-1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance, `parent_type`, and relation names.
+1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance, and relation names. `parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.
 2. `lazyspec context --json` -- assemble source material: parent docs, related docs, and referenced code. Expand `@ref` directives and pull referenced code with `lazyspec show -e <id>`.
 
 ## Workflow

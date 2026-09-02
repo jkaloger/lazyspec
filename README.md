@@ -540,7 +540,7 @@ lazyspec config schema                      # print a JSON Schema for .lazyspec.
 
 # Append a new document type (name, plural, dir, prefix are positional)
 lazyspec config add-type spike spikes docs/spikes SPIKE \
-  --icon "◆" --parent-type rfc --intent "throwaway exploration" \
+  --icon "◆" --intent "throwaway exploration" \
   --authorship generated
 
 # With no positionals on a TTY, add-type prompts interactively.
@@ -633,6 +633,24 @@ plural = "specs"
 dir = "docs/specs"
 prefix = "SPEC"
 icon = "◆"
+```
+
+A type may name a `parent_type`. The named type contains it: the child type's documents live under the parent type's `dir` and share its `store` backend. The named type must be a singleton, since the containment is into the directory of one document. `validate` reports `ParentTypeNotSingleton` when it is not, and reports `ParentTypeViolation` for each document of the child type found outside the parent type's `dir`. `parent_type` constrains no relationship. Which types may link to which, and with which relationship, is declared in `[[edges]]`.
+
+```toml
+[[types]]
+name = "convention"
+plural = "convention"
+dir = "docs/convention"
+prefix = "CONVENTION"
+singleton = true
+
+[[types]]
+name = "dictum"
+plural = "dicta"
+dir = "docs/convention"
+prefix = "DICTUM"
+parent_type = "convention"
 ```
 
 ### Lifecycle

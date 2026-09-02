@@ -33,14 +33,14 @@ Scaffold is the floor of that order, so it is permitted on **every** `authorship
 
 ## Preflight
 
-1. `lazyspec config --json` -- read the target `<type>` entry: its `intent` (what the doc is for), its `authorship` ceiling (for confirmation only -- scaffold proceeds regardless), its `parent_type`, and the section guidance available from its template.
+1. `lazyspec config --json` -- read the target `<type>` entry: its `intent` (what the doc is for), its `authorship` ceiling (for confirmation only -- scaffold proceeds regardless), and the section guidance available from its template. `parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.
 2. `lazyspec status --json` -- see what already exists and locate the parent document to link to.
 3. `lazyspec context --json` -- understand the chain around the user's current position so the new document lands in the right place.
 
 ## Workflow
 
 1. **Create the shell:** `lazyspec create <type> "<title>" --author <name>`, where `<type>` is the parameter read from config (e.g. in the shipped default config a type named `rfc`, but never assume that name -- read it).
-2. **Link to the parent:** if config gives the type a `parent_type` and a parent exists, `lazyspec link <new-id> implements <parent-id>` -- using the configured relation name from `relationships` (the default config uses `implements`; read it, don't bake it).
+2. **Link by edge:** find the `edges` rows whose `from` admits this type. A row reads child-to-parent, so the new document sits on the `from` side: the row's `via` is the relation to pass to `lazyspec link`, and its `to` names the types a target document may be. `lazyspec link <new-id> <via> <target-id>`, with `<via>` read off the row -- never bake a relation name into the call. Take the type vocabulary from `types`; a `"*"` filters rather than lists, so never expand one into a type name. When no row admits this type, or no document of a type its `to` admits exists, link nothing and say so.
 3. **Surface intent + guidance:** show the human the type's `intent` from config and the per-section `<!-- guidance -->` comments from the scaffolded body. Tell the human these are the sections to fill in.
 4. **Hand back:** stop. The human writes the body. Scaffold does not draft prose.
 
@@ -87,7 +87,7 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 ## Preflight
 
-1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance from its template, its `parent_type`, and the relation names in `relationships`.
+1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance from its template, and the relation names in `relationships`. `parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.
 2. `lazyspec status --json` -- locate the parent document to link to.
 3. `lazyspec context --json` -- understand the chain around the user's position.
 
@@ -149,7 +149,7 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 ## Preflight
 
-1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance, `parent_type`, and relation names.
+1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance, and relation names. `parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.
 2. `lazyspec context --json` -- assemble source material: parent docs, related docs, and referenced code. Expand `@ref` directives and pull referenced code with `lazyspec show -e <id>`.
 
 ## Workflow
