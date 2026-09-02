@@ -1,7 +1,7 @@
 ---
 title: Report the unsatisfied edge, not a gate that no longer exists
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-01
 tags: []

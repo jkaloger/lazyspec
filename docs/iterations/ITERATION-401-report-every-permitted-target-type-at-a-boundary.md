@@ -1,7 +1,7 @@
 ---
 title: Report every permitted target type at a boundary
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
