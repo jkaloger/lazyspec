@@ -1,7 +1,7 @@
 ---
 title: Refuse an invalid edge mutation before it reaches disk
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-01
 tags: []
