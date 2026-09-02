@@ -3499,7 +3499,17 @@ impl App {
 pub(crate) mod parity_seed {
     use super::*;
     use crate::tui::views::keybinds::KeyContext;
+    use std::sync::OnceLock;
     use tempfile::TempDir;
+
+    /// Every `Picker` constructor probes the terminal and, under tmux, spawns
+    /// `tmux set -p allow-passthrough on`. Pay that once per test binary.
+    pub(crate) fn test_picker() -> ratatui_image::picker::Picker {
+        static PICKER: OnceLock<ratatui_image::picker::Picker> = OnceLock::new();
+        PICKER
+            .get_or_init(ratatui_image::picker::Picker::halfblocks)
+            .clone()
+    }
 
     /// Markdown for one seeded doc, with an optional `related:` block.
     fn doc_md(id: &str, doc_type: &str, related: &str) -> String {
@@ -3604,14 +3614,14 @@ pub(crate) mod parity_seed {
                 crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
-            picker: ratatui_image::picker::Picker::halfblocks(),
+            picker: parity_seed::test_picker(),
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             git_branch: None,
-            git_status_cache: GitStatusCache::new(tmp.path()),
+            git_status_cache: GitStatusCache::unqueried(tmp.path()),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
@@ -4086,14 +4096,14 @@ mod tests {
                 crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
-            picker: ratatui_image::picker::Picker::halfblocks(),
+            picker: parity_seed::test_picker(),
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             git_branch: None,
-            git_status_cache: GitStatusCache::new(Path::new(".")),
+            git_status_cache: GitStatusCache::unqueried(Path::new(".")),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,

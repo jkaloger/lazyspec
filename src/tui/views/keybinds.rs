@@ -1003,21 +1003,24 @@ mod tests {
                 expected.insert(Token::AnyKey);
             }
 
-            // The CONTROL fold consults whether a key's PLAIN twin is handled, so
-            // precompute the plain-handled set once per context.
-            let plain_handled_codes: std::collections::BTreeSet<String> = candidates
+            // Each `handled` call seeds a fresh App, so probe every chord exactly
+            // once and answer both the CONTROL fold's plain-twin lookup and the
+            // actual-token pass from the same map.
+            let handled_chords: std::collections::BTreeMap<(String, bool), bool> = candidates
                 .iter()
-                .filter(|&&(_, ctrl)| !ctrl)
-                .filter(|&&(code, _)| handled(ctx, code, false))
-                .map(|&(code, _)| format!("{:?}", code))
+                .map(|&(code, ctrl)| ((format!("{:?}", code), ctrl), handled(ctx, code, ctrl)))
                 .collect();
-            let plain_handled =
-                |code: KeyCode| plain_handled_codes.contains(&format!("{:?}", code));
+            let plain_handled = |code: KeyCode| {
+                handled_chords
+                    .get(&(format!("{:?}", code), false))
+                    .copied()
+                    .unwrap_or(false)
+            };
 
             // Actual = tokens of every candidate the handler acts on.
             let mut actual: std::collections::BTreeSet<Token> = std::collections::BTreeSet::new();
             for &(code, ctrl) in &candidates {
-                if handled(ctx, code, ctrl) {
+                if handled_chords[&(format!("{:?}", code), ctrl)] {
                     actual.insert(token_for(ctx, code, ctrl, &explicit, &plain_handled));
                 }
             }

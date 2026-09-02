@@ -90,6 +90,17 @@ impl GitStatusCache {
         }
     }
 
+    /// A cache that has never asked git anything: every lookup is `None` until
+    /// `invalidate` + `refresh`. Skips the `git status` subprocess, which
+    /// dominates any test that builds many `App`s.
+    pub fn unqueried(repo_root: &Path) -> Self {
+        Self {
+            statuses: None,
+            stale: false,
+            repo_root: repo_root.to_path_buf(),
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.stale = true;
     }
