@@ -1,5 +1,10 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use lazyspec::engine::config::{Config, Severity, Traversal};
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::store::Store;
+use lazyspec::engine::validation::ValidationIssue;
 use tempfile::TempDir;
 
 /// A pre-migration `.lazyspec.toml`: a valid `[[types]]`-only config with an
@@ -71,6 +76,111 @@ impl ConfigFixture {
     fn config_text(&self) -> String {
         std::fs::read_to_string(self.root().join(".lazyspec.toml")).unwrap()
     }
+
+    /// Write a `draft` document carrying the given relations.
+    ///
+    /// Draft on purpose, and every fixture document alike. The
+    /// status-consistency checkers fire on `accepted` documents and read
+    /// `store.chain_relationships`, which the migration empties along with the
+    /// `traversal` keys it deletes — a separate question from whether a rule
+    /// survives translation, and one that would land in the same finding set.
+    fn write_doc(&self, path: &str, doc_type: &str, related: &[(&str, &str)]) {
+        let links: String = related
+            .iter()
+            .map(|(rel, target)| format!("- {rel}: {target}\n"))
+            .collect();
+        let related_block = if links.is_empty() {
+            String::new()
+        } else {
+            format!("related:\n{links}")
+        };
+        let title = Path::new(path).file_stem().unwrap().to_str().unwrap();
+        let body = format!(
+            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: \"test\"\n\
+             date: 2026-01-01\ntags: []\n{related_block}---\nbody\n"
+        );
+        std::fs::write(self.root().join(path), body).unwrap();
+    }
+}
+
+/// What a finding is, for the purpose of comparing a repository's validation
+/// state across the migration.
+///
+/// Not the rendered message: `MissingParentLink` and `MissingRelation` become
+/// `UnsatisfiedEdge`, whose `Display` reads differently by construction. What
+/// has to survive is which document is in trouble, how loudly, and under which
+/// named rule — which is why the translation carries the rule's own `name` onto
+/// the edge it becomes. A finding of any other kind is compared whole, since
+/// the migration is not supposed to touch one at all.
+fn fingerprint(severity: &str, issue: &ValidationIssue) -> String {
+    match issue {
+        ValidationIssue::MissingParentLink {
+            path, rule_name, ..
+        }
+        | ValidationIssue::MissingRelation {
+            path, rule_name, ..
+        } => format!("{severity} {} {rule_name}", path.display()),
+        ValidationIssue::UnsatisfiedEdge {
+            path, edge_name, ..
+        } => format!("{severity} {} {edge_name}", path.display()),
+        other => format!("{severity} {other}"),
+    }
+}
+
+/// Every finding `validate` reports for the project at `root`, as fingerprints.
+fn findings(root: &Path) -> BTreeSet<String> {
+    let config = Config::load(root, &RealFileSystem).expect("the config strict-loads");
+    let store = Store::load(root, &config).expect("the store loads");
+    let result = store.validate_full(&config);
+    result
+        .errors
+        .iter()
+        .map(|issue| fingerprint("error", issue))
+        .chain(
+            result
+                .warnings
+                .iter()
+                .map(|issue| fingerprint("warning", issue)),
+        )
+        .collect()
+}
+
+/// The legacy project the migration is proved against: a document for every
+/// finding the pre-RFC-067 checkers produce, and one for every near miss that
+/// must stay silent.
+fn legacy_project() -> ConfigFixture {
+    let fixture = ConfigFixture::new(LEGACY_DAG_CONFIG);
+    fixture.write_doc("docs/rfcs/RFC-001-the-parent.md", "rfc", &[]);
+    fixture.write_doc(
+        "docs/iterations/ITERATION-001-a-parent-of-the-wrong-type.md",
+        "iteration",
+        &[],
+    );
+    // stories-need-rfcs, three ways to be unsatisfied and one to be satisfied.
+    fixture.write_doc("docs/stories/STORY-001-no-link-at-all.md", "story", &[]);
+    fixture.write_doc(
+        "docs/stories/STORY-002-implements-the-rfc.md",
+        "story",
+        &[("implements", "RFC-001")],
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-003-implements-an-iteration.md",
+        "story",
+        &[("implements", "ITERATION-001")],
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-004-blocks-the-rfc.md",
+        "story",
+        &[("blocks", "RFC-001")],
+    );
+    // adrs-need-relations, unsatisfied and satisfied.
+    fixture.write_doc("docs/adrs/ADR-001-no-relations.md", "adr", &[]);
+    fixture.write_doc(
+        "docs/adrs/ADR-002-related-to-the-rfc.md",
+        "adr",
+        &[("related-to", "RFC-001")],
+    );
+    fixture
 }
 
 /// A config on the pre-RFC-067 shape: `[[rules]]` blocks and `traversal`
@@ -198,6 +308,153 @@ severity = "error"
 [bugtracker]
 url = "https://example.invalid"
 "#;
+
+// AC5 — the fixture the preservation claim rests on. Set equality between two
+// empty sets proves nothing, and equality between two wrong sets proves less,
+// so the findings are named before they are compared.
+#[test]
+fn the_legacy_project_finds_each_unsatisfied_rule_and_nothing_for_the_near_misses() {
+    let fixture = legacy_project();
+
+    let before = findings(fixture.root());
+
+    assert_eq!(
+        before,
+        BTreeSet::from([
+            "error docs/adrs/ADR-001-no-relations.md adrs-need-relations".to_string(),
+            "warning docs/stories/STORY-001-no-link-at-all.md stories-need-rfcs".to_string(),
+            "warning docs/stories/STORY-003-implements-an-iteration.md stories-need-rfcs"
+                .to_string(),
+            "warning docs/stories/STORY-004-blocks-the-rfc.md stories-need-rfcs".to_string(),
+        ])
+    );
+}
+
+// AC5 — the whole justification for calling the migration safe: one project,
+// validated before and after `fix --config` rewrites its rules and traversal
+// keys into edges, produces the same finding set.
+#[test]
+fn the_finding_set_survives_the_migration() {
+    let fixture = legacy_project();
+    let before = findings(fixture.root());
+    assert!(
+        !before.is_empty(),
+        "a fixture that finds nothing before proves nothing after"
+    );
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    assert_eq!(findings(fixture.root()), before);
+}
+
+// AC5 — the case ADR-032's original wildcard would have widened: a story whose
+// only link to an RFC is `blocks`, which this config does not mark chain. The
+// old checker is satisfied by a chain relationship and by nothing else, so the
+// document is a finding; naming the chain relationship in `via` is what keeps
+// it one.
+#[test]
+fn a_non_chain_link_to_the_right_parent_type_is_a_finding_on_both_sides() {
+    let fixture = legacy_project();
+    let non_chain = "warning docs/stories/STORY-004-blocks-the-rfc.md stories-need-rfcs";
+    assert!(findings(fixture.root()).contains(non_chain));
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    assert!(
+        findings(fixture.root()).contains(non_chain),
+        "a relationship the config never marked chain must not start satisfying the rule"
+    );
+}
+
+/// A config marking two relationships chain, which is what this project's own
+/// config does. `stories-need-rfcs` names neither relationship, so today it is
+/// satisfied by `targets` as readily as by `implements` — the hole RFC-067
+/// §Problem.1 opens with and ADR-032 leaves open, since closing it is a human
+/// edit to `via` and not something a mechanical translation may decide.
+const TWO_CHAIN_RELATIONSHIPS_CONFIG: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+lifecycle = { states = ["draft", "accepted"], edges = [{ from = "draft", to = "accepted" }] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "targets"
+inverse = "targeted-by"
+traversal = "chain"
+
+[[relationships]]
+name = "supersedes"
+inverse = "superseded-by"
+
+[[relationships]]
+name = "blocks"
+inverse = "blocked-by"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning"
+"#;
+
+// AC5 — the hole the migration is required to leave open. A story satisfying
+// `stories-need-rfcs` through `targets` rather than `implements` is no finding
+// today, and must be no finding after: closing it would be the migration
+// deciding what the author meant.
+//
+// IGNORED, and deliberately not reshaped to agree with the code. It fails, and
+// the failure is the finding ITERATION-379 was written to surface: a rule is
+// satisfied today by ANY chain relationship, a disjunction, while ADR-032's
+// one-row-per-chain-relationship translation demands EVERY one of them. Both
+// documents below gain a finding they did not have — the `targets` one from the
+// `implements` row and the conforming `implements` one from the `targets` row.
+// The resolutions ADR-032 leaves available are decisions, not edits: emit one
+// row and pick a relationship, or admit that a config marking two relationships
+// chain is not migrated behaviour-preservingly.
+#[ignore = "STORY-258 AC5 divergence: two chain relationships translate to a conjunction of rows"]
+#[test]
+fn a_rule_satisfied_through_targets_rather_than_implements_is_no_finding_on_either_side() {
+    let fixture = ConfigFixture::new(TWO_CHAIN_RELATIONSHIPS_CONFIG);
+    fixture.write_doc("docs/rfcs/RFC-001-the-parent.md", "rfc", &[]);
+    fixture.write_doc(
+        "docs/stories/STORY-001-targets-the-rfc.md",
+        "story",
+        &[("targets", "RFC-001")],
+    );
+    fixture.write_doc(
+        "docs/stories/STORY-002-implements-the-rfc.md",
+        "story",
+        &[("implements", "RFC-001")],
+    );
+    assert_eq!(findings(fixture.root()), BTreeSet::new());
+
+    lazyspec::cli::fix::run_config(fixture.root(), false, false, &RealFileSystem);
+
+    assert_eq!(
+        findings(fixture.root()),
+        BTreeSet::new(),
+        "migration must not close the targets-satisfies-implements hole, nor open a new one \
+         against the story that links the way the rule's author meant"
+    );
+}
 
 // AC7 — the plan names each comment the rewrite destroys and the block it
 // belongs to, before anything is written.
