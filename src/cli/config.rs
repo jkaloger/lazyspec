@@ -1,11 +1,11 @@
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend,
-    TypeDef,
+    AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
+    RelSelector, Severity, StoreBackend, Traversal, TypeDef, TypeSelector,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use std::path::Path;
 
@@ -75,16 +75,43 @@ pub enum ConfigCommand {
         #[arg(long = "attribute")]
         attributes: Vec<String>,
     },
-    /// Replace a type's lifecycle states and edges
+    /// Replace a type's lifecycle states and status transitions
     SetLifecycle {
         /// Type name to set the lifecycle on
         name: String,
         /// A lifecycle state (repeat for each state)
         #[arg(long = "state")]
         states: Vec<String>,
-        /// A permitted transition as FROM:TO (`*` matches any source; repeat per edge)
+        /// A permitted status transition as FROM:TO (`*` matches any source;
+        /// repeat per transition). Not a DAG edge -- for those see `config add-edge`
         #[arg(long = "edge")]
         edges: Vec<String>,
+    },
+    /// Append a row to the `[[edges]]` table: a kind of directed edge in the
+    /// document DAG, unrelated to `set-lifecycle --edge`'s status transitions
+    AddEdge {
+        /// Name for the row; errors and later edits address it by this
+        name: String,
+        /// A source type, or `*` for any type (repeat per type)
+        #[arg(long = "from", required = true)]
+        from: Vec<String>,
+        /// A permitted target type, or `*` for any type (repeat per type)
+        #[arg(long = "to", required = true)]
+        to: Vec<String>,
+        /// A relationship that realizes the edge, or `*` for any (repeat per relationship)
+        #[arg(long = "via", required = true)]
+        via: Vec<String>,
+        /// Severity of the finding when the edge is absent: error or warning
+        /// (omitted leaves the edge legal but not demanded)
+        #[arg(long)]
+        required: Option<String>,
+        /// Traversal role the edge joins: chain or related (omitted names no role)
+        #[arg(long)]
+        traversal: Option<String>,
+        /// Print the row that landed as JSON (accepted here as well as before
+        /// the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -597,6 +624,75 @@ pub fn run_set_lifecycle(
     let out = write_config_in_place(&src, &config)?;
     fs.write(&path, &out)?;
     Ok(())
+}
+
+/// Append one `[[edges]]` row from the flags as given and return it, so the
+/// caller can report what landed without re-reading the config.
+///
+/// Whether the row makes sense is the loader's question, and it is asked on the
+/// next command rather than here (STORY-261 AC5). The two things checked are the
+/// ones no later load can recover from: a name already in the table, which the
+/// writer reconciles by and would silently rewrite, and a wildcard mixed with
+/// names, which is neither selector.
+#[allow(clippy::too_many_arguments)]
+pub fn run_add_edge(
+    root: &Path,
+    fs: &dyn FileSystem,
+    name: &str,
+    from: &[String],
+    to: &[String],
+    via: &[String],
+    required: Option<&str>,
+    traversal: Option<&str>,
+) -> Result<EdgeDef> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let mut config = Config::parse(&src)?;
+
+    if config.edges.iter().any(|edge| edge.name == name) {
+        bail!("edge \"{}\" already exists", name);
+    }
+
+    let edge = EdgeDef {
+        name: name.to_string(),
+        from: TypeSelector::from_names(from.to_vec()).context("reading the `--from` flags")?,
+        to: TypeSelector::from_names(to.to_vec()).context("reading the `--to` flags")?,
+        via: RelSelector::from_names(via.to_vec()).context("reading the `--via` flags")?,
+        required: required.map(parse_severity).transpose()?,
+        traversal: traversal.map(parse_traversal).transpose()?,
+    };
+
+    config.edges.push(edge.clone());
+    let out = write_config_in_place(&src, &config)?;
+    fs.write(&path, &out)?;
+    Ok(edge)
+}
+
+/// What `config add-edge --json` answers with. Dictum 2: the result carries the
+/// row itself, serialized the way `config --json` serializes it, so a caller
+/// reads what landed rather than re-reading the config to find out.
+pub fn run_add_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-added",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
+fn parse_severity(value: &str) -> Result<Severity> {
+    match value {
+        "error" => Ok(Severity::Error),
+        "warning" => Ok(Severity::Warning),
+        other => bail!("unknown required severity \"{}\" (error or warning)", other),
+    }
+}
+
+fn parse_traversal(value: &str) -> Result<Traversal> {
+    match value {
+        "chain" => Ok(Traversal::Chain),
+        "related" => Ok(Traversal::Related),
+        other => bail!("unknown traversal \"{}\" (chain or related)", other),
+    }
 }
 
 fn parse_edge(spec: &str) -> Result<Edge> {
@@ -1298,6 +1394,184 @@ traversal = "chain"
         let err =
             run_set_lifecycle(path.parent().unwrap(), &fs, "nope", &["a".into()], &[]).unwrap_err();
         assert!(err.to_string().contains("unknown type"));
+    }
+
+    fn add_stories_implement_rfcs(root: &Path, fs: &dyn FileSystem) -> Result<EdgeDef> {
+        run_add_edge(
+            root,
+            fs,
+            "stories-implement-rfcs",
+            &["story".to_string()],
+            &["rfc".to_string(), "story".to_string()],
+            &["implements".to_string()],
+            Some("error"),
+            Some("chain"),
+        )
+    }
+
+    // STORY-261 AC1: add-edge appends an `[[edges]]` row carrying every flag,
+    // and the config it writes loads with that row in it.
+    #[test]
+    fn add_edge_writes_a_row_carrying_every_flag() {
+        let (_dir, path, fs) = fixture(SRC);
+
+        let written = add_stories_implement_rfcs(path.parent().unwrap(), &fs).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let loaded = Config::parse(&after).unwrap();
+        assert_eq!(loaded.edges, vec![written]);
+        let edge = &loaded.edges[0];
+        assert_eq!(edge.name, "stories-implement-rfcs");
+        assert_eq!(edge.from, TypeSelector::Types(vec!["story".to_string()]));
+        assert_eq!(
+            edge.to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
+        assert_eq!(edge.required, Some(Severity::Error));
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+        assert!(
+            after.contains("# filename template"),
+            "the fixture's comments must survive: {after}"
+        );
+    }
+
+    // A second row joins the table rather than replacing the first: the writer
+    // reconciles rows by `name`, so a differently named row is an append.
+    #[test]
+    fn add_edge_appends_a_second_row_beside_the_first() {
+        let (_dir, path, fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        add_stories_implement_rfcs(root, &fs).unwrap();
+
+        run_add_edge(
+            root,
+            &fs,
+            "rfcs-relate-to-stories",
+            &["rfc".to_string()],
+            &["story".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let edges = Config::parse(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .edges;
+        let names: Vec<&str> = edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["stories-implement-rfcs", "rfcs-relate-to-stories"]);
+        assert_eq!(edges[0].required, Some(Severity::Error));
+        // Absent stays absent: the second row states no requiredness at all.
+        assert_eq!(edges[1].required, None);
+        assert_eq!(edges[1].traversal, None);
+    }
+
+    // A row is addressed by its name and the writer reconciles by it, so a
+    // second row under a live name would silently rewrite the first.
+    #[test]
+    fn add_edge_rejects_a_duplicate_name_without_writing() {
+        let (_dir, path, fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        add_stories_implement_rfcs(root, &fs).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = run_add_edge(
+            root,
+            &fs,
+            "stories-implement-rfcs",
+            &["story".to_string()],
+            &["rfc".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("stories-implement-rfcs") && err.contains("already"),
+            "the refusal must name the live row: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused add-edge must leave the config alone"
+        );
+    }
+
+    // `--to '*'` is the wildcard position, which is written as a bare string:
+    // `to = ["*"]` is a wildcard inside a list, which strict load refuses.
+    #[test]
+    fn add_edge_writes_a_wildcard_target_as_a_bare_string() {
+        let (_dir, path, fs) = fixture(SRC);
+
+        run_add_edge(
+            path.parent().unwrap(),
+            &fs,
+            "rfcs-relate-to-anything",
+            &["rfc".to_string()],
+            &["*".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains(r#"to = "*""#), "got: {after}");
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Any
+        );
+    }
+
+    // Repeated flags are the one place `["story", "*"]` can be assembled, and
+    // it is neither a wildcard nor a set of names. Refused with the config
+    // untouched, rather than written for the next load to reject.
+    #[test]
+    fn add_edge_rejects_a_wildcard_mixed_with_type_names() {
+        let (_dir, path, fs) = fixture(SRC);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = run_add_edge(
+            path.parent().unwrap(),
+            &fs,
+            "mixed-targets",
+            &["rfc".to_string()],
+            &["story".to_string(), "*".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("--to") && rendered.contains('*'),
+            "the refusal must name the flag that assembled it: {rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused add-edge must leave the config alone"
+        );
+    }
+
+    // STORY-261 AC4: the result object carries the row itself, spelled exactly
+    // as `config --json` spells it -- two spellings of one row is how the
+    // command's answer and the config's answer drift.
+    #[test]
+    fn add_edge_json_carries_the_row_config_show_reports() {
+        let (_dir, path, fs) = fixture(SRC);
+        let written = add_stories_implement_rfcs(path.parent().unwrap(), &fs).unwrap();
+
+        let envelope: Value = serde_json::from_str(&run_add_edge_json(&written).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-added");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        let shown = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(envelope["edge"], shown["edges"][0]);
     }
 
     // AC6: each mutator preserves comments and the section order of untouched

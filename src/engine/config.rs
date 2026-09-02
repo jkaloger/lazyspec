@@ -264,7 +264,40 @@ pub enum TypeSelector {
     Types(Vec<String>),
 }
 
+/// The one rule for turning a set of written names into a selector, shared by
+/// both positions' constructors. A lone `"*"` is the wildcard; `"*"` beside a
+/// name is neither, and the loader refuses it inside a list, so it is refused
+/// here -- at the surface that assembled it, before anything is written.
+fn fold_wildcard(names: &[String]) -> Result<bool> {
+    if names == [WILDCARD] {
+        return Ok(true);
+    }
+    if names.iter().any(|name| name == WILDCARD) {
+        bail!(
+            "edge position {} mixes the wildcard with names: \"{}\" is a whole position, not one \
+             member of a set, so write either \"{}\" alone or the names it allows",
+            names_spelling(names),
+            WILDCARD,
+            WILDCARD
+        );
+    }
+    Ok(false)
+}
+
 impl TypeSelector {
+    /// A type position assembled from written names -- repeated CLI flags, a
+    /// TUI picker's set -- rather than deserialized from TOML. Folds the lone
+    /// wildcard the way [`Deserialize`] folds a bare `"*"`, so the two
+    /// producers cannot disagree about what `*` means.
+    ///
+    /// [`Deserialize`]: serde::Deserialize
+    pub fn from_names(names: Vec<String>) -> Result<Self> {
+        if fold_wildcard(&names)? {
+            return Ok(TypeSelector::Any);
+        }
+        Ok(TypeSelector::Types(names))
+    }
+
     /// The declared type names this selector spells out. [`TypeSelector::Any`]
     /// spells out none: it matches by wildcard rather than by naming a type, so
     /// the declared-type check has nothing to look up.
@@ -326,6 +359,14 @@ pub enum RelSelector {
 }
 
 impl RelSelector {
+    /// [`TypeSelector::from_names`] for the `via` position.
+    pub fn from_names(names: Vec<String>) -> Result<Self> {
+        if fold_wildcard(&names)? {
+            return Ok(RelSelector::Any);
+        }
+        Ok(RelSelector::Named(names))
+    }
+
     /// The declared relationship names this selector spells out.
     /// [`RelSelector::Any`] spells out none: it matches by wildcard rather than
     /// by naming a relationship, so the declared-relationship check has nothing
@@ -2362,6 +2403,51 @@ via = "*"
         assert_eq!(edge.from, TypeSelector::Any);
         assert_eq!(edge.to, TypeSelector::Any);
         assert_eq!(edge.via, RelSelector::Any);
+    }
+
+    // A position assembled from repeated flags or a picker's set: the lone
+    // wildcard is the wildcard, one name is that one name, and the mix the
+    // loader refuses inside a list is refused before it can be written.
+    #[test]
+    fn a_type_position_built_from_names_folds_the_lone_wildcard_and_refuses_a_mix() {
+        assert_eq!(
+            TypeSelector::from_names(vec![WILDCARD.to_string()]).unwrap(),
+            TypeSelector::Any
+        );
+        assert_eq!(
+            TypeSelector::from_names(vec!["story".to_string()]).unwrap(),
+            TypeSelector::Types(vec!["story".to_string()])
+        );
+
+        let err = TypeSelector::from_names(vec!["story".to_string(), WILDCARD.to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(WILDCARD) && err.contains("story"),
+            "the refusal must show the wildcard and the name it was mixed with, got {err}"
+        );
+    }
+
+    // `via` is a set of relationship names on the same terms `to` is a set of
+    // type names (ADR-032), so it folds and refuses the same way.
+    #[test]
+    fn a_via_position_built_from_names_folds_the_lone_wildcard_and_refuses_a_mix() {
+        assert_eq!(
+            RelSelector::from_names(vec![WILDCARD.to_string()]).unwrap(),
+            RelSelector::Any
+        );
+        assert_eq!(
+            RelSelector::from_names(vec!["implements".to_string()]).unwrap(),
+            RelSelector::Named(vec!["implements".to_string()])
+        );
+
+        let err = RelSelector::from_names(vec![WILDCARD.to_string(), "implements".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(WILDCARD) && err.contains("implements"),
+            "the refusal must show the wildcard and the name it was mixed with, got {err}"
+        );
     }
 
     /// ADR-031's question -- does this row cover the concrete edge `from -via->

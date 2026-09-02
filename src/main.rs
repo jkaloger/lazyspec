@@ -764,6 +764,40 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                Some(ConfigCommand::AddEdge {
+                    name,
+                    from,
+                    to,
+                    via,
+                    required,
+                    traversal,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("adding edge {name}"), json);
+                    match lazyspec::cli::config::run_add_edge(
+                        &cwd,
+                        &fs,
+                        &name,
+                        &from,
+                        &to,
+                        &via,
+                        required.as_deref(),
+                        traversal.as_deref(),
+                    ) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge added");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_add_edge_json(&edge)?);
+                            }
+                        }
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "add-edge failed");
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
         Some(Commands::Provenance { command }) => {
