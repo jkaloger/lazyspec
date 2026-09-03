@@ -1,8 +1,7 @@
 use crate::engine::clickup::ClickupHttpClient;
-use crate::engine::config::{validate_status, Config, StoreBackend, ValidationRule};
+use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::DocType;
-use crate::engine::document::Status;
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
@@ -80,39 +79,6 @@ pub fn run_with_body(
         });
         if let Some(doc) = existing.first() {
             bail!("{} already exists at {}", doc_type, doc.path.display());
-        }
-    }
-
-    for rule in &config.rules {
-        let ValidationRule::ParentChild {
-            child,
-            parent,
-            require_parent_status: Some(required),
-            ..
-        } = rule
-        else {
-            continue;
-        };
-        if child != doc_type {
-            continue;
-        }
-
-        let required_status = Status::new(required);
-        if let Some(parent_def) = config.type_by_name(parent) {
-            validate_status(parent_def, &required_status)?;
-        }
-
-        let satisfied = store
-            .docs
-            .values()
-            .any(|d| d.doc_type == DocType::new(parent) && d.status == required_status);
-        if !satisfied {
-            bail!(
-                "cannot create {} until a {} reaches status \"{}\"",
-                doc_type,
-                parent,
-                required
-            );
         }
     }
 

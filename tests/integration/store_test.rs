@@ -773,7 +773,7 @@ We adopt event sourcing.
     let fwd = store.forward_links_for(&adr_path);
     assert_eq!(fwd.len(), 1, "ADR should have one forward link");
     assert_eq!(
-        fwd[0].1, rfc_path,
+        fwd[0].endpoint, rfc_path,
         "forward link target should be the RFC path"
     );
 
@@ -781,7 +781,7 @@ We adopt event sourcing.
     let rev = store.reverse_links_for(&rfc_path);
     assert_eq!(rev.len(), 1, "RFC should have one reverse link");
     assert_eq!(
-        rev[0].1, adr_path,
+        rev[0].endpoint, adr_path,
         "reverse link source should be the ADR path"
     );
 }

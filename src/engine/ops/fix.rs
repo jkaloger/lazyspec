@@ -58,13 +58,63 @@ pub struct FieldFixResult {
     pub written: bool,
 }
 
-/// Outcome of `fix --config`: which standard relationships/rules were missing
-/// (and thus added) and whether the file was written.
+/// The kind of block a lost comment was attached to. The rewrite destroys decor
+/// in two places, and a name alone does not distinguish them: it deletes a
+/// `[[rules]]` table whole, and it deletes the `traversal` key off a
+/// `[[relationships]]` table that otherwise survives.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum LostBlock {
+    Rule,
+    Relationship,
+}
+
+impl LostBlock {
+    /// How the block reads in the plan, matching the TOML the reader will look
+    /// for it in.
+    pub fn label(self) -> &'static str {
+        match self {
+            LostBlock::Rule => "rule",
+            LostBlock::Relationship => "relationship",
+        }
+    }
+}
+
+/// A comment the RFC-067 rewrite deletes along with the declaration it sits on.
+/// ADR-032 §Consequences accepts the loss; naming the block and the declaration
+/// is what lets the plan say which one loses what, so the reader can copy the
+/// text somewhere it will survive.
+#[derive(Debug, Serialize)]
+pub struct LostComment {
+    pub block: LostBlock,
+    pub name: String,
+    pub comment: String,
+}
+
+/// Outcome of `fix --config`: what the run adds, what the RFC-067 edge
+/// migration takes away, and whether the file was written.
+///
+/// The two halves never name the same thing. `*_added` is what the file was
+/// missing; `*_removed` / `*_lost` / `*_dropped` is what the translating
+/// rewrite deletes from it, read off the source alone (ADR-032).
+/// `edges_written` names every `[[edges]]` row the run writes: the translations
+/// and the standard set seeded beside them. There is no `rules_added` field,
+/// because a constraint's only spelling is now a row and a config declaring
+/// `[[rules]]` no longer loads (STORY-259).
+///
+/// `comments_lost` and `gates_dropped` are the destructions nothing else here
+/// would disclose: a comment leaves no trace in the parsed config, and a
+/// `require_parent_status` gate changes no finding either before or after
+/// (ADR-033 retired it with no successor).
 #[derive(Debug, Serialize)]
 pub struct ConfigFixResult {
     pub relationships_added: Vec<String>,
-    pub rules_added: Vec<String>,
     pub lifecycles_added: Vec<String>,
+    pub edges_written: Vec<String>,
+    pub rules_removed: Vec<String>,
+    pub traversal_removed: Vec<String>,
+    pub comments_lost: Vec<LostComment>,
+    pub gates_dropped: Vec<String>,
     pub written: bool,
 }
 

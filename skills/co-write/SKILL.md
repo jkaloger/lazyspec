@@ -15,7 +15,7 @@ Co-write proposes a draft for human editing; it does not finalise a body unilate
 <NEVER>
 - Do NOT hand-edit document files. The CLI is the only writer: `lazyspec create` (seed with `--body`), `lazyspec link`, and `lazyspec update <id> --body` to change body content. This holds for EVERY store, filesystem included.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <BODY-CONTENT>
@@ -23,7 +23,7 @@ Set body at creation: `lazyspec create <type> "<title>" --body "content"`. Chang
 GitHub-issues docs additionally: never edit `.lazyspec/cache/` mirrors (read-only); always reference docs by shorthand ID (e.g. STORY-095), not cache paths.
 </BODY-CONTENT>
 
-Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read parent/relation/gate facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
+Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always pass `--json`. Read type, relation and lifecycle facts from the CLI, never from `.lazyspec/` graph files directly. On failure, check `--help` before retrying.
 
 ## Authorship Ceiling
 
@@ -39,7 +39,7 @@ where `<type>` and the ceiling are the actual values read from config for that r
 
 ## Preflight
 
-1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance from its template, its `parent_type`, and the relation names in `relationships`.
+1. `lazyspec config --json` -- read the target `<type>`: its `intent`, its `authorship` ceiling (gate the verb on this), section guidance from its template, and the relation names in `relationships`. `parent_type` decides containment only -- the directory this type's documents live under and the store backend they share -- and declares no link.
 2. `lazyspec status --json` -- locate the parent document to link to.
 3. `lazyspec context --json` -- understand the chain around the user's position.
 

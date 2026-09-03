@@ -1,5 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
+pub mod walk_fixture;
+
 use lazyspec::engine::config::Config;
 use lazyspec::engine::store::Store;
 use std::path::{Path, PathBuf};
@@ -35,6 +37,14 @@ impl TestFixture {
 
     pub fn store(&self) -> Store {
         Store::load(self.root(), &self.config()).unwrap()
+    }
+
+    /// A store loaded under `config`, for a test whose assertion depends on a
+    /// DAG the starter config does not declare. The checkers read the traversal
+    /// table off the store, so the config a store was loaded with is the one
+    /// that decides what counts as hierarchy.
+    pub fn store_with(&self, config: &Config) -> Store {
+        Store::load(self.root(), config).unwrap()
     }
 
     pub fn write_doc(&self, rel_path: &str, content: &str) -> PathBuf {

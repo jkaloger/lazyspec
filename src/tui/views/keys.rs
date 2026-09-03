@@ -352,7 +352,6 @@ impl App {
 
                                 let ctx = match crate::engine::prompt::build_render_context(
                                     &self.store,
-                                    config,
                                     &doc,
                                     &*self.fs,
                                 ) {
@@ -383,7 +382,6 @@ impl App {
                                 };
                                 let ctx = match crate::engine::prompt::build_render_context(
                                     &self.store,
-                                    config,
                                     &doc,
                                     &*self.fs,
                                 ) {
@@ -783,7 +781,7 @@ impl App {
         match self.settings_category {
             1 => cfg.documents.types.len(),
             2 => cfg.relationships.len(),
-            3 => cfg.rules.len(),
+            3 => cfg.edges.len(),
             6 => cfg.certification.overrides.len(),
             _ => 0,
         }
@@ -859,46 +857,48 @@ impl App {
             return;
         }
 
-        // The status-bar zone ordering editor owns all keys while open, so it
-        // intercepts before nav/space/save. `c` commits (not `w`/Ctrl-S -- those
-        // stay the global buffer save); Esc cancels without writing.
-        if self.settings_zone_editor.is_some() {
+        // The two-pane set picker owns all keys while open, so it intercepts
+        // before nav/space/save. `c` commits (not `w`/Ctrl-S -- those stay the
+        // global buffer save); Esc cancels without writing. The reorder keys are
+        // bound only where an order means something: an edge type set is
+        // unordered, so K/J there would dirty the file and change no behaviour.
+        if self.settings_set_picker.is_some() {
             match (code, modifiers) {
                 (KeyCode::Tab, _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        z.toggle_pane();
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        p.toggle_pane();
                     }
                 }
                 (KeyCode::Char('j') | KeyCode::Down, _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        z.cursor_down();
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        p.cursor_down();
                     }
                 }
                 (KeyCode::Char('k') | KeyCode::Up, _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        z.cursor_up();
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        p.cursor_up();
                     }
                 }
                 (KeyCode::Char(' ') | KeyCode::Enter, _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        match z.pane {
-                            crate::tui::state::forms::ZonePane::Available => z.add(),
-                            crate::tui::state::forms::ZonePane::Selected => z.remove(),
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        match p.pane {
+                            crate::tui::state::forms::PickerPane::Available => p.add(),
+                            crate::tui::state::forms::PickerPane::Selected => p.remove(),
                         }
                     }
                 }
-                (KeyCode::Char('K'), _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        z.move_up();
+                (KeyCode::Char('K'), _) if self.settings_picker_reorders() => {
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        p.move_up();
                     }
                 }
-                (KeyCode::Char('J'), _) => {
-                    if let Some(z) = self.settings_zone_editor.as_mut() {
-                        z.move_down();
+                (KeyCode::Char('J'), _) if self.settings_picker_reorders() => {
+                    if let Some(p) = self.settings_set_picker.as_mut() {
+                        p.move_down();
                     }
                 }
-                (KeyCode::Char('c'), _) => self.settings_commit_zone(),
-                (KeyCode::Esc, _) => self.settings_cancel_zone(),
+                (KeyCode::Char('c'), _) => self.settings_commit_picker(),
+                (KeyCode::Esc, _) => self.settings_cancel_picker(),
                 _ => {}
             }
             return;
@@ -1000,7 +1000,7 @@ impl App {
             KeyCode::Char('d')
                 if self.settings_drill.is_none()
                     && self.settings_entry_count() > 0
-                    && matches!(self.settings_category, 1 | 2 | 3 | 6) =>
+                    && matches!(self.settings_category, 1..=3 | 6) =>
             {
                 // Delete the selected entry behind a confirm (buffer-only). cat 2
                 // refuses its last relationship inside the open path (ADR-011).
@@ -1015,12 +1015,14 @@ impl App {
                 } else if let Some(focused) = self.settings_focused_field() {
                     match focused.editor {
                         // Text-family fields begin inline editing; a ZoneOrdering
-                        // field opens the two-pane zone editor (both via start_edit).
+                        // or TypeSet field opens the two-pane set picker (both
+                        // via start_edit).
                         FieldEditor::Text
                         | FieldEditor::BoundedNum { .. }
                         | FieldEditor::Nullable
                         | FieldEditor::List
-                        | FieldEditor::ZoneOrdering => self.settings_start_edit(),
+                        | FieldEditor::ZoneOrdering
+                        | FieldEditor::TypeSet => self.settings_start_edit(),
                         // A bool flips in the buffer and is marked dirty.
                         FieldEditor::Toggle => self.settings_toggle_bool(),
                         // An enum opens the variant picker, pre-selecting the

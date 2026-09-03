@@ -1,7 +1,7 @@
 ---
 title: Retire the rules table
 type: story
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-08-29
 tags: []

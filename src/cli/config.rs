@@ -1,11 +1,11 @@
 use crate::cli::wizard::Prompter;
 use crate::engine::config::{
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, Severity,
-    StoreBackend, TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
+    RelSelector, Severity, StoreBackend, Traversal, TypeDef, TypeSelector, WILDCARD,
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use std::path::Path;
 
@@ -40,7 +40,9 @@ pub enum ConfigCommand {
         /// Icon shown in the TUI
         #[arg(long)]
         icon: Option<String>,
-        /// Parent type name, gating creation and validation
+        /// Containing type name: this type's documents live in that type's
+        /// directory and share its store backend. It must be a singleton, and
+        /// it constrains no link
         #[arg(long)]
         parent_type: Option<String>,
         /// Mark the type as a singleton (a single document, not numbered series)
@@ -75,34 +77,174 @@ pub enum ConfigCommand {
         #[arg(long = "attribute")]
         attributes: Vec<String>,
     },
-    /// Replace a type's lifecycle states and edges
+    /// Replace a type's lifecycle states and status transitions
     SetLifecycle {
         /// Type name to set the lifecycle on
         name: String,
         /// A lifecycle state (repeat for each state)
         #[arg(long = "state")]
         states: Vec<String>,
-        /// A permitted transition as FROM:TO (`*` matches any source; repeat per edge)
+        /// A permitted status transition as FROM:TO (`*` matches any source;
+        /// repeat per transition). Not a DAG edge -- for those see `config add-edge`
         #[arg(long = "edge")]
         edges: Vec<String>,
     },
-    /// Set the require_parent_status gate on a parent-child rule
-    AddGate {
-        /// Rule name to gate
+    /// Append a row to the `[[edges]]` table: a kind of directed edge in the
+    /// document DAG, unrelated to `set-lifecycle --edge`'s status transitions
+    AddEdge {
+        /// Name for the row; errors and later edits address it by this
         name: String,
-        /// Parent status required before a child may be created
+        /// A source type, or `*` for any type (repeat per type)
+        #[arg(long = "from", required = true)]
+        from: Vec<String>,
+        /// A permitted target type, or `*` for any type (repeat per type)
+        #[arg(long = "to", required = true)]
+        to: Vec<String>,
+        /// A relationship that realizes the edge, or `*` for any (repeat per relationship)
+        #[arg(long = "via", required = true)]
+        via: Vec<String>,
+        /// Severity of the finding when the edge is absent: error or warning
+        /// (omitted leaves the edge legal but not demanded)
         #[arg(long)]
-        status: String,
+        required: Option<String>,
+        /// Traversal role the edge joins: chain or related (omitted names no role)
+        #[arg(long)]
+        traversal: Option<String>,
+        /// Print the row that landed as JSON (accepted here as well as before
+        /// the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change fields on an existing `[[edges]]` row. An omitted flag leaves its
+    /// field as it stands; unsetting an optional has its own flag. A row is
+    /// addressed by the `name` it was written with and cannot be renamed here,
+    /// since the writer renames by dropping the block and appending a new one,
+    /// which loses the block's comments
+    SetEdge {
+        /// Name of the row to edit
+        name: String,
+        /// The source types, replacing the ones declared, or `*` for any type
+        /// (repeat per type)
+        #[arg(long = "from")]
+        from: Option<Vec<String>>,
+        /// The permitted target types, REPLACING the ones declared rather than
+        /// joining them, or `*` for any type (repeat per type)
+        #[arg(long = "to")]
+        to: Option<Vec<String>>,
+        /// The relationships that realize the edge, replacing the ones
+        /// declared, or `*` for any (repeat per relationship)
+        #[arg(long = "via")]
+        via: Option<Vec<String>>,
+        /// Severity of the finding when the edge is absent: error or warning
+        #[arg(long)]
+        required: Option<String>,
+        /// Drop `required`, leaving the edge legal but not demanded
+        #[arg(long = "no-required", conflicts_with = "required")]
+        no_required: bool,
+        /// Traversal role the edge joins: chain or related
+        #[arg(long)]
+        traversal: Option<String>,
+        /// Drop `traversal`, leaving the edge naming no role
+        #[arg(long = "no-traversal", conflicts_with = "traversal")]
+        no_traversal: bool,
+        /// Print the row after the edit as JSON (accepted here as well as
+        /// before the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop a row from the `[[edges]]` table. A config declaring no edges is
+    /// legal, so removing the last row is not refused -- the DAG it described
+    /// simply stops being described
+    RemoveEdge {
+        /// Name of the row to remove
+        name: String,
+        /// Print the row that was removed as JSON (accepted here as well as
+        /// before the subcommand, as on `config show`)
+        #[arg(long)]
+        json: bool,
     },
 }
 
+/// What an edit says about one optional field. `Option<T>` cannot say it: a
+/// missing flag and a flag that clears the field are different instructions,
+/// and both would be `None`.
+#[derive(Debug, Default)]
+pub enum FieldEdit<T> {
+    #[default]
+    Leave,
+    Unset,
+    Set(T),
+}
+
+impl<T> FieldEdit<T> {
+    /// The pair of flags clap collects for one optional field -- `--x VALUE`
+    /// and `--no-x`, which clap already refuses together -- read as one
+    /// instruction.
+    pub fn from_flags(value: Option<T>, unset: bool) -> Self {
+        match value {
+            Some(value) => FieldEdit::Set(value),
+            None if unset => FieldEdit::Unset,
+            None => FieldEdit::Leave,
+        }
+    }
+}
+
+/// The fields `config set-edge` was told to change. `None` on a set-valued
+/// position means the flag was absent, so the declared set stands; `Some` is
+/// the whole new set rather than members to add.
+#[derive(Debug, Default)]
+pub struct EdgeEdit {
+    pub from: Option<Vec<String>>,
+    pub to: Option<Vec<String>>,
+    pub via: Option<Vec<String>>,
+    pub required: FieldEdit<String>,
+    pub traversal: FieldEdit<String>,
+}
+
+/// `Config::edges` is skipped when empty so the TOML writer never emits a bare
+/// `edges = []` above the tables, but the JSON contract is an always-present
+/// array: an agent reading `edges` should never have to branch on null.
 pub fn run_show_json(config: &Config) -> Result<String> {
-    Ok(serde_json::to_string_pretty(config)?)
+    let mut value = serde_json::to_value(config)?;
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("edges")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 pub fn run_schema_json() -> Result<String> {
     let schema = crate::engine::config::config_schema();
     Ok(serde_json::to_string_pretty(&schema)?)
+}
+
+/// Render `buffer` into `src`'s bytes and write them to `path` -- but only once
+/// they have been read back by the loader. The parse is the guard: dictum 3
+/// puts every field-level and cross-field constraint in `Config::parse`, so
+/// re-reading the exact bytes destined for disk is what keeps a mutation from
+/// leaving a file the next command refuses to load (STORY-261 AC5). It catches
+/// any `toml_edit` slip in the writer for the same money.
+///
+/// This is the protocol the TUI settings screen already runs on every save
+/// (`AppState::settings_commit_write`); one surface over, the same three steps,
+/// so the two cannot answer differently. Nothing is reformatted or rewritten on
+/// the way out: the loader's message is what a refused mutation reports,
+/// because a second spelling of it here is exactly the drift AC5 forbids.
+///
+/// A config still carrying a `[[rules]]` table is refused by the loader too,
+/// but never by this guard: every mutator parses on the *read*, so an obsolete
+/// config fails there and never reaches a render. No second check for it here.
+fn write_validated_config(
+    fs: &dyn FileSystem,
+    path: &Path,
+    src: &str,
+    buffer: &Config,
+) -> Result<()> {
+    let out = write_config_in_place(src, buffer)?;
+    Config::parse(&out)?;
+    fs.write(path, &out)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,9 +313,7 @@ pub fn run_add_type(
         attributes,
     ));
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    write_validated_config(fs, &path, &src, &config)
 }
 
 /// Assemble a `TypeDef` from already-parsed pieces. Shared by the flag path
@@ -261,7 +401,6 @@ pub struct CollectedType {
     pub attributes: Vec<String>,
     pub parent_type: Option<String>,
     pub lifecycle: Option<(Vec<String>, Vec<String>)>,
-    pub gate: Option<(String, String)>,
     pub github_issue_tag: Option<String>,
     pub github_issue_type: Option<String>,
     pub clickup_list_id: Option<String>,
@@ -442,50 +581,6 @@ pub fn collect_type_interactive(
         None
     };
 
-    // Gate: attach `require_parent_status` to an existing parent-child rule. Only
-    // a status the parent type's effective lifecycle carries is accepted.
-    let parent_child_rules: Vec<(String, String)> = config
-        .rules
-        .iter()
-        .filter_map(|r| match r {
-            ValidationRule::ParentChild { name, parent, .. } => {
-                Some((name.clone(), parent.clone()))
-            }
-            ValidationRule::RelationExistence { .. } => None,
-        })
-        .collect();
-    let gate = if !parent_child_rules.is_empty()
-        && prompter.confirm("Gate a parent-child rule", false)?
-    {
-        let rule_names: Vec<&str> = parent_child_rules.iter().map(|(n, _)| n.as_str()).collect();
-        let rule = loop {
-            let choice = prompter.select("Rule", &rule_names, rule_names[0])?;
-            if rule_names.contains(&choice.as_str()) {
-                break choice;
-            }
-            println!("\"{choice}\" is not a parent-child rule; choose one of the listed names");
-        };
-        let parent_name = &parent_child_rules
-            .iter()
-            .find(|(n, _)| *n == rule)
-            .expect("selected rule came from this list")
-            .1;
-        let states = config
-            .type_by_name(parent_name)
-            .map(|t| t.effective_lifecycle().states.clone())
-            .unwrap_or_default();
-        let status = loop {
-            let answer = prompter.ask("Required parent status", None)?;
-            if states.contains(&answer) {
-                break answer;
-            }
-            println!("\"{answer}\" is not a lifecycle state of \"{parent_name}\"; choose another");
-        };
-        Some((rule, status))
-    } else {
-        None
-    };
-
     Ok(CollectedType {
         name,
         plural,
@@ -499,7 +594,6 @@ pub fn collect_type_interactive(
         attributes,
         parent_type,
         lifecycle: custom_lifecycle,
-        gate,
         github_issue_tag,
         github_issue_type,
         clickup_list_id,
@@ -507,92 +601,8 @@ pub fn collect_type_interactive(
     })
 }
 
-/// A stable, dedup-guarded name for the parent-child rule linking `child` to
-/// `parent`, built from their plural forms (e.g. `stories-need-rfcs`). Falls back
-/// to a naive `{name}s` plural when a type is absent, and appends `-2`, `-3`, ...
-/// if the base name already names a rule.
-fn parent_child_rule_name(config: &Config, child: &str, parent: &str) -> String {
-    let plural = |name: &str| {
-        config
-            .type_by_name(name)
-            .map(|t| t.plural.clone())
-            .unwrap_or_else(|| format!("{name}s"))
-    };
-    let base = format!("{}-need-{}", plural(child), plural(parent));
-    if !config.rules.iter().any(|r| rule_name(r) == base) {
-        return base;
-    }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{base}-{n}");
-        if !config.rules.iter().any(|r| rule_name(r) == candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
-/// Prompt for a single parent-child rule against `config` (an in-memory view of
-/// the project as designed so far). Child and parent are each chosen from the
-/// defined type names -- an unknown answer re-asks rather than aborting. Severity
-/// defaults to `warning`. An optional gate re-asks until the chosen status names
-/// a state in the parent type's effective lifecycle. Pure: no disk IO, fully
-/// driveable by a `ScriptedPrompter`.
-pub fn collect_parent_child_rule(
-    config: &Config,
-    prompter: &mut dyn Prompter,
-) -> Result<ValidationRule> {
-    let type_names: Vec<&str> = config
-        .documents
-        .types
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
-
-    let pick = |prompter: &mut dyn Prompter, label: &str| -> Result<String> {
-        loop {
-            let choice = prompter.select(label, &type_names, type_names[0])?;
-            if type_names.contains(&choice.as_str()) {
-                break Ok(choice);
-            }
-            println!("\"{choice}\" is not a defined type; choose one of the listed names");
-        }
-    };
-
-    let child = pick(prompter, "Child type")?;
-    let parent = pick(prompter, "Parent type")?;
-    let name = parent_child_rule_name(config, &child, &parent);
-
-    let severity =
-        parse_severity(&prompter.select("Severity", &["warning", "error"], "warning")?)?;
-
-    let require_parent_status = if prompter.confirm("Gate on a parent status", false)? {
-        let states = config
-            .type_by_name(&parent)
-            .map(|t| t.effective_lifecycle().states.clone())
-            .unwrap_or_default();
-        Some(loop {
-            let answer = prompter.ask("Required parent status", None)?;
-            if states.contains(&answer) {
-                break answer;
-            }
-            println!("\"{answer}\" is not a lifecycle state of \"{parent}\"; choose another");
-        })
-    } else {
-        None
-    };
-
-    Ok(ValidationRule::ParentChild {
-        name,
-        child,
-        parent,
-        severity,
-        require_parent_status,
-    })
-}
-
 /// Push a collected type onto an in-memory `Config` and apply its optional
-/// lifecycle and gate, without any disk IO. Used by the `init` wizard, which
+/// lifecycle, without any disk IO. Used by the `init` wizard, which
 /// serializes the whole `Config` at the end rather than editing a file in place.
 pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> Result<()> {
     if config.type_by_name(&collected.name).is_some() {
@@ -638,26 +648,174 @@ pub fn apply_collected_type(config: &mut Config, collected: &CollectedType) -> R
         };
     }
 
-    if let Some((rule, status)) = &collected.gate {
-        match config.rules.iter_mut().find(|r| rule_name(r) == rule) {
-            Some(ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            }) => {
-                *require_parent_status = Some(status.clone());
-            }
-            _ => bail!("unknown parent-child rule \"{}\"", rule),
-        }
-    }
-
     Ok(())
+}
+
+/// A stable, dedup-guarded name for the row joining `from` to `to`, built from
+/// the plural forms of the types it names (`stories-to-rfcs`); a wildcard target
+/// names no type and reads `anything`. Appends `-2`, `-3`, ... while the base
+/// name is taken, because two rows sharing a name is a config that does not
+/// load and the wizard writes its whole config without reading it back.
+fn generated_edge_name(config: &Config, from: &str, to: &TypeSelector) -> String {
+    let plural = |name: &str| {
+        config
+            .type_by_name(name)
+            .map(|t| t.plural.clone())
+            .unwrap_or_else(|| format!("{name}s"))
+    };
+    let target = match to.names() {
+        [] => "anything".to_string(),
+        names => names
+            .iter()
+            .map(|name| plural(name))
+            .collect::<Vec<_>>()
+            .join("-and-"),
+    };
+    let base = format!("{}-to-{}", plural(from), target);
+    let taken = |candidate: &str| config.edges.iter().any(|edge| edge.name == candidate);
+    if !taken(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Prompt for one set-valued edge position: the declared names plus the
+/// wildcard, choosable together because a multi-chooser cannot express that
+/// `"*"` is a whole position rather than one member of a set. An empty
+/// selection, or a name the project does not declare, re-asks in place -- a row
+/// naming an undeclared type fails strict load, and a position that names
+/// nothing matches nothing.
+fn pick_edge_position(
+    prompter: &mut dyn Prompter,
+    label: &str,
+    declared: &[&str],
+) -> Result<Vec<String>> {
+    let mut options: Vec<&str> = declared.to_vec();
+    options.push(WILDCARD);
+    loop {
+        let chosen = prompter.multi_select(label, &options, &[])?;
+        if chosen.is_empty() {
+            println!("choose at least one, or \"{WILDCARD}\" for any");
+            continue;
+        }
+        if let Some(unknown) = chosen.iter().find(|name| !options.contains(&name.as_str())) {
+            println!("\"{unknown}\" is not one of the listed names; choose from them");
+            continue;
+        }
+        return Ok(chosen);
+    }
+}
+
+/// Prompt for a single `[[edges]]` row against `config` (an in-memory view of
+/// the project as designed so far). Pure: no disk IO, fully driveable by a
+/// `ScriptedPrompter`.
+///
+/// `from` is one of the defined types and `to` is a set of them or the
+/// wildcard, so no collected row can name a type the config does not declare.
+/// The caller offers this prompt only once `config` declares two or more types,
+/// which is what leaves `from` something to choose from.
+/// The mix of a wildcard with a name is neither selector, and it is refused by
+/// the one engine-side constructor every surface assembling a position uses,
+/// then re-asked here rather than aborting the session.
+///
+/// `required` and `traversal` are both offered with unset as the default: a new
+/// project has no basis to answer either, and both have a safe absence -- an
+/// absent `required` leaves the edge legal rather than demanded, an absent
+/// `traversal` claims no role. `chain` is the default offered while no declared
+/// row states a role at all, since a DAG nothing walks gives `context` a chain
+/// of one document.
+///
+/// The row's `name` is generated rather than prompted for: it is the address a
+/// finding and the writer both use, two rows may not share one, and a session
+/// that answered the same pair of types twice would otherwise assemble a config
+/// that does not load.
+pub fn collect_edge(config: &Config, prompter: &mut dyn Prompter) -> Result<EdgeDef> {
+    let type_names: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let rel_names: Vec<&str> = config
+        .relationships
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+
+    let from = loop {
+        let choice = prompter.select("From type", &type_names, type_names[0])?;
+        if type_names.contains(&choice.as_str()) {
+            break choice;
+        }
+        println!("\"{choice}\" is not a defined type; choose one of the listed names");
+    };
+
+    let to = loop {
+        let names = pick_edge_position(prompter, "To types", &type_names)?;
+        match TypeSelector::from_names(names) {
+            Ok(selector) => break selector,
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let via = loop {
+        let names = pick_edge_position(prompter, "Via relationships", &rel_names)?;
+        match RelSelector::from_names(names) {
+            Ok(selector) => break selector,
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let required = loop {
+        let answer = prompter.select("Requiredness", &["none", "warning", "error"], "none")?;
+        if answer == "none" {
+            break None;
+        }
+        match parse_severity(&answer) {
+            Ok(severity) => break Some(severity),
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    let walks_already = config.edges.iter().any(|edge| edge.traversal.is_some());
+    let traversal_default = if walks_already { "none" } else { "chain" };
+    let traversal = loop {
+        let answer = prompter.select(
+            "Traversal",
+            &["none", "chain", "related"],
+            traversal_default,
+        )?;
+        if answer == "none" {
+            break None;
+        }
+        match parse_traversal(&answer) {
+            Ok(traversal) => break Some(traversal),
+            Err(e) => println!("{e}; try again"),
+        }
+    };
+
+    Ok(EdgeDef {
+        name: generated_edge_name(config, &from, &to),
+        from: TypeSelector::from_names(vec![from])?,
+        to,
+        via,
+        required,
+        traversal,
+    })
 }
 
 /// Prompt for a type's fields on a TTY and drive the same writers the flag path
 /// uses. After the core fields it optionally collects attributes and a parent
-/// type (fed to `run_add_type`), a custom lifecycle (`run_set_lifecycle`), and a
-/// gate on an existing parent-child rule (`run_add_gate`). Every optional section
-/// pre-validates prompt-side and re-asks on failure rather than aborting.
+/// type (fed to `run_add_type`) and a custom lifecycle (`run_set_lifecycle`).
+/// Every optional section pre-validates prompt-side and re-asks on failure
+/// rather than aborting.
 pub fn run_add_type_interactive(
     root: &Path,
     fs: &dyn FileSystem,
@@ -680,7 +838,6 @@ pub fn run_add_type_interactive(
         attributes,
         parent_type,
         lifecycle: custom_lifecycle,
-        gate,
         github_issue_tag,
         github_issue_type,
         clickup_list_id,
@@ -711,9 +868,6 @@ pub fn run_add_type_interactive(
     if let Some((states, edges)) = custom_lifecycle {
         run_set_lifecycle(root, fs, &name, &states, &edges)?;
     }
-    if let Some((rule, status)) = gate {
-        run_add_gate(root, fs, &rule, &status)?;
-    }
     Ok(())
 }
 
@@ -739,42 +893,195 @@ pub fn run_set_lifecycle(
     };
     type_def.lifecycle = lifecycle;
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    write_validated_config(fs, &path, &src, &config)
 }
 
-pub fn run_add_gate(root: &Path, fs: &dyn FileSystem, name: &str, status: &str) -> Result<()> {
+/// Append one `[[edges]]` row from the flags as given and return it, so the
+/// caller can report what landed without re-reading the config.
+///
+/// Whether the row makes sense stays the loader's question, but it is asked
+/// before the write rather than on the next command: [`write_validated_config`]
+/// reads back the bytes destined for disk (STORY-261 AC5). Two things are
+/// checked here, ahead of the render, because neither survives it -- a name
+/// already in the table, which the writer reconciles by and would silently
+/// rewrite, and a wildcard mixed with names, which is neither selector.
+#[allow(clippy::too_many_arguments)]
+pub fn run_add_edge(
+    root: &Path,
+    fs: &dyn FileSystem,
+    name: &str,
+    from: &[String],
+    to: &[String],
+    via: &[String],
+    required: Option<&str>,
+    traversal: Option<&str>,
+) -> Result<EdgeDef> {
     let path = root.join(".lazyspec.toml");
     let src = fs.read_to_string(&path)?;
     let mut config = Config::parse(&src)?;
 
-    let rule = config.rules.iter_mut().find(|r| rule_name(r) == name);
-    match rule {
-        None => bail!("unknown rule \"{}\"", name),
-        Some(ValidationRule::RelationExistence { .. }) => {
-            bail!(
-                "rule \"{}\" is a relation-existence rule; gates apply only to parent-child rules",
-                name
-            )
-        }
-        Some(ValidationRule::ParentChild {
-            require_parent_status,
-            ..
-        }) => {
-            *require_parent_status = Some(status.to_string());
-        }
+    if config.edges.iter().any(|edge| edge.name == name) {
+        bail!("edge \"{}\" already exists", name);
     }
 
-    let out = write_config_in_place(&src, &config)?;
-    fs.write(&path, &out)?;
-    Ok(())
+    let edge = EdgeDef {
+        name: name.to_string(),
+        from: TypeSelector::from_names(from.to_vec()).context("reading the `--from` flags")?,
+        to: TypeSelector::from_names(to.to_vec()).context("reading the `--to` flags")?,
+        via: RelSelector::from_names(via.to_vec()).context("reading the `--via` flags")?,
+        required: required.map(parse_severity).transpose()?,
+        traversal: traversal.map(parse_traversal).transpose()?,
+    };
+
+    config.edges.push(edge.clone());
+    write_validated_config(fs, &path, &src, &config)?;
+    Ok(edge)
 }
 
-fn rule_name(rule: &ValidationRule) -> &str {
-    match rule {
-        ValidationRule::ParentChild { name, .. } => name,
-        ValidationRule::RelationExistence { name, .. } => name,
+/// What `config add-edge --json` answers with. Dictum 2: the result carries the
+/// row itself, serialized the way `config --json` serializes it, so a caller
+/// reads what landed rather than re-reading the config to find out.
+pub fn run_add_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-added",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
+/// Apply an edit to the `[[edges]]` row `name` addresses and return the row as
+/// it now stands. Untouched fields, and the decor of every block the row does
+/// not own, survive: the writer edits the surviving source table in place.
+///
+/// This merges where `set-lifecycle` beside it replaces, which is a deliberate
+/// divergence. A lifecycle is one thing spelled in two keys, so re-passing it
+/// whole is no burden; an edge has six fields, and a replace spelling would
+/// make changing `required` alone mean re-passing `from`, `to` and `via` --
+/// getting one of them wrong silently rewrites the DAG. So an omitted flag
+/// means "leave it", and the two optionals get explicit `--no-` flags, because
+/// omitting `--required` cannot mean both "leave it" and "remove it".
+///
+/// The one position that does replace is a set: repeated `--to` gives the new
+/// set, not additions to the old one, or a set could never be shrunk from the
+/// CLI. The TUI answers the same question with a picker that adds and removes
+/// members (STORY-260); two surfaces, two affordances, one resulting row.
+///
+/// `name` is an address, not a field. Renaming a row is remove-old +
+/// append-new to the writer, which would drop the block's comments and move it
+/// to the end of the table -- accepted for a *translated* block (ADR-032) but
+/// not for an edited one (ITERATION-388) -- so there is no `--name`, and a
+/// rename is an edit to the file, where the decor at stake is visible.
+///
+/// Whether the edited row makes sense stays the loader's question, asked by
+/// [`write_validated_config`] before the write (STORY-261 AC5), exactly as it
+/// is for `add-edge`.
+pub fn run_set_edge(
+    root: &Path,
+    fs: &dyn FileSystem,
+    name: &str,
+    edit: EdgeEdit,
+) -> Result<EdgeDef> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let mut config = Config::parse(&src)?;
+
+    let Some(edge) = config.edges.iter_mut().find(|edge| edge.name == name) else {
+        bail!("unknown edge \"{}\"", name);
+    };
+
+    if let Some(from) = edit.from {
+        edge.from = TypeSelector::from_names(from).context("reading the `--from` flags")?;
+    }
+    if let Some(to) = edit.to {
+        edge.to = TypeSelector::from_names(to).context("reading the `--to` flags")?;
+    }
+    if let Some(via) = edit.via {
+        edge.via = RelSelector::from_names(via).context("reading the `--via` flags")?;
+    }
+    match edit.required {
+        FieldEdit::Leave => {}
+        FieldEdit::Unset => edge.required = None,
+        FieldEdit::Set(value) => edge.required = Some(parse_severity(&value)?),
+    }
+    match edit.traversal {
+        FieldEdit::Leave => {}
+        FieldEdit::Unset => edge.traversal = None,
+        FieldEdit::Set(value) => edge.traversal = Some(parse_traversal(&value)?),
+    }
+    let edited = edge.clone();
+
+    write_validated_config(fs, &path, &src, &config)?;
+    Ok(edited)
+}
+
+/// [`run_add_edge_json`] for an edit: the same envelope, carrying the row after
+/// the edit rather than the row that was appended.
+pub fn run_set_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-updated",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
+/// Drop the `[[edges]]` row `name` addresses and return it as it stood.
+///
+/// Deletion needs no writer of its own: `write_config_in_place` reconciles the
+/// table to the buffer by name, so a name the buffer no longer carries is a
+/// block that goes, its own comments with it, and its neighbours keep theirs.
+/// The last row taking the whole `[[edges]]` table with it falls out of the same
+/// mechanism -- an emptied array-of-tables renders as nothing.
+///
+/// `retain` drops *every* row carrying the name, not the first one. A config
+/// declaring two rows under one name does not load at all, so the `Config::parse`
+/// above is what reports that and the case is unreachable here; the total
+/// spelling is the one that stays right if the collision guard ever loosens,
+/// rather than leaving half a pair behind.
+///
+/// A config declaring no edges is legal -- strict load demands no minimum -- so
+/// removing the last row is not refused, and neither is removing a row whose
+/// absence changes what `validate` reports: an edge condition never refuses a
+/// command (RFC-067). Dropping a `required` row silences its findings and
+/// dropping a `traversal` row shortens every chain that walked it. Neither is
+/// warned about here, which is why the whole row comes back: a caller that wants
+/// to say so cannot re-read what is gone.
+pub fn run_remove_edge(root: &Path, fs: &dyn FileSystem, name: &str) -> Result<EdgeDef> {
+    let path = root.join(".lazyspec.toml");
+    let src = fs.read_to_string(&path)?;
+    let mut config = Config::parse(&src)?;
+
+    let Some(removed) = config.edges.iter().find(|edge| edge.name == name).cloned() else {
+        bail!("unknown edge \"{}\"", name);
+    };
+    config.edges.retain(|edge| edge.name != name);
+
+    write_validated_config(fs, &path, &src, &config)?;
+    Ok(removed)
+}
+
+/// [`run_add_edge_json`] for a removal: the same envelope, carrying the row as
+/// it stood before it went.
+pub fn run_remove_edge_json(edge: &EdgeDef) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "action": "edge-removed",
+        "name": edge.name,
+        "edge": edge,
+    }))?)
+}
+
+fn parse_severity(value: &str) -> Result<Severity> {
+    match value {
+        "error" => Ok(Severity::Error),
+        "warning" => Ok(Severity::Warning),
+        other => bail!("unknown required severity \"{}\" (error or warning)", other),
+    }
+}
+
+fn parse_traversal(value: &str) -> Result<Traversal> {
+    match value {
+        "chain" => Ok(Traversal::Chain),
+        "related" => Ok(Traversal::Related),
+        other => bail!("unknown traversal \"{}\" (chain or related)", other),
     }
 }
 
@@ -880,14 +1187,6 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
     }
 }
 
-pub fn parse_severity(value: &str) -> Result<Severity> {
-    match value {
-        "warning" => Ok(Severity::Warning),
-        "error" => Ok(Severity::Error),
-        other => bail!("unknown severity \"{}\"", other),
-    }
-}
-
 fn parse_authorship(value: &str) -> Result<Authorship> {
     match value {
         "human" => Ok(Authorship::Human),
@@ -901,14 +1200,17 @@ fn parse_authorship(value: &str) -> Result<Authorship> {
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
+    use crate::cli::{Cli, Commands};
     use crate::engine::fs::RealFileSystem;
+    use clap::Parser;
     use serde_json::Value;
     use std::path::PathBuf;
 
-    // A config carrying lifecycles, a directional relationship, a parent-child
-    // rule, and a relation-existence rule -- with standalone and inline comments
-    // and a non-default section order -- so the preservation tests have decor and
-    // ordering to protect.
+    // A config carrying lifecycles and a directional relationship -- with
+    // standalone and inline comments and a non-default section order -- so the
+    // preservation tests have decor and ordering to protect. It declares no
+    // `[[edges]]`, which `show_json_emits_an_empty_edge_array_when_none_are_declared`
+    // reads, and no `[[rules]]`, which strict load refuses (STORY-259).
     const SRC: &str = r#"# lazyspec configuration
 [naming]
 pattern = "{type}-{n:03}-{title}.md"  # filename template
@@ -933,24 +1235,10 @@ prefix = "STORY"
 parent_type = "rfc"
 lifecycle = { states = ["draft", "done"], edges = [{ from = "draft", to = "done" }] }
 
+# the relationship the hierarchy runs on
 [[relationships]]
 name = "implements"
 inverse = "implemented-by"
-
-# the gateable rule
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-
-[[rules]]
-name = "adrs-need-relations"
-shape = "relation-existence"
-type = "adr"
-require = "any-relation"
-severity = "error"
 "#;
 
     fn fixture(src: &str) -> (tempfile::TempDir, PathBuf, RealFileSystem) {
@@ -974,15 +1262,6 @@ severity = "error"
             .unwrap()
     }
 
-    fn rule_named<'a>(json: &'a Value, name: &str) -> &'a Value {
-        json["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["name"] == name)
-            .unwrap()
-    }
-
     // `config schema` emits parseable JSON, and the flagless call needs no project
     // state (it never touches a .lazyspec.toml).
     #[test]
@@ -993,6 +1272,24 @@ severity = "error"
             parsed.is_object(),
             "schema should be a JSON object: {parsed}"
         );
+    }
+
+    #[test]
+    fn show_json_emits_declared_edges_with_every_field() {
+        let edge = &show(&edged_src())["edges"][0];
+
+        assert_eq!(edge["name"], "stories-implement-rfcs");
+        assert_eq!(edge["from"], "story");
+        assert_eq!(edge["to"], serde_json::json!(["rfc", "spike", "bug"]));
+        assert_eq!(edge["via"], "implements");
+        assert_eq!(edge["required"], "error");
+        assert_eq!(edge["traversal"], "chain");
+    }
+
+    // Dictum 2: an agent reading `edges` should never have to branch on null.
+    #[test]
+    fn show_json_emits_an_empty_edge_array_when_none_are_declared() {
+        assert_eq!(show(SRC)["edges"], serde_json::json!([]));
     }
 
     // AC1: every type serializes with all three STORY-145 axes, and the lifecycle
@@ -1018,37 +1315,19 @@ severity = "error"
         assert_eq!(rfc["lifecycle"]["edges"][0]["to"], "review");
     }
 
-    // AC2: relationships and rules arrays serialize out, and a parent-child rule
-    // can carry require_parent_status. Guards against a future #[serde(skip)].
+    // AC2: the relationships array serializes out. Guards against a future
+    // #[serde(skip)].
+    //
+    // `rules` is not asserted here any more. Strict load refuses a config that
+    // declares any (STORY-259), so every loaded config's is empty, and an
+    // empty one is skipped by the serializer — there is no fixture that can
+    // put a rule in it to name.
     #[test]
-    fn show_json_emits_relationships_rules_and_gate() {
+    fn show_json_emits_relationships() {
         let json = show(SRC);
         assert!(json["relationships"].is_array());
-        assert!(json["rules"].is_array());
-
-        let gated = r#"[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-require_parent_status = "accepted"
-"#;
-        let json = show(gated);
-        assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "accepted"
-        );
+        assert_eq!(json["relationships"][0]["name"], "implements");
+        assert_eq!(json["relationships"][0]["inverse"], "implemented-by");
     }
 
     // AC3: add-type appends the type with the supplied fields and is idempotent
@@ -1340,7 +1619,6 @@ require_parent_status = "accepted"
                 "n",           // add an attribute? no
                 "n",           // set a parent type? no
                 "n",           // design a custom lifecycle? no
-                "n",           // gate a parent-child rule? no
             ]
             .iter()
             .map(|s| s.to_string())
@@ -1497,37 +1775,1111 @@ require_parent_status = "accepted"
         assert!(err.to_string().contains("unknown type"));
     }
 
-    // AC5: add-gate sets require_parent_status on a parent-child rule and rejects
-    // unknown rules and relation-existence targets.
+    fn add_stories_implement_rfcs(root: &Path, fs: &dyn FileSystem) -> Result<EdgeDef> {
+        run_add_edge(
+            root,
+            fs,
+            "stories-implement-rfcs",
+            &["story".to_string()],
+            &["rfc".to_string(), "story".to_string()],
+            &["implements".to_string()],
+            Some("error"),
+            Some("chain"),
+        )
+    }
+
+    // STORY-261 AC1: add-edge appends an `[[edges]]` row carrying every flag,
+    // and the config it writes loads with that row in it.
     #[test]
-    fn add_gate_sets_require_parent_status() {
+    fn add_edge_writes_a_row_carrying_every_flag() {
         let (_dir, path, fs) = fixture(SRC);
-        run_add_gate(path.parent().unwrap(), &fs, "stories-need-rfcs", "accepted").unwrap();
-        let json = show(&std::fs::read_to_string(&path).unwrap());
+
+        let written = add_stories_implement_rfcs(path.parent().unwrap(), &fs).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let loaded = Config::parse(&after).unwrap();
+        assert_eq!(loaded.edges, vec![written]);
+        let edge = &loaded.edges[0];
+        assert_eq!(edge.name, "stories-implement-rfcs");
+        assert_eq!(edge.from, TypeSelector::Types(vec!["story".to_string()]));
         assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "accepted"
+            edge.to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
+        assert_eq!(edge.required, Some(Severity::Error));
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+        assert!(
+            after.contains("# filename template"),
+            "the fixture's comments must survive: {after}"
+        );
+    }
+
+    // A second row joins the table rather than replacing the first: the writer
+    // reconciles rows by `name`, so a differently named row is an append.
+    #[test]
+    fn add_edge_appends_a_second_row_beside_the_first() {
+        let (_dir, path, fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        add_stories_implement_rfcs(root, &fs).unwrap();
+
+        run_add_edge(
+            root,
+            &fs,
+            "rfcs-relate-to-stories",
+            &["rfc".to_string()],
+            &["story".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let edges = Config::parse(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .edges;
+        let names: Vec<&str> = edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["stories-implement-rfcs", "rfcs-relate-to-stories"]);
+        assert_eq!(edges[0].required, Some(Severity::Error));
+        // Absent stays absent: the second row states no requiredness at all.
+        assert_eq!(edges[1].required, None);
+        assert_eq!(edges[1].traversal, None);
+    }
+
+    // A row is addressed by its name and the writer reconciles by it, so a
+    // second row under a live name would silently rewrite the first.
+    #[test]
+    fn add_edge_rejects_a_duplicate_name_without_writing() {
+        let (_dir, path, fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        add_stories_implement_rfcs(root, &fs).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = run_add_edge(
+            root,
+            &fs,
+            "stories-implement-rfcs",
+            &["story".to_string()],
+            &["rfc".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("stories-implement-rfcs") && err.contains("already"),
+            "the refusal must name the live row: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused add-edge must leave the config alone"
+        );
+    }
+
+    // `--to '*'` is the wildcard position, which is written as a bare string:
+    // `to = ["*"]` is a wildcard inside a list, which strict load refuses.
+    #[test]
+    fn add_edge_writes_a_wildcard_target_as_a_bare_string() {
+        let (_dir, path, fs) = fixture(SRC);
+
+        run_add_edge(
+            path.parent().unwrap(),
+            &fs,
+            "rfcs-relate-to-anything",
+            &["rfc".to_string()],
+            &["*".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains(r#"to = "*""#), "got: {after}");
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Any
+        );
+    }
+
+    // Repeated flags are the one place `["story", "*"]` can be assembled, and
+    // it is neither a wildcard nor a set of names. Refused with the config
+    // untouched, rather than written for the next load to reject.
+    #[test]
+    fn add_edge_rejects_a_wildcard_mixed_with_type_names() {
+        let (_dir, path, fs) = fixture(SRC);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = run_add_edge(
+            path.parent().unwrap(),
+            &fs,
+            "mixed-targets",
+            &["rfc".to_string()],
+            &["story".to_string(), "*".to_string()],
+            &["implements".to_string()],
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("--to") && rendered.contains('*'),
+            "the refusal must name the flag that assembled it: {rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused add-edge must leave the config alone"
+        );
+    }
+
+    // STORY-261 AC4: the result object carries the row itself, spelled exactly
+    // as `config --json` spells it -- two spellings of one row is how the
+    // command's answer and the config's answer drift.
+    #[test]
+    fn add_edge_json_carries_the_row_config_show_reports() {
+        let (_dir, path, fs) = fixture(SRC);
+        let written = add_stories_implement_rfcs(path.parent().unwrap(), &fs).unwrap();
+
+        let envelope: Value = serde_json::from_str(&run_add_edge_json(&written).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-added");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        let shown = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(envelope["edge"], shown["edges"][0]);
+    }
+
+    // The types the `[[edges]]` fixtures below name, beyond the `rfc` and
+    // `story` `SRC` already declares.
+    const EDGE_TYPES: &str = r#"
+[[types]]
+name = "spike"
+plural = "spikes"
+dir = "docs/spikes"
+prefix = "SPIKE"
+lifecycle = { states = ["draft"], edges = [] }
+
+[[types]]
+name = "bug"
+plural = "bugs"
+dir = "docs/bugs"
+prefix = "BUG"
+lifecycle = { states = ["draft"], edges = [] }
+"#;
+
+    // The row every edge test addresses, decorated both ways a block can be: a
+    // standalone comment above it and an inline comment on a key inside it, so
+    // a mutation has decor to lose. It states all six fields, which is what
+    // lets `show_json_emits_declared_edges_with_every_field` read it too.
+    const EDGE_BLOCK: &str = r#"
+# the edge the show, set-edge and remove-edge tests address
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc", "spike", "bug"]  # the target set
+via = "implements"
+required = "error"
+traversal = "chain"
+"#;
+
+    // Neighbours for [`EDGE_BLOCK`], each decorated too, so removing the middle
+    // of three rows has comments either side of it to leave alone.
+    const EDGE_BLOCK_BEFORE: &str = r#"
+# the row above the one that goes
+[[edges]]
+name = "rfcs-implement-rfcs"
+from = "rfc"
+to = "rfc"  # a superseding RFC
+via = "implements"
+"#;
+
+    const EDGE_BLOCK_AFTER: &str = r#"
+# the row below the one that goes
+[[edges]]
+name = "bugs-implement-stories"
+from = "bug"
+to = "story"
+via = "implements"
+traversal = "related"
+"#;
+
+    // --- STORY-261 AC7: the wizard's edge collector ---
+
+    fn collect_scripted_edge(config: &Config, answers: &[&str]) -> Result<EdgeDef> {
+        let mut prompter = ScriptedPrompter::new(answers.iter().map(|s| s.to_string()).collect());
+        collect_edge(config, &mut prompter)
+    }
+
+    // The five answers -- source, targets, relationships, requiredness,
+    // traversal -- become the row they describe, under a name generated from the
+    // plurals of the types it names.
+    #[test]
+    fn collect_edge_builds_the_row_its_answers_describe() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge =
+            collect_scripted_edge(&config, &["story", "rfc", "implements", "warning", "chain"])
+                .unwrap();
+
+        assert_eq!(edge.name, "stories-to-rfcs");
+        assert_eq!(edge.from, TypeSelector::Types(vec!["story".to_string()]));
+        assert_eq!(edge.to, TypeSelector::Types(vec!["rfc".to_string()]));
+        assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
+        assert_eq!(edge.required, Some(Severity::Warning));
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+    }
+
+    // `to` is a set: several targets in one answer make one row, which is the
+    // disjunction ADR-030 gives the position, not one row per member.
+    #[test]
+    fn collect_edge_reads_several_targets_as_one_set() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "rfc,story", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            edge.to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(edge.name, "stories-to-rfcs-and-stories");
+    }
+
+    // `none` on either optional writes no key at all, which is the answer a new
+    // project has a basis for: an absent `required` demands nothing and an
+    // absent `traversal` claims no role.
+    #[test]
+    fn collect_edge_leaves_both_optionals_unset_when_declined() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "none", "none"])
+            .unwrap();
+
+        assert_eq!(edge.required, None);
+        assert_eq!(edge.traversal, None);
+    }
+
+    // ADR-031's `"*"` is a whole position rather than a member of a set, and the
+    // multi-chooser cannot say so, so the mix is refused where it is assembled
+    // and the prompt re-asked. The lone wildcard that follows is the wildcard.
+    #[test]
+    fn collect_edge_re_asks_when_the_target_mixes_the_wildcard_with_a_name() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "*,rfc", "*", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(edge.to, TypeSelector::Any);
+        assert_eq!(edge.name, "stories-to-anything");
+    }
+
+    // A target the project does not declare re-asks too: such a row fails strict
+    // load, and the wizard writes its whole config without reading it back.
+    #[test]
+    fn collect_edge_re_asks_when_a_target_names_no_declared_type() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(
+            &config,
+            &["story", "spike", "rfc", "implements", "none", "none"],
+        )
+        .unwrap();
+
+        assert_eq!(edge.to, TypeSelector::Types(vec!["rfc".to_string()]));
+    }
+
+    // A DAG no row gives a role to walks nothing, so `chain` is the default
+    // offered while that is true. Requiredness is unset by default regardless.
+    #[test]
+    fn collect_edge_offers_chain_while_no_declared_row_walks() {
+        let config = Config::parse(SRC).unwrap();
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "", ""]).unwrap();
+
+        assert_eq!(edge.traversal, Some(Traversal::Chain));
+        assert_eq!(edge.required, None);
+    }
+
+    // Once some row walks, the default goes back to unset: absence is the safe
+    // answer, and a second role guessed for the user rewires the walks.
+    #[test]
+    fn collect_edge_offers_no_traversal_once_a_declared_row_walks() {
+        let mut config = Config::parse(SRC).unwrap();
+        config.edges = vec![EdgeDef {
+            name: "implements-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["implements".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        }];
+
+        let edge = collect_scripted_edge(&config, &["story", "rfc", "implements", "", ""]).unwrap();
+
+        assert_eq!(edge.traversal, None);
+    }
+
+    // Two rows sharing a name is a config that does not load, so the generated
+    // name steps aside for one the table already carries.
+    #[test]
+    fn collect_edge_names_a_second_row_between_the_same_types_apart() {
+        let mut config = Config::parse(SRC).unwrap();
+        let answers = ["story", "rfc", "implements", "none", "none"];
+
+        let first = collect_scripted_edge(&config, &answers).unwrap();
+        config.edges.push(first.clone());
+        let second = collect_scripted_edge(&config, &answers).unwrap();
+
+        assert_eq!(first.name, "stories-to-rfcs");
+        assert_eq!(second.name, "stories-to-rfcs-2");
+    }
+
+    // `SRC` plus the vocabulary and one decorated `[[edges]]` row.
+    fn edged_src() -> String {
+        format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK}")
+    }
+
+    // [`edged_src`] with a decorated row either side of the addressed one.
+    fn three_edged_src() -> String {
+        format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK}{EDGE_BLOCK_AFTER}")
+    }
+
+    fn set_edge(root: &Path, fs: &dyn FileSystem, edit: EdgeEdit) -> Result<EdgeDef> {
+        run_set_edge(root, fs, "stories-implement-rfcs", edit)
+    }
+
+    fn owned(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn names(values: &[&str]) -> Option<Vec<String>> {
+        Some(owned(values))
+    }
+
+    // The lines that differ between two renderings of one file, paired
+    // old-to-new. An edit that touches one key shows up here as one pair; a
+    // dropped comment or a reordered block shows up as several.
+    fn changed_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "an edit that adds or removes a line cannot be compared line-for-line:\n{after}"
+        );
+        before
+            .lines()
+            .zip(after.lines())
+            .filter(|(old, new)| old != new)
+            .collect()
+    }
+
+    // STORY-261 AC2: `set-edge` merges rather than replaces, so a lone
+    // `--required` leaves every other field of the row -- and every comment in
+    // the file, which a reparse could not tell you had been dropped -- alone.
+    #[test]
+    fn set_edge_changes_only_the_field_it_was_given() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.required, Some(Severity::Warning));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            changed_lines(&src, &after),
+            [(r#"required = "error""#, r#"required = "warning""#)],
+            "got: {after}"
+        );
+        let loaded = Config::parse(&after).unwrap();
+        assert_eq!(loaded.edges, vec![updated]);
+    }
+
+    // STORY-261 AC2 the other way round: the merge is per-field, not per-kind,
+    // so a call naming three of the six fields lands all three and still leaves
+    // the rest -- and the file -- alone. `traversal` is set to a value rather
+    // than unset, which the tests below cover, because the two spellings write
+    // through different arms.
+    #[test]
+    fn set_edge_lands_every_field_it_was_given_in_one_call() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                from: names(&["bug"]),
+                via: names(&[WILDCARD]),
+                traversal: FieldEdit::Set("related".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.from, TypeSelector::Types(vec!["bug".to_string()]));
+        assert_eq!(updated.via, RelSelector::Any);
+        assert_eq!(updated.traversal, Some(Traversal::Related));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            changed_lines(&src, &after),
+            [
+                (r#"from = "story""#, r#"from = "bug""#),
+                (r#"via = "implements""#, r#"via = "*""#),
+                (r#"traversal = "chain""#, r#"traversal = "related""#),
+            ],
+            "got: {after}"
+        );
+        assert_eq!(Config::parse(&after).unwrap().edges, vec![updated]);
+    }
+
+    // The target set replaces; it does not accumulate. Shrinking it to one name
+    // also changes the TOML's shape, since a one-member set re-emits bare.
+    #[test]
+    fn set_edge_shrinking_the_target_set_drops_the_members_not_named() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(r#"to = "rfc"  # the target set"#),
+            "the set re-emits bare and keeps the key's own comment: {after}"
+        );
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string()])
         );
     }
 
     #[test]
-    fn add_gate_rejects_unknown_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let err = run_add_gate(path.parent().unwrap(), &fs, "nope", "accepted").unwrap_err();
-        assert!(err.to_string().contains("unknown rule"));
+    fn set_edge_growing_the_target_set_re_emits_it_as_a_list() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let root = path.parent().unwrap();
+        set_edge(
+            root,
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        set_edge(
+            root,
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc", "spike"]),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains(r#"to = ["rfc", "spike"]"#), "got: {after}");
+        assert_eq!(
+            Config::parse(&after).unwrap().edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string(), "spike".to_string()])
+        );
+    }
+
+    // Unsetting is its own spelling, because omitting `--required` already
+    // means "leave it". `required` is skipped when absent, so removing the key
+    // is observable in the file rather than written back as a default.
+    #[test]
+    fn set_edge_no_required_removes_the_key_rather_than_defaulting_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.required, None);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("required ="), "got: {after}");
+        assert_eq!(Config::parse(&after).unwrap().edges[0].required, None);
     }
 
     #[test]
-    fn add_gate_rejects_relation_existence_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let err = run_add_gate(
+    fn set_edge_no_traversal_removes_the_key_rather_than_defaulting_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        set_edge(
             path.parent().unwrap(),
             &fs,
-            "adrs-need-relations",
-            "accepted",
+            EdgeEdit {
+                traversal: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("relation-existence"));
+        .unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("traversal ="), "got: {after}");
+        assert_eq!(Config::parse(&after).unwrap().edges[0].traversal, None);
+    }
+
+    // A name that addresses no row is a CLI-argument error, not a config-
+    // validity one, so it reads like `set-lifecycle`'s unknown type.
+    #[test]
+    fn set_edge_rejects_an_unknown_name_without_writing() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_set_edge(
+            path.parent().unwrap(),
+            &fs,
+            "stories-implement-spikes",
+            EdgeEdit {
+                required: FieldEdit::Unset,
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("unknown edge") && err.contains("stories-implement-spikes"),
+            "the refusal must name the row asked for: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // A bad severity is refused before anything reaches disk, so the row keeps
+    // the severity it had rather than half of the edit.
+    #[test]
+    fn set_edge_rejects_an_unknown_severity_without_writing() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                to: names(&["rfc"]),
+                required: FieldEdit::Set("nonsense".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("nonsense"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // STORY-261 AC4: the envelope carries the row after the edit, spelled the
+    // way `config --json` spells it.
+    #[test]
+    fn set_edge_json_carries_the_row_config_show_reports() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let updated = set_edge(
+            path.parent().unwrap(),
+            &fs,
+            EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+
+        let envelope: Value = serde_json::from_str(&run_set_edge_json(&updated).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-updated");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        let shown = show(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(envelope["edge"], shown["edges"][0]);
+    }
+
+    // The flag set is the contract (convention §"CLI Patterns"). A row's name
+    // is its address, and renaming it through the writer is remove-old +
+    // append-new -- so `set-edge` offers no `--name` and clap refuses it.
+    #[test]
+    fn set_edge_offers_no_rename_flag() {
+        let parsed = Cli::try_parse_from([
+            "lazyspec",
+            "config",
+            "set-edge",
+            "stories-implement-rfcs",
+            "--name",
+            "stories-implement-anything",
+        ]);
+
+        assert!(parsed.is_err(), "set-edge must not accept a rename");
+    }
+
+    // An empty target set is a config the loader refuses, and it is unreachable
+    // here: each `--to` occurrence takes a value, so `--to` alone is a parse
+    // error and an absent `--to` means "leave the set alone". Confirmed rather
+    // than guarded (ITERATION-393 §Out of scope).
+    #[test]
+    fn set_edge_cannot_be_given_an_empty_target_set() {
+        let parsed = Cli::try_parse_from([
+            "lazyspec",
+            "config",
+            "set-edge",
+            "stories-implement-rfcs",
+            "--to",
+        ]);
+
+        assert!(parsed.is_err(), "`--to` with no value must not parse");
+        let absent =
+            Cli::try_parse_from(["lazyspec", "config", "set-edge", "stories-implement-rfcs"])
+                .unwrap();
+        let Some(Commands::Config {
+            command: Some(ConfigCommand::SetEdge { to, .. }),
+            ..
+        }) = absent.command
+        else {
+            panic!("expected config set-edge");
+        };
+        assert_eq!(to, None);
+    }
+
+    // STORY-261 AC3: the removed row goes and nothing else moves. Asserting the
+    // whole file rather than a substring is the point -- a dropped comment on a
+    // neighbour, or a blank line the writer invented, is invisible to a reparse
+    // and shows up here.
+    #[test]
+    fn remove_edge_drops_the_middle_row_and_leaves_the_rest_byte_identical() {
+        let (_dir, path, fs) = fixture(&three_edged_src());
+
+        let removed =
+            run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        assert_eq!(removed.name, "stories-implement-rfcs");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK_AFTER}")
+        );
+    }
+
+    // A config declaring no edges is legal, so the last row can go -- and the
+    // table goes with it rather than staying behind as an empty
+    // array-of-tables. The TOML loses the key; `config --json` keeps the field,
+    // because an agent reading `edges` should never have to branch on null.
+    #[test]
+    fn remove_edge_removing_the_last_row_takes_the_edges_table_with_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            format!("{SRC}{EDGE_TYPES}"),
+            "the emptied table leaves no trace of itself"
+        );
+        assert!(Config::parse(&after).unwrap().edges.is_empty());
+        assert_eq!(show(&after)["edges"], serde_json::json!([]));
+    }
+
+    // A name that addresses no row is a CLI-argument error, not a config one,
+    // and a removal that matched nothing must not rewrite the file at all.
+    #[test]
+    fn remove_edge_rejects_an_unknown_name_without_writing() {
+        let src = three_edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-spikes")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("unknown edge") && err.contains("stories-implement-spikes"),
+            "the refusal must name the row asked for: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // STORY-261 AC4: the envelope carries the row as it stood, spelled the way
+    // `config --json` spelled it while it was there. Dictum 2 -- an agent cannot
+    // re-read a row that is gone, so removal is the one mutation whose result
+    // has to carry the whole thing.
+    #[test]
+    fn remove_edge_json_carries_the_row_config_show_reported() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+        let removed =
+            run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs").unwrap();
+
+        let envelope: Value =
+            serde_json::from_str(&run_remove_edge_json(&removed).unwrap()).unwrap();
+
+        assert_eq!(envelope["action"], "edge-removed");
+        assert_eq!(envelope["name"], "stories-implement-rfcs");
+        assert_eq!(envelope["edge"], show(&src)["edges"][0]);
+    }
+
+    // Two rows under one name is a config that does not load, so `remove-edge`
+    // reports the collision rather than choosing which of them to drop -- the
+    // parse happens before the removal, and the file is left as it was. Were
+    // the guard ever to loosen, `run_remove_edge` retains by name and both
+    // would go.
+    #[test]
+    fn remove_edge_refuses_a_config_whose_rows_share_a_name() {
+        let src = format!("{SRC}{EDGE_TYPES}{EDGE_BLOCK}{EDGE_BLOCK}");
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = run_remove_edge(path.parent().unwrap(), &fs, "stories-implement-rfcs")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("both named") && err.contains("stories-implement-rfcs"),
+            "the loader's own collision error must come through: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    // The writer inserting or leaving whitespace a human would not is invisible
+    // to every other assertion on this story, so the round trip is asserted on
+    // the bytes: a config that declared no `[[edges]]` is returned to exactly
+    // what it was, table header and all.
+    #[test]
+    fn add_edge_then_remove_edge_returns_the_file_to_what_it_was() {
+        let src = format!("{SRC}{EDGE_TYPES}");
+        let (_dir, path, fs) = fixture(&src);
+        let root = path.parent().unwrap();
+
+        add_stories_implement_rfcs(root, &fs).unwrap();
+        run_remove_edge(root, &fs, "stories-implement-rfcs").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+    }
+
+    /// One `[[edges]]` row named `x`, spelled out rather than rendered. The
+    /// refusal table parses a config built from these to learn the message it
+    /// expects, so the expectation cannot agree with a mistake in the writer.
+    fn appended_row(keys: &[&str]) -> String {
+        format!("\n[[edges]]\nname = \"x\"\n{}\n", keys.join("\n"))
+    }
+
+    // STORY-261 AC5: an edge mutation whose result would not load is refused
+    // with the loader's own message, and the file it would have written is left
+    // byte-identical.
+    //
+    // The message is never spelled here. Each case asserts against
+    // `Config::parse`'s error for a config this test wrote out by hand, because
+    // a literal in the test would be the second spelling of the message that
+    // the guard exists to stop the CLI from growing.
+    //
+    // `remove-edge` has no case in this table and can have none: dropping a row
+    // takes constraints and overlaps away, so no removal can introduce a
+    // violation for the guard to catch. Nor can `via` absent (the loader error
+    // ITERATION-395 names alongside these) be reached -- `--via` is
+    // `required = true` on `add-edge`, and a config already missing it fails the
+    // `Config::parse` every mutator runs on the read.
+    #[test]
+    fn an_edge_mutation_that_would_not_load_is_refused_with_the_loaders_message() {
+        type Mutate = fn(&Path, &dyn FileSystem) -> Result<()>;
+
+        let base = three_edged_src();
+        let cases: [(&str, Mutate, String); 5] = [
+            (
+                "a `to` naming a type no `[[types]]` block declares",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["nonsense"]),
+                        &owned(&["implements"]),
+                        None,
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "story""#,
+                        r#"to = "nonsense""#,
+                        r#"via = "implements""#,
+                    ])
+                ),
+            ),
+            (
+                "a `via` naming a relationship no `[[relationships]]` block declares",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["rfc"]),
+                        &owned(&["nonsense"]),
+                        None,
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[r#"from = "story""#, r#"to = "rfc""#, r#"via = "nonsense""#,])
+                ),
+            ),
+            (
+                "`required` on a wildcard `from`",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["*"]),
+                        &owned(&["rfc"]),
+                        &owned(&["implements"]),
+                        Some("error"),
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "*""#,
+                        r#"to = "rfc""#,
+                        r#"via = "implements""#,
+                        r#"required = "error""#,
+                    ])
+                ),
+            ),
+            (
+                "two equally specific rows demanding the same edge at different severities",
+                |root, fs| {
+                    run_add_edge(
+                        root,
+                        fs,
+                        "x",
+                        &owned(&["story"]),
+                        &owned(&["rfc"]),
+                        &owned(&["implements"]),
+                        Some("warning"),
+                        None,
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{base}{}",
+                    appended_row(&[
+                        r#"from = "story""#,
+                        r#"to = "rfc""#,
+                        r#"via = "implements""#,
+                        r#"required = "warning""#,
+                    ])
+                ),
+            ),
+            (
+                "an edit that moves one row onto another and disagrees about traversal",
+                |root, fs| {
+                    run_set_edge(
+                        root,
+                        fs,
+                        "bugs-implement-stories",
+                        EdgeEdit {
+                            from: names(&["story"]),
+                            to: names(&["rfc"]),
+                            ..EdgeEdit::default()
+                        },
+                    )
+                    .map(|_| ())
+                },
+                format!(
+                    "{SRC}{EDGE_TYPES}{EDGE_BLOCK_BEFORE}{EDGE_BLOCK}{}",
+                    EDGE_BLOCK_AFTER
+                        .replace(r#"from = "bug""#, r#"from = "story""#)
+                        .replace(r#"to = "story""#, r#"to = "rfc""#)
+                ),
+            ),
+        ];
+
+        for (case, mutate, equivalent) in cases {
+            let (_dir, path, fs) = fixture(&base);
+
+            let err = mutate(path.parent().unwrap(), &fs)
+                .expect_err(case)
+                .to_string();
+
+            let expected = Config::parse(&equivalent).expect_err(case).to_string();
+            assert_eq!(err, expected, "{case}: the loader's own message");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                base,
+                "{case}: a refused mutation leaves the file alone"
+            );
+        }
+    }
+
+    // The counterweight to the refusal table: a guard that refused everything
+    // would satisfy every case above. Each mutator makes one valid change to the
+    // same file in turn, so a guard that rejected any of them would fail here,
+    // and the file is read back through the loader at the end.
+    #[test]
+    fn a_valid_change_still_writes_on_every_mutator() {
+        let (_dir, path, fs) = fixture(&edged_src());
+        let root = path.parent().unwrap();
+
+        add_note_type(root, &fs, None).unwrap();
+        run_set_lifecycle(
+            root,
+            &fs,
+            "note",
+            &owned(&["draft", "done"]),
+            &owned(&["draft:done"]),
+        )
+        .unwrap();
+        run_add_edge(
+            root,
+            &fs,
+            "notes-implement-rfcs",
+            &owned(&["note"]),
+            &owned(&["rfc"]),
+            &owned(&["implements"]),
+            None,
+            None,
+        )
+        .unwrap();
+        run_set_edge(
+            root,
+            &fs,
+            "notes-implement-rfcs",
+            EdgeEdit {
+                required: FieldEdit::Set("warning".to_string()),
+                ..EdgeEdit::default()
+            },
+        )
+        .unwrap();
+        run_remove_edge(root, &fs, "stories-implement-rfcs").unwrap();
+
+        let loaded = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let note = loaded
+            .type_by_name("note")
+            .expect("add-type wrote the type");
+        assert_eq!(note.lifecycle.states, ["draft", "done"]);
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["notes-implement-rfcs"]);
+        assert_eq!(loaded.edges[0].required, Some(Severity::Warning));
+    }
+
+    /// `config add-type note notes docs/notes NOTE [--numbering N]`, the only
+    /// two shapes the guard tests need.
+    fn add_note_type(root: &Path, fs: &dyn FileSystem, numbering: Option<&str>) -> Result<()> {
+        run_add_type(
+            root,
+            fs,
+            "note",
+            "notes",
+            "docs/notes",
+            "NOTE",
+            None,
+            None,
+            false,
+            None,
+            numbering,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+    }
+
+    // `add-type` writes through the same guard, which is the half of the hole
+    // that predates STORY-261: it too rendered and wrote with nothing between.
+    //
+    // `--parent-type nonsense` -- the case ITERATION-395 names -- is *not*
+    // refused, and this guard cannot refuse it: nothing in `Config::parse` reads
+    // `parent_type` against the declared types, so there is no loader message to
+    // surface. A missing check is a missing loader error, not a hole in the
+    // guard, and giving the loader one is not this slice's work.
+    #[test]
+    fn add_type_that_would_not_load_is_refused_with_the_loaders_message() {
+        let src = edged_src();
+        let (_dir, path, fs) = fixture(&src);
+
+        let err = add_note_type(path.parent().unwrap(), &fs, Some("sqids"))
+            .unwrap_err()
+            .to_string();
+
+        let equivalent = format!(
+            "{src}\n[[types]]\nname = \"note\"\nplural = \"notes\"\ndir = \"docs/notes\"\nprefix = \"NOTE\"\nnumbering = \"sqids\"\n"
+        );
+        assert_eq!(err, Config::parse(&equivalent).unwrap_err().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            src,
+            "a refused add-type leaves the file alone"
+        );
+    }
+
+    // The wildcard `parent_type` half of the note above, pinned so the day the
+    // loader grows the check, this test is the one that says the guard now
+    // surfaces it. The missing check is tracked as BUG-018.
+    #[test]
+    fn an_unknown_parent_type_is_written_because_the_loader_has_no_check_for_it() {
+        let (_dir, path, fs) = fixture(&edged_src());
+
+        run_add_type(
+            path.parent().unwrap(),
+            &fs,
+            "note",
+            "notes",
+            "docs/notes",
+            "NOTE",
+            None,
+            Some("nonsense"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let loaded = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.type_by_name("note").unwrap().parent_type.as_deref(),
+            Some("nonsense")
+        );
     }
 
     // AC6: each mutator preserves comments and the section order of untouched
@@ -1560,15 +2912,20 @@ require_parent_status = "accepted"
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# filename template"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the gateable rule"));
+        assert!(after.contains("# the relationship the hierarchy runs on"));
         // The new block is appended to the [[types]] array (after the last type,
-        // before [[relationships]]); the relationship comment still follows it.
+        // before [[relationships]]); the relationship comment still precedes it.
         let spike_at = after.find(r#"name = "spike""#).unwrap();
         let rels_at = after.find("[[relationships]]").unwrap();
         assert!(spike_at < rels_at, "new type sits inside the types array");
-        // Untouched blocks keep their order: types -> relationships -> rules.
+        // Untouched blocks keep their order: types -> relationships.
         assert!(after.find("# document types follow").unwrap() < rels_at);
-        assert!(rels_at < after.find("# the gateable rule").unwrap());
+        assert!(
+            after
+                .find("# the relationship the hierarchy runs on")
+                .unwrap()
+                < rels_at
+        );
         Config::parse(&after).unwrap();
     }
 
@@ -1586,29 +2943,13 @@ require_parent_status = "accepted"
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# lazyspec configuration"));
         assert!(after.contains("# document types follow"));
-        assert!(after.contains("# the gateable rule"));
+        assert!(after.contains("# the relationship the hierarchy runs on"));
         // The other type's lifecycle is untouched.
         assert!(after
             .contains(r#"states = ["draft", "done"], edges = [{ from = "draft", to = "done" }]"#));
         let json = show(&after);
         // story keeps its original lifecycle.
         assert_eq!(type_named(&json, "story")["lifecycle"]["states"][1], "done");
-        Config::parse(&after).unwrap();
-    }
-
-    #[test]
-    fn add_gate_preserves_comments_and_only_changes_one_rule() {
-        let (_dir, path, fs) = fixture(SRC);
-        let before = std::fs::read_to_string(&path).unwrap();
-        run_add_gate(path.parent().unwrap(), &fs, "stories-need-rfcs", "accepted").unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.contains("# lazyspec configuration"));
-        assert!(after.contains("# the gateable rule"));
-        // Exactly one line was added (the require_parent_status key).
-        assert_eq!(after.lines().count(), before.lines().count() + 1);
-        assert!(after.contains(r#"require_parent_status = "accepted""#));
-        // The relation-existence rule is untouched.
-        assert!(after.contains(r#"require = "any-relation""#));
         Config::parse(&after).unwrap();
     }
 
@@ -1960,7 +3301,7 @@ require_parent_status = "accepted"
         let (_dir, path, fs) = fixture(SRC);
         let mut prompter = scripted(&[
             "widget", "widgets", "", "", "", "", "", "", "", // core fields
-            "n", "n", "n", "n", // attributes / parent / lifecycle / gate declined
+            "n", "n", "n", // attributes / parent / lifecycle declined
         ]);
         run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
 
@@ -1984,7 +3325,7 @@ require_parent_status = "accepted"
             "y",     // set a parent type
             "bogus", // not a defined type -> re-ask
             "rfc",   // valid existing type
-            "n", "n", // lifecycle / gate declined
+            "n",     // lifecycle declined
         ]);
         run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
 
@@ -2000,41 +3341,9 @@ require_parent_status = "accepted"
         );
     }
 
-    // STORY-226 AC4: gating a parent-child rule with a status the parent's
-    // lifecycle lacks is rejected and re-asked; the valid status is written.
-    #[test]
-    fn interactive_add_type_gate_reprompts_unknown_status() {
-        let (_dir, path, fs) = fixture(SRC);
-        let mut prompter = scripted(&[
-            "widget",
-            "widgets",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "", // core fields
-            "n",
-            "n",
-            "n",                 // attributes / parent / lifecycle declined
-            "y",                 // gate a parent-child rule
-            "stories-need-rfcs", // the only parent-child rule (parent = rfc)
-            "shipped",           // rfc lifecycle lacks `shipped` -> re-ask
-            "review",            // rfc lifecycle has `review`
-        ]);
-        run_add_type_interactive(path.parent().unwrap(), &fs, &mut prompter).unwrap();
-
-        let json = show(&std::fs::read_to_string(&path).unwrap());
-        assert_eq!(
-            rule_named(&json, "stories-need-rfcs")["require_parent_status"],
-            "review"
-        );
-    }
-
     // STORY-226 AC5: the full interactive flow produces a byte-identical config to
-    // the equivalent add-type(+attrs+parent) -> set-lifecycle -> add-gate flag
-    // chain, and the result reparses cleanly.
+    // the equivalent add-type(+attrs+parent) -> set-lifecycle flag chain, and the
+    // result reparses cleanly.
     #[test]
     fn interactive_full_flow_matches_flag_chain() {
         let (_dir_a, path_a, fs_a) = fixture(SRC);
@@ -2057,9 +3366,6 @@ require_parent_status = "accepted"
             "draft,done",
             "draft:done",
             "", // custom lifecycle
-            "y",
-            "stories-need-rfcs",
-            "review", // gate
         ]);
         run_add_type_interactive(path_a.parent().unwrap(), &fs_a, &mut prompter).unwrap();
         let interactive_out = std::fs::read_to_string(&path_a).unwrap();
@@ -2095,7 +3401,6 @@ require_parent_status = "accepted"
             &["draft:done".to_string()],
         )
         .unwrap();
-        run_add_gate(root_b, &fs_b, "stories-need-rfcs", "review").unwrap();
         let flag_out = std::fs::read_to_string(&path_b).unwrap();
 
         assert_eq!(interactive_out, flag_out);

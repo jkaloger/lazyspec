@@ -4,17 +4,35 @@ use std::path::{Path, PathBuf};
 
 use super::Store;
 
+/// One resolved relation as the link maps hold it: the document at the far end,
+/// and the document whose frontmatter stated the relation.
+///
+/// The two are usually the obvious pair, but they come apart:
+/// [`Store::propagate_parent_links`] lends a parent's links to its nested
+/// children, so a child's `forward_links` carry relations the child never
+/// stated. `declared_by` is recorded at build time because a reader cannot
+/// recover it -- an inherited link is indistinguishable from an own one once
+/// pushed onto the same vector -- and the edge that has to admit a link is the
+/// declaring document's (ADR-034).
+#[derive(Debug, Clone)]
+pub struct Link {
+    pub rel_type: RelationType,
+    /// The far end: the target for a forward link, the source for a reverse one.
+    pub endpoint: PathBuf,
+    pub declared_by: PathBuf,
+}
+
 impl Store {
     pub fn related_to(&self, path: &Path) -> Vec<(&RelationType, &PathBuf)> {
         let mut results = Vec::new();
         if let Some(fwd) = self.forward_links.get(path) {
-            for (rel, target) in fwd {
-                results.push((rel, target));
+            for link in fwd {
+                results.push((&link.rel_type, &link.endpoint));
             }
         }
         if let Some(rev) = self.reverse_links.get(path) {
-            for (rel, source) in rev {
-                results.push((rel, source));
+            for link in rev {
+                results.push((&link.rel_type, &link.endpoint));
             }
         }
         results
@@ -22,25 +40,35 @@ impl Store {
 
     pub fn referenced_by(&self, path: &Path) -> Vec<(&RelationType, &PathBuf)> {
         match self.reverse_links.get(path) {
-            Some(rev) => rev.iter().map(|(rel, src)| (rel, src)).collect(),
+            Some(rev) => rev
+                .iter()
+                .map(|link| (&link.rel_type, &link.endpoint))
+                .collect(),
             None => Vec::new(),
         }
     }
 
+    /// Lends every link a parent declared to each of its nested children, so a
+    /// child inherits its parent's annotations. The lent copy keeps the parent
+    /// as `declared_by`: the child is inheriting a relation, not stating one.
     pub(super) fn propagate_parent_links(&mut self) {
         for (child_path, parent_path) in &self.parent_of {
             let Some(parent_links) = self.forward_links.get(parent_path).cloned() else {
                 continue;
             };
-            for (rel_type, target) in &parent_links {
+            for link in &parent_links {
                 self.forward_links
                     .entry(child_path.clone())
                     .or_default()
-                    .push((rel_type.clone(), target.clone()));
+                    .push(link.clone());
                 self.reverse_links
-                    .entry(target.clone())
+                    .entry(link.endpoint.clone())
                     .or_default()
-                    .push((rel_type.clone(), child_path.clone()));
+                    .push(Link {
+                        rel_type: link.rel_type.clone(),
+                        endpoint: child_path.clone(),
+                        declared_by: link.declared_by.clone(),
+                    });
             }
         }
     }
@@ -61,25 +89,26 @@ impl Store {
                 self.forward_links
                     .entry(path.clone())
                     .or_default()
-                    .push((rel.rel_type.clone(), target.clone()));
-                self.reverse_links
-                    .entry(target)
-                    .or_default()
-                    .push((rel.rel_type.clone(), path.clone()));
+                    .push(Link {
+                        rel_type: rel.rel_type.clone(),
+                        endpoint: target.clone(),
+                        declared_by: path.clone(),
+                    });
+                self.reverse_links.entry(target).or_default().push(Link {
+                    rel_type: rel.rel_type.clone(),
+                    endpoint: path.clone(),
+                    declared_by: path.clone(),
+                });
             }
         }
         self.propagate_parent_links();
     }
 
-    #[allow(clippy::type_complexity)]
     pub(super) fn build_links(
         docs: &HashMap<PathBuf, DocMeta>,
-    ) -> (
-        HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
-        HashMap<PathBuf, Vec<(RelationType, PathBuf)>>,
-    ) {
-        let mut forward_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>> = HashMap::new();
-        let mut reverse_links: HashMap<PathBuf, Vec<(RelationType, PathBuf)>> = HashMap::new();
+    ) -> (HashMap<PathBuf, Vec<Link>>, HashMap<PathBuf, Vec<Link>>) {
+        let mut forward_links: HashMap<PathBuf, Vec<Link>> = HashMap::new();
+        let mut reverse_links: HashMap<PathBuf, Vec<Link>> = HashMap::new();
 
         let id_to_path: HashMap<String, PathBuf> = docs
             .values()
@@ -91,14 +120,16 @@ impl Store {
                 let Some(target) = Self::resolve_target(&rel.target, &id_to_path) else {
                     continue;
                 };
-                forward_links
-                    .entry(path.clone())
-                    .or_default()
-                    .push((rel.rel_type.clone(), target.clone()));
-                reverse_links
-                    .entry(target)
-                    .or_default()
-                    .push((rel.rel_type.clone(), path.clone()));
+                forward_links.entry(path.clone()).or_default().push(Link {
+                    rel_type: rel.rel_type.clone(),
+                    endpoint: target.clone(),
+                    declared_by: path.clone(),
+                });
+                reverse_links.entry(target).or_default().push(Link {
+                    rel_type: rel.rel_type.clone(),
+                    endpoint: path.clone(),
+                    declared_by: path.clone(),
+                });
             }
         }
 

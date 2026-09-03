@@ -16,7 +16,7 @@ pub use app::{
 #[cfg(feature = "agent")]
 pub use forms::AgentDialog;
 pub use forms::{
-    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, FormField, LinkEditor,
-    OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
+    CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, FormField,
+    LinkEditor, OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm,
     SettingsDeleteTarget, StatusPicker, TypeKey,
 };

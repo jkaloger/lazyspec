@@ -757,10 +757,10 @@ fn test_inverse_link_refreshes_live_store_reverse_links() {
         .store
         .reverse_links_for(&std::path::PathBuf::from("docs/rfcs/RFC-001-source.md"));
     assert!(
-        rev.iter().any(
-            |(rt, p)| *rt == lazyspec::engine::document::RelationType::new("blocks")
-                && p == &std::path::PathBuf::from("docs/rfcs/RFC-002-target.md")
-        ),
+        rev.iter().any(|link| {
+            link.rel_type == lazyspec::engine::document::RelationType::new("blocks")
+                && link.endpoint == std::path::Path::new("docs/rfcs/RFC-002-target.md")
+        }),
         "viewed doc should show it is blocked by the target after an inverse link, got {rev:?}"
     );
 }

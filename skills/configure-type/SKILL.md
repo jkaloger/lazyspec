@@ -1,6 +1,6 @@
 ---
 name: configure-type
-description: Use when adding a new custom document type to a lazyspec project. Interviews the user to co-author the type's methodology -- intent, authorship, lifecycle, gates, relations -- then writes its enriched template and `[[types]]` config via the config-write CLI. One type per run.
+description: Use when adding a new custom document type to a lazyspec project. Interviews the user to co-author the type's methodology -- intent, authorship, lifecycle, relations -- then writes its enriched template and `[[types]]` config via the config-write CLI. One type per run.
 ---
 
 ```
@@ -18,11 +18,11 @@ the knowledge, you extract it and record it as (1) an enriched template and (2) 
 
 <NEVER>
 - Do NOT open or hand-edit `.lazyspec.toml`. ALL config writes go through
-  `lazyspec config add-type` / `config set-lifecycle` / `config add-gate`. The CLI
-  preserves comments and formatting; a hand edit does not. This is non-negotiable.
+  `lazyspec config add-type` / `config set-lifecycle`. The CLI preserves comments
+  and formatting; a hand edit does not. This is non-negotiable.
 - Do NOT configure more than one type per run.
 - Do NOT ask for something `lazyspec config --json` can already tell you (existing
-  type names, prefixes, dirs, relationship vocabulary, parent-child rules). Explore
+  type names, prefixes, dirs, relationship vocabulary, declared edges). Explore
   first, ask second.
 - Do NOT invent lifecycle states or relations the user did not agree to. Recommend,
   then confirm.
@@ -36,8 +36,8 @@ command, and pass `--json` when reading config. On failure, check `--help` and r
 ```d2
 Read config --json -> Interview (one axis at a time) -> Confirm summary
 Confirm summary -> Write enriched template (.lazyspec/templates/{name}.md)
-Write enriched template -> config add-type -> config set-lifecycle -> config add-gate (if gated)
-config add-gate (if gated) -> Verify with config --json -> Close out
+Write enriched template -> config add-type -> config set-lifecycle
+config set-lifecycle -> Verify with config --json -> Close out
 
 Confirm summary.shape: diamond
 Close out.shape: double_circle
@@ -49,7 +49,7 @@ Before asking anything, read the current config so you can recommend well and
 avoid collisions:
 
 ```
-lazyspec config --json | jq '{types: [.types[].name], prefixes: [.types[].prefix], dirs: [.types[].dir], relationships: .relationships, rules: .rules, templatesDir: .templates.dir}'
+lazyspec config --json | jq '{types: [.types[].name], prefixes: [.types[].prefix], dirs: [.types[].dir], relationships: .relationships, edges: .edges, templatesDir: .templates.dir}'
 ```
 
 Use this to (a) reject a name/prefix/dir that collides, (b) enumerate existing
@@ -82,9 +82,8 @@ Resolve them roughly in this order; later fields depend on earlier ones.
 | `--authorship` | yes | `human` \| `assisted` \| `generated` | Highest authoring verb: `human`→`/scaffold`, `assisted`→`/co-write`, `generated`→`/generate`. Decision/judgement docs lean `human`/`assisted`; mechanical/derived can be `generated`. |
 | lifecycle `states` | yes | list of statuses, e.g. `draft`,`review`,`done` | Per-type DAG (ADR-021). Recommend a minimal set. |
 | lifecycle `edges` | yes | `FROM:TO`; `*` as source = "from any state" | Minimal DAG connecting the states, plus a `*` edge to any terminal state (`rejected`/`superseded`). |
-| `--parent-type` | no | an existing type name | Does this live UNDER a parent (e.g. iteration under story)? Creates a parent-child rule. |
-| parent-status gate | no | a parent status (`require_parent_status`) | ONLY ask if `--parent-type` is set. Must the parent sit at a status before a child may be created? Set via `config add-gate`, which targets the parent-child RULE by name -- read the name from `config --json` (`.rules[] \| select(.shape=="parent-child")`) AFTER `add-type` creates it. |
-| relations | no | a verb from `config --json` `.relationships[].name` | Do NOT invent verbs. The parent relation is `--parent-type`; other relations are applied at authoring time, not baked per-type -- note any the user wants so the template guidance mentions them. |
+| `--parent-type` | no | an existing **singleton** type name | Containment, not linkage: this type's documents live inside the parent type's `dir` and share its store backend. The parent MUST be a singleton -- `validate` reports `ParentTypeNotSingleton` at error severity otherwise -- so this serves the umbrella case (dictums under a project convention), NOT ordinary parent/child modelling like iteration-under-story. Leave it unset for that. It creates no edge and constrains no link; a DAG constraint between two types is a separate `[[edges]]` row. |
+| relations | no | a verb from `config --json` `.relationships[].name` | Do NOT invent verbs. Relations are applied at authoring time from the `via` of an `[[edges]]` row, not baked per-type -- note any the user wants so the template guidance mentions them. |
 
 End the interview by reading back a one-screen summary of every field and getting
 explicit confirmation before writing anything.
@@ -142,13 +141,6 @@ Write ALL config through these subcommands, in this order. Never touch the TOML 
      --edge <FROM:TO> --edge <FROM:TO> [--edge ...]
    ```
 
-3. **Set the parent-status gate** (ONLY if the type has a parent and the user wanted a gate).
-   `add-gate` gates an existing parent-child rule by its NAME -- get the rule name from
-   `config --json` after step 1 created it:
-   ```
-   lazyspec config add-gate <rule-name> --status <required-parent-status>
-   ```
-
 ## Close the loop
 
 1. **Verify** the type landed with every axis populated:
@@ -156,18 +148,13 @@ Write ALL config through these subcommands, in this order. Never touch the TOML 
    lazyspec config --json | jq '.types[] | select(.name=="<name>")'
    ```
    Confirm `intent`, `authorship`, and `lifecycle` (states + edges) match what was
-   supplied. If a gate was set, confirm the rule's `require_parent_status`:
-   ```
-   lazyspec config --json | jq '.rules[] | select(.name=="<rule-name>")'
-   ```
+   supplied.
 
 2. **Verification checklist** -- all must hold:
    - [ ] `.lazyspec/templates/{name}.md` written, with an `<!-- intent: ... -->`
          header and a `<!-- guidance: ... -->` comment per section.
    - [ ] The type appears in `config --json` with `intent`, `authorship`, and
          `lifecycle` (states + edges) populated as supplied.
-   - [ ] If parented + gated: the parent-child rule shows the expected
-         `require_parent_status`.
    - [ ] No direct edit of `.lazyspec.toml` occurred -- every write went through `config`.
    - [ ] Exactly ONE type was configured.
 

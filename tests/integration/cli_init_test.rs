@@ -1,7 +1,9 @@
 use lazyspec::engine::config::{
-    default_rules, starter_relationships, starter_types, Config, RelationshipDef, Traversal,
+    starter_edges, starter_relationships, starter_types, Config, RelSelector, RelationshipDef,
+    Traversal, TypeSelector,
 };
 use lazyspec::engine::store::Store;
+use lazyspec::engine::validation::ValidationIssue;
 use std::fs;
 use tempfile::TempDir;
 
@@ -110,7 +112,7 @@ fn init_related_to_is_symmetric_no_inverse() {
             name: "related-to".to_string(),
             inverse: None,
             github_native: None,
-            traversal: Some(Traversal::Related),
+            traversal: None,
         },
         "related-to must be symmetric (no inverse)"
     );
@@ -130,9 +132,12 @@ fn init_related_to_is_symmetric_no_inverse() {
     );
 }
 
-// AC3: init emits the 3 historical rules, byte-equal (by value) to default_rules().
+// STORY-259 AC4: init states the three starter constraints and the hierarchy
+// they hang on as `[[edges]]`, and says nothing at all about `[[rules]]` -- not
+// a block, not a bare `rules = []` key (which would collide with any `[[rules]]`
+// header appended after it).
 #[test]
-fn init_writes_rules_block() {
+fn init_writes_edges_and_no_rules() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
@@ -140,16 +145,119 @@ fn init_writes_rules_block() {
 
     let config = parse_written_config(root);
     assert_eq!(
-        config.rules,
-        default_rules(),
-        "init rules must equal the canonical default_rules()"
+        config.edges,
+        starter_edges(),
+        "init edges must equal the canonical starter_edges()"
+    );
+    let names: Vec<&str> = config.edges.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "stories-need-rfcs",
+            "iterations-need-stories",
+            "adrs-need-relations",
+            "implements-traversal",
+            "related-to-traversal",
+        ],
+        "three starter constraints and the two blanket traversal rows, by name"
     );
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
     assert!(
-        content.contains("[[rules]]"),
-        "config should contain a [[rules]] block"
+        content.contains("[[edges]]"),
+        "config should contain an [[edges]] block, got:\n{content}"
     );
+    assert!(
+        !content.contains("[[rules]]") && !content.contains("rules ="),
+        "config must carry no rules key at all, got:\n{content}"
+    );
+    for name in [
+        "stories-need-rfcs",
+        "iterations-need-stories",
+        "adrs-need-relations",
+        "implements-traversal",
+        "related-to-traversal",
+    ] {
+        assert!(
+            content.contains(name),
+            "written config should name the {name} edge, got:\n{content}"
+        );
+    }
+}
+
+// STORY-261 AC6: the scaffolded config declares traversal in ONE table. `init`'s
+// config is the worked example every new project reads (ADR-011), and an example
+// that also marked `[[relationships]]` would teach the shape the edge table
+// replaced -- so no starter relationship carries a marker, and every `traversal`
+// key in the written file sits inside an `[[edges]]` block.
+#[test]
+fn init_states_traversal_only_on_edges() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    let config = parse_written_config(root);
+    for rel in &config.relationships {
+        assert_eq!(
+            rel.traversal, None,
+            "relationship {} must state no traversal marker",
+            rel.name
+        );
+    }
+
+    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+    let mut table = "";
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            table = trimmed;
+        }
+        if trimmed.starts_with("traversal") {
+            assert_eq!(
+                table, "[[edges]]",
+                "traversal declared under {table}:\n{content}"
+            );
+        }
+    }
+}
+
+// The starter set is the first config in the repo where a wildcard row and a
+// concrete row cover the same triple: `iterations-need-stories` matches
+// `iteration --implements--> story` and so does `implements-traversal`. ADR-031
+// composes overlapping rows that name the same role, and only rows that
+// *disagree* are refused -- so the five-row set must strict-load. Were the
+// overlap read as a contradiction, `init` would scaffold a config it cannot read
+// back.
+#[test]
+fn the_starter_wildcard_and_concrete_chain_rows_are_not_a_contradiction() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
+    let config = Config::parse(&content).expect("the five-row starter set must strict-load");
+
+    let role = |name: &str| {
+        config
+            .edges
+            .iter()
+            .find(|edge| edge.name == name)
+            .unwrap_or_else(|| panic!("starter set should declare {name}"))
+            .traversal
+    };
+    assert_eq!(
+        role("iterations-need-stories"),
+        Some(Traversal::Chain),
+        "the concrete row keeps the role it wrote"
+    );
+    assert_eq!(
+        role("implements-traversal"),
+        Some(Traversal::Chain),
+        "so does the wildcard row it overlaps"
+    );
+    assert_eq!(role("related-to-traversal"), Some(Traversal::Related));
 }
 
 // AC4: a freshly init-ed project loads under strict load, round-trips identically
@@ -178,9 +286,9 @@ fn init_project_loads_strict_and_validates_clean() {
         "types must round-trip to starter_types()"
     );
     assert_eq!(
-        config.rules,
-        default_rules(),
-        "rules must round-trip to default_rules()"
+        config.edges,
+        starter_edges(),
+        "edges must round-trip to starter_edges()"
     );
     let mut rels = config.relationships.clone();
     rels.sort_by(|a, b| a.name.cmp(&b.name));
@@ -200,6 +308,223 @@ fn init_project_loads_strict_and_validates_clean() {
         "fresh project should validate with no errors, got: {:?}",
         result.errors
     );
+}
+
+/// Scaffold a project, create RFC-001 and STORY-001 in it, link `from` to `to`
+/// with `relation`, and return STORY-001's `context --json`. Everything the walks
+/// read comes from the config `init` wrote -- no test-authored edge row.
+fn story_context_after_linking(from: &str, relation: &str, to: &str) -> serde_json::Value {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    lazyspec::cli::init::run(root).unwrap();
+
+    let config = parse_written_config(root);
+    let mut store = Store::load(root, &config).unwrap();
+    for (doc_type, title) in [("rfc", "a"), ("story", "b")] {
+        lazyspec::cli::create::run(root, &config, &store, doc_type, title, "tester", |_| {})
+            .unwrap();
+        store = Store::load(root, &config).unwrap();
+    }
+
+    lazyspec::cli::link::link_with_config(
+        root,
+        &store,
+        from,
+        relation,
+        to,
+        &lazyspec::engine::fs::RealFileSystem,
+        Some(&config),
+    )
+    .unwrap();
+
+    let store = Store::load(root, &config).unwrap();
+    let json = lazyspec::cli::context::run_json(&store, "STORY-001", 1).unwrap();
+    serde_json::from_str(&json).unwrap()
+}
+
+fn ids_under(context: &serde_json::Value, key: &str) -> Vec<String> {
+    context[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+// STORY-261 AC6, the chain half: a project scaffolded by `init` and nothing else
+// walks its hierarchy. The chain a `context` call reports is the one the starter
+// `[[edges]]` set declares, so a starter set that constrained without walking
+// would leave every new project's chain a chain of one.
+#[test]
+fn a_scaffolded_project_walks_the_chain_from_its_starter_edges() {
+    let context = story_context_after_linking("STORY-001", "implements", "RFC-001");
+
+    let chain = ids_under(&context, "chain");
+    assert!(
+        chain.contains(&"RFC-001".to_string()),
+        "the implemented rfc belongs to the story's chain, got {chain:?}"
+    );
+    assert!(
+        chain.contains(&"STORY-001".to_string()),
+        "the target is its own chain root, got {chain:?}"
+    );
+}
+
+// STORY-261 AC6, the related half: a scaffolded project's neighbourhood comes
+// from the starter set's blanket `related-to` row and nowhere else, now that no
+// starter relationship carries a marker. The link is declared on the RFC, so
+// the story reaches it only by the `related` walk reading the edge backwards --
+// nothing in the story's own frontmatter mentions it. A `related-to` link is a
+// neighbour and no chain edge, so it leaves the chain alone.
+#[test]
+fn a_scaffolded_project_walks_the_neighbourhood_from_its_starter_edges() {
+    let context = story_context_after_linking("RFC-001", "related-to", "STORY-001");
+
+    assert_eq!(
+        ids_under(&context, "related"),
+        vec!["RFC-001".to_string()],
+        "the linked rfc is the story's neighbourhood"
+    );
+    let chain = ids_under(&context, "chain");
+    assert!(
+        !chain.contains(&"RFC-001".to_string()),
+        "a related link is no chain edge, got {chain:?}"
+    );
+}
+
+/// Write a document of `doc_type` at `path` under `root`, optionally implementing
+/// `parent`.
+fn write_doc(root: &std::path::Path, path: &str, doc_type: &str, status: &str, parent: &str) {
+    let related = if parent.is_empty() {
+        "related: []\n".to_string()
+    } else {
+        format!("related:\n- implements: {parent}\n")
+    };
+    fs::write(
+        root.join(path),
+        format!(
+            "---\ntitle: \"T\"\ntype: {doc_type}\nstatus: {status}\nauthor: a\n\
+             date: 2026-01-01\ntags: []\n{related}---\nbody\n"
+        ),
+    )
+    .unwrap();
+}
+
+// A scaffolded project reports the hierarchy findings, all three of them. The
+// two that iterate `(parent type, child type)` pairs -- `AllChildrenAccepted`
+// and `UpwardOrphanedAcceptance` -- read those pairs off the `from` side of a
+// chain row naming concrete endpoints, so a starter set that stated no
+// `traversal` left them dead for every new project however its documents were
+// arranged (the blanket `implements` marker names a relationship and no types
+// at all).
+#[test]
+fn a_scaffolded_project_reports_the_hierarchy_findings() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    // RFC-001 has one accepted and one draft story; RFC-002's only story is
+    // accepted. That splits the two pair-walking findings, which are exclusive
+    // per (parent, child type).
+    write_doc(root, "docs/rfcs/RFC-001-one.md", "rfc", "draft", "");
+    write_doc(root, "docs/rfcs/RFC-002-two.md", "rfc", "draft", "");
+    write_doc(
+        root,
+        "docs/stories/STORY-001-a.md",
+        "story",
+        "accepted",
+        "RFC-001",
+    );
+    write_doc(
+        root,
+        "docs/stories/STORY-002-b.md",
+        "story",
+        "draft",
+        "RFC-001",
+    );
+    write_doc(
+        root,
+        "docs/stories/STORY-003-c.md",
+        "story",
+        "accepted",
+        "RFC-002",
+    );
+
+    let config = parse_written_config(root);
+    let store = Store::load(root, &config).unwrap();
+    let warnings = store.validate_full(&config).warnings;
+
+    let count = |predicate: fn(&ValidationIssue) -> bool| {
+        warnings.iter().filter(|issue| predicate(issue)).count()
+    };
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::OrphanedAcceptance { .. })),
+        2,
+        "both accepted stories hang off a draft RFC: {warnings:?}"
+    );
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::AllChildrenAccepted { .. })),
+        1,
+        "RFC-002's only story is accepted: {warnings:?}"
+    );
+    assert_eq!(
+        count(|issue| matches!(issue, ValidationIssue::UpwardOrphanedAcceptance { .. })),
+        1,
+        "RFC-001 has one accepted story of two: {warnings:?}"
+    );
+}
+
+// A fresh config must leave room for further `[[edges]]` rows: the starter set
+// is written as array-of-tables headers, so a hand-appended row parses beside
+// them rather than colliding with a bare `edges = ...` key.
+#[test]
+fn init_config_accepts_an_appended_edges_block() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    lazyspec::cli::init::run(root).unwrap();
+
+    let config_path = root.join(".lazyspec.toml");
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !content.contains("edges = "),
+        "edges must serialize as [[edges]] headers, got:\n{content}"
+    );
+
+    fs::write(
+        &config_path,
+        format!(
+            "{content}\n[[edges]]\nname = \"iterations-implement-stories\"\n\
+             from = \"iteration\"\nto = [\"story\", \"rfc\"]\nvia = \"implements\"\n"
+        ),
+    )
+    .unwrap();
+
+    let config = parse_written_config(root);
+    let edge = config
+        .edges
+        .iter()
+        .find(|e| e.name == "iterations-implement-stories")
+        .expect("appended edge should parse");
+    assert_eq!(
+        edge.from,
+        TypeSelector::Types(vec!["iteration".to_string()])
+    );
+    assert_eq!(
+        edge.to,
+        TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+    );
+    assert_eq!(edge.via, RelSelector::Named(vec!["implements".to_string()]));
+
+    // Non-empty edges still round-trip out as an `[[edges]]` block, so a config
+    // rewrite (TUI settings editor, web view) cannot silently drop them.
+    let emitted = config.to_toml().unwrap();
+    assert!(
+        emitted.contains("[[edges]]"),
+        "declared edges must survive to_toml, got:\n{emitted}"
+    );
+    assert_eq!(Config::parse(&emitted).unwrap().edges, config.edges);
 }
 
 #[test]

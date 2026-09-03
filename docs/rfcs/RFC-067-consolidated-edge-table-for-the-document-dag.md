@@ -45,17 +45,16 @@ One config table owns the document DAG. Each row declares a directed edge kind: 
 Resolved decisions, each with an ADR:
 
 1. **Edges are a first-class table.** `[[edges]]` replaces both rule shapes and absorbs `traversal` from `RelationshipDef`. `parent_type` is untouched and documented as containment-only. (ADR-030)
-2. **Wildcard endpoints, specific-over-wildcard.** `from`/`to`/`via` accept `"*"`. A wildcard row and a specific row for the same triple compose for traversal; for gating and requiredness the most specific row wins. (ADR-031)
+2. **Wildcard endpoints, specific-over-wildcard.** `from`/`to`/`via` accept `"*"`. A wildcard row and a specific row for the same triple compose for traversal; for requiredness the most specific row *that states `required`* wins, and a row that omits `required` takes no part in that resolution. (ADR-031)
 3. **Migration is a mechanical translation.** `fix --config` rewrites `[[rules]]` plus `relationships.traversal` into `[[edges]]`, following ADR-012's lenient-read precedent. (ADR-032)
 
 Decided by precedent:
 
 - **`via = "*"` is explicit.** Absent `via` meaning "any relationship" would smuggle a second rule into the table's shape. `relation-existence` translates to `via = "*"`, `to = "*"`, `required = "error"`.
-- **`require_to_status` is a per-target-type map.** A type set can span lifecycles: `bug` runs reported/triaged/in-progress/fixed/wontfix and has no `accepted`. One scalar status cannot gate a heterogeneous set. Absent key means ungated for that target type.
 - **`required` semantics for a set are "any one".** `to = ["spike","story","bug"]` with `required = "error"` is satisfied by one edge to any one member, not one edge to each.
 - **`required` is `Option<Severity>`.** Absent means the edge is legal and may walk, but its absence is not a finding — the current `traversal`-only relationships (`related-to`, `targets`) translate to exactly that.
 - **The edge table does not constrain `link`.** RFC-042 §Design.2 holds: relations stay arbitrary doc→doc at the model level (`related: Vec<Relation>` on every `DocMeta`), and constraints remain a validation-layer concern. `link` continues to reject only unknown *relationship names* via the registry. An edge absent from the table is a finding, never a refused command.
-- **`require_to_status` supersedes `require_parent_status`.** ADR-022 chose status-conditioned gates over a phase axis, hanging the gate off the parent-child rule. That choice stands; only its carrier moves, from a scalar on the rule to a per-target-type map on the edge.
+- **No edge condition refuses a command.** Every unsatisfied edge is a validation finding. Status-conditioned `create` gating is abandoned rather than carried onto the edge table: ADR-033 supersedes ADR-022, and the scalar `require_parent_status` dies with `[[rules]]` in STORY-259 with no successor. The edge table therefore has one policy, not two.
 
 ### The traversal cost, stated plainly
 
@@ -77,7 +76,6 @@ to   = ["spike", "story", "bug"]
 via  = "implements"
 traversal = "chain"
 required  = "error"
-require_to_status = { story = "accepted", bug = "triaged" }
 
 [[edges]]
 name = "general-relatedness"
@@ -95,7 +93,6 @@ traversal = "related"
     pub via: RelSelector,
     pub traversal: Option<Traversal>,
     pub required: Option<Severity>,
-    pub require_to_status: BTreeMap<String, String>,
 }
 
 @draft pub enum TypeSelector { Any, Types(Vec<String>) }
@@ -111,16 +108,17 @@ traversal = "related"
 Decomposed vertically: each slice is observable by a real actor -- a DAG designer configuring types, a document author running `create`/`validate`/`context`, an agent consuming `--json`, or a maintainer upgrading an existing project. An earlier draft of this section sliced by layer (schema, validation, traversal, TUI, CLI); that backlog delivered nothing observable until two slices had both landed, and was replaced.
 
 1. **STORY-254 -- Declare an edge whose target may be any of several types.** The walking skeleton: `[[edges]]` parses and `validate` enforces it, with `from`/`to`/`via`/`required` only. `[[rules]]` keeps working alongside so the table can land incrementally.
-2. **STORY-255 -- Gate document creation on the target's status.** `require_to_status` as a per-target-type map.
-3. **STORY-256 -- Wildcard edge endpoints for a short starter config.** `"*"` on any position, with specificity and contradiction rules.
-4. **STORY-257 -- Walk the document DAG from the edge table.** The heavy slice: traversal off `RelationshipDef`, across CLI, TUI graph, and web view.
-5. **STORY-258 -- Migrate an existing config to the edge table.** Behaviour-preserving translation in `fix --config`.
-6. **STORY-259 -- Retire the rules table.** Closes the dual-declaration window STORY-254 opens.
-7. **STORY-260 -- Edit edges in the TUI settings panel.**
-8. **STORY-261 -- Edit edges from the config CLI and `init`.**
-9. **STORY-262 -- Derive agent type boundaries from the edge table.** Collapses the `/lazy` and `/execute` union-of-two-sources instruction.
+2. **STORY-256 -- Wildcard edge endpoints for a short starter config.** `"*"` on any position, with specificity and contradiction rules.
+3. **STORY-257 -- Walk the document DAG from the edge table.** The heavy slice: traversal off `RelationshipDef`, across CLI, TUI graph, and web view.
+4. **STORY-258 -- Migrate an existing config to the edge table.** Behaviour-preserving translation in `fix --config`.
+5. **STORY-259 -- Retire the rules table.** Closes the dual-declaration window STORY-254 opens, and takes `require_parent_status` with it.
+6. **STORY-260 -- Edit edges in the TUI settings panel.**
+7. **STORY-261 -- Edit edges from the config CLI and `init`.**
+8. **STORY-262 -- Derive agent type boundaries from the edge table.** Collapses the `/lazy` and `/execute` union-of-two-sources instruction.
 
-Blocking: 254 gates 255, 256, 257, 258, 260, 261. 256 also gates 258, which gates 259. 257 gates 262.
+STORY-255 (gate creation on the target's status) is withdrawn -- see ADR-033.
+
+Blocking: 254 gates 256, 257, 258, 260, 261. 256 also gates 258, which gates 259. 257 gates 262.
 
 README, `--help`, and JSON-schema updates are acceptance criteria on whichever slice changes that surface, not a story of their own. Layering (dictum 3) and `--json` coverage (dictum 2) are project-wide constraints, not slices.
 

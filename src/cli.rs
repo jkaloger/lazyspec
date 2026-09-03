@@ -73,7 +73,9 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize lazyspec in the current project. On a TTY with neither flag,
-    /// walks an interactive wizard to tweak the starter config before writing.
+    /// walks an interactive wizard: it designs a blank DAG -- types, lifecycles,
+    /// and [[edges]] rows once two types are declared -- unless --template
+    /// starter picks the starter config to tweak instead.
     Init {
         /// Skip the wizard and write the starter config unchanged
         #[arg(long)]
@@ -287,7 +289,7 @@ pub enum Commands {
         /// Filter to a single document type (e.g. rfc, story)
         #[arg(long = "type")]
         doc_type: Option<String>,
-        /// Repair `.lazyspec.toml` instead of documents (injects missing standard relationships/rules)
+        /// Repair `.lazyspec.toml` instead of documents (injects missing standard relationships/edges)
         #[arg(long)]
         config: bool,
     },

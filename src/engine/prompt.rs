@@ -1,10 +1,9 @@
-//! Context depth choice: `context.ancestors` is the FULL `implements` chain
-//! (sourced from [`resolve_chain`]'s `nodes`); `context.related` is the
-//! directly-adjacent `related-to` ring only, so `resolve_chain` is called with
-//! depth `1`. Descendant (`forward`) docs are deliberately omitted.
+//! Context depth choice: `context.ancestors` is the FULL chain lineage (sourced
+//! from [`resolve_chain`]'s `nodes`); `context.related` is the directly-adjacent
+//! related-role ring only, so `resolve_chain` is called with depth `1`.
+//! Descendant (`forward`) docs are deliberately omitted.
 
-use crate::engine::config::{Config, ValidationRule};
-use crate::engine::context::resolve_chain;
+use crate::engine::context::{merge_declared_related, resolve_chain};
 use crate::engine::document::{split_frontmatter, DocMeta};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
@@ -170,40 +169,33 @@ fn doc_to_view(store: &Store, doc: &DocMeta, fs: &dyn FileSystem) -> Result<Docu
     })
 }
 
-/// Child type names for `doc`'s type: each `child` from a `ParentChild` rule
-/// whose `parent` matches `doc.doc_type`. No matching rule yields an empty list
-/// (loops render empty, not undefined). Mirrors the TUI `spawn_create_children`
-/// derivation.
-fn child_types_for(config: &Config, doc: &DocMeta) -> Vec<String> {
-    let doc_type = doc.doc_type.as_str();
-    config
-        .rules
-        .iter()
-        .filter_map(|rule| match rule {
-            ValidationRule::ParentChild { parent, child, .. } if parent == doc_type => {
-                Some(child.clone())
-            }
-            _ => None,
-        })
-        .collect()
+/// Child type names for `doc`'s type: the `from` side of every chain edge
+/// pointing at this type
+/// ([`crate::engine::traversal::TraversalWalk::child_types_for`]). No such edge
+/// gives an empty list (loops render empty, not undefined).
+fn child_types_for(store: &Store, doc: &DocMeta) -> Vec<String> {
+    store.traversal_walk.child_types_for(doc.doc_type.as_str())
 }
 
 /// Assemble the minijinja render context for `doc`:
 /// - `document`: the selected doc's fields (id/title/type/body/status/path).
-/// - `child_types`: child type names from `ParentChild` rules.
-/// - `context.ancestors`: the `implements` chain, nearest-parent-first, target
+/// - `child_types`: child type names from the chain edges pointing at this type.
+/// - `context.ancestors`: the chain lineage, nearest-parent-first, target
 ///   excluded (full ancestry, from [`resolve_chain`]'s `nodes`).
-/// - `context.related`: directly-adjacent `related-to` docs (depth `1`).
+/// - `context.related`: the directly-adjacent related-role neighbourhood
+///   (depth `1`), plus the target's own declared non-chain relations.
 ///
 /// Descendant (`forward`) docs are deliberately omitted. Lineage entries
 /// expose the same `document.*` shape as the top-level `document`.
-pub fn build_render_context(
-    store: &Store,
-    config: &Config,
-    doc: &DocMeta,
-    fs: &dyn FileSystem,
-) -> Result<Value> {
-    let resolved = resolve_chain(store, &doc.id, 1)?;
+///
+/// [`merge_declared_related`] is called for the same reason every other surface
+/// calls it: the walk alone drops a relation whose type carries no traversal role
+/// at all (BUG-013), and a prompt is a renderer of the neighbourhood like the
+/// others -- a template that carries "the documents this one links to" into an
+/// agent's constraints cannot silently omit the ones the config gave no role.
+pub fn build_render_context(store: &Store, doc: &DocMeta, fs: &dyn FileSystem) -> Result<Value> {
+    let mut resolved = resolve_chain(store, &doc.id, 1)?;
+    merge_declared_related(store, &mut resolved);
 
     // `nodes` is root-first and includes the target last. Drop the target and
     // reverse so the immediate parent comes first.
@@ -222,7 +214,7 @@ pub fn build_render_context(
 
     let ctx = RenderContext {
         document: doc_to_view(store, doc, fs)?,
-        child_types: child_types_for(config, doc),
+        child_types: child_types_for(store, doc),
         context: ContextView { ancestors, related },
     };
 
@@ -455,29 +447,14 @@ mod tests {
 
     use crate::engine::config::Config;
     use crate::engine::fs::RealFileSystem;
+    use crate::engine::store::test_support::{doc_md, store_from_with_config};
     use crate::engine::store::Store;
     use tempfile::TempDir;
 
-    fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
-        let related_block = if related == "[]" {
-            "related: []".to_string()
-        } else {
-            format!("related:\n{related}")
-        };
-        format!(
-            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
-        )
-    }
-
+    /// [`store_from_with_config`] under the starter config, for the tests that
+    /// declare no traversal of their own.
     fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
-        (tmp, store)
+        store_from_with_config(files, &Config::default())
     }
 
     /// Build a one-line prompt with the given body template.
@@ -490,9 +467,8 @@ mod tests {
     fn renders_template_with_known_vars() {
         let (_tmp, store) =
             store_from(&[("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]"))]);
-        let config = Config::default();
         let doc = store.resolve_shorthand("RFC-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
 
         let prompt = body_prompt("Doc {{ document.id }} type {{ document.type }}");
         let out = render(&prompt, &ctx).unwrap();
@@ -506,9 +482,8 @@ mod tests {
     fn document_fields_resolve_from_selected_doc() {
         let (_tmp, store) =
             store_from(&[("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]"))]);
-        let config = Config::default();
         let doc = store.resolve_shorthand("RFC-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
 
         let prompt = body_prompt(
             "id={{ document.id }} title={{ document.title }} type={{ document.type }} \
@@ -524,40 +499,100 @@ mod tests {
         assert!(out.contains("path=docs/rfcs/RFC-001-base.md"), "{out}");
     }
 
-    // AC6: child_types comes only from ParentChild rules whose parent matches.
-    #[test]
-    fn child_types_resolve_from_parent_child_rules() {
-        // Default config carries rfc->story and story->iteration; the second
-        // rule (a different parent) proves filtering.
-        let (_tmp, store) =
-            store_from(&[("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]"))]);
-        let config = Config::default();
-        let doc = store.resolve_shorthand("RFC-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
-
-        let prompt = body_prompt("{% for c in child_types %}{{ c }} {% endfor %}");
-        let out = render(&prompt, &ctx).unwrap();
-
-        assert!(out.contains("story"), "rfc's child is story: {out}");
-        assert!(
-            !out.contains("iteration"),
-            "iteration is story's child, not rfc's: {out}"
-        );
+    fn chain_edge(name: &str, from: &str, to: &str, via: &str) -> crate::engine::config::EdgeDef {
+        use crate::engine::config::{RelSelector, Traversal, TypeSelector};
+        crate::engine::config::EdgeDef {
+            name: name.to_string(),
+            from: TypeSelector::Types(vec![from.to_string()]),
+            to: TypeSelector::Types(vec![to.to_string()]),
+            via: RelSelector::Named(vec![via.to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        }
     }
 
-    // AC6 companion: a type with no child rule yields an empty list; the loop
-    // renders empty rather than raising an undefined error.
+    fn rendered_child_types(config: &Config, files: &[(&str, &str)], shorthand: &str) -> String {
+        let (_tmp, store) = store_from_with_config(files, config);
+        let doc = store.resolve_shorthand(shorthand).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
+        let prompt = body_prompt("[{% for c in child_types %}{{ c }},{% endfor %}]");
+        render(&prompt, &ctx).unwrap().trim().to_string()
+    }
+
+    // AC6: `child_types` names the `from` side of the chain edges pointing at
+    // this type, and no others. The second row, whose `to` is a different type,
+    // proves the filtering.
+    #[test]
+    fn child_types_resolve_from_the_chain_edges_pointing_at_this_type() {
+        let config = Config {
+            edges: vec![
+                chain_edge(
+                    "iterations-implement-stories",
+                    "iteration",
+                    "story",
+                    "implements",
+                ),
+                chain_edge("stories-implement-rfcs", "story", "rfc", "implements"),
+            ],
+            ..Config::default()
+        };
+
+        let out = rendered_child_types(
+            &config,
+            &[("docs/stories/STORY-001-s.md", &doc_md("S", "story", "[]"))],
+            "STORY-001",
+        );
+
+        assert_eq!(out, "[iteration,]");
+    }
+
+    // AC6 companion: a type no chain edge points at yields an empty list; the
+    // loop renders empty rather than raising an undefined error.
     #[test]
     fn child_types_empty_renders_empty_not_undefined() {
-        // `adr` has no ParentChild parent rule in the default config.
-        let (_tmp, store) = store_from(&[("docs/adrs/ADR-001-x.md", &doc_md("X", "adr", "[]"))]);
-        let config = Config::default();
-        let doc = store.resolve_shorthand("ADR-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let config = Config {
+            edges: vec![chain_edge(
+                "iterations-implement-stories",
+                "iteration",
+                "story",
+                "implements",
+            )],
+            ..Config::default()
+        };
 
-        let prompt = body_prompt("[{% for c in child_types %}{{ c }}{% endfor %}]");
-        let out = render(&prompt, &ctx).unwrap();
-        assert_eq!(out.trim(), "[]");
+        let out = rendered_child_types(
+            &config,
+            &[("docs/adrs/ADR-001-x.md", &doc_md("X", "adr", "[]"))],
+            "ADR-001",
+        );
+
+        assert_eq!(out, "[]");
+    }
+
+    // Every chain edge pointing at this type contributes, so a type with two
+    // kinds of child names both.
+    #[test]
+    fn child_types_list_every_chain_edge_pointing_at_this_type() {
+        let config = Config {
+            edges: vec![
+                chain_edge(
+                    "iterations-implement-stories",
+                    "iteration",
+                    "story",
+                    "implements",
+                ),
+                chain_edge("spikes-probe-stories", "spike", "story", "probes"),
+            ],
+            ..Config::default()
+        };
+
+        let out = rendered_child_types(
+            &config,
+            &[("docs/stories/STORY-001-s.md", &doc_md("S", "story", "[]"))],
+            "STORY-001",
+        );
+
+        assert_eq!(out, "[iteration,spike,]");
     }
 
     // AC7: an unknown variable errors (strict mode), never renders empty, and
@@ -566,9 +601,8 @@ mod tests {
     fn unknown_variable_is_render_error_not_empty() {
         let (_tmp, store) =
             store_from(&[("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]"))]);
-        let config = Config::default();
         let doc = store.resolve_shorthand("RFC-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
 
         let prompt = body_prompt("{{ document.bogus }}");
         let result = render(&prompt, &ctx);
@@ -603,9 +637,8 @@ mod tests {
                 &doc_md("Child", "iteration", "- implements: ITERATION-001"),
             ),
         ]);
-        let config = Config::default();
         let doc = store.resolve_shorthand("ITERATION-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
 
         let prompt = body_prompt(
             "anc:{% for n in context.ancestors %}{{ n.type }} {{ n.id }}|{% endfor %}\
@@ -646,19 +679,59 @@ mod tests {
         );
     }
 
-    // Task 8: end-to-end parse -> build_render_context -> render.
+    // BUG-013 for the prompt surface: `blocks` carries no traversal marker in the
+    // starter config, so the related BFS drops it and only
+    // `merge_declared_related` can put it in `context.related`. The prompt is the
+    // fifth renderer of the neighbourhood, and it dropped this class of relation
+    // while the CLI, the TUI and the web view surfaced it.
     #[test]
-    fn end_to_end_parse_build_render() {
+    fn context_related_surfaces_a_declared_relation_with_no_traversal_role() {
         let (_tmp, store) = store_from(&[
-            ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
             (
-                "docs/stories/STORY-001-mid.md",
-                &doc_md("Mid", "story", "- implements: RFC-001"),
+                "docs/stories/STORY-001-subject.md",
+                &doc_md("Subject", "story", "- blocks: ADR-001"),
+            ),
+            (
+                "docs/adrs/ADR-001-blocked.md",
+                &doc_md("Blocked", "adr", "[]"),
             ),
         ]);
-        let config = Config::default();
         let doc = store.resolve_shorthand("STORY-001").unwrap();
-        let ctx = build_render_context(&store, &config, doc, &RealFileSystem).unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
+
+        let prompt = body_prompt("[{% for r in context.related %}{{ r.id }},{% endfor %}]");
+        let out = render(&prompt, &ctx).unwrap();
+
+        assert_eq!(
+            out.trim(),
+            "[ADR-001,]",
+            "a relation the config gives no traversal role still reaches the prompt"
+        );
+    }
+
+    // Task 8: end-to-end parse -> build_render_context -> render. The
+    // hierarchy is stated as `[[edges]]`, the one declaration strict load
+    // accepts (STORY-259): `iterations-implement-stories` is what makes
+    // `iteration` story's child type, and the blanket row keeps `implements`
+    // walking the chain for `context.ancestors`.
+    #[test]
+    fn end_to_end_parse_build_render() {
+        let config = Config {
+            edges: crate::engine::config::starter_edges(),
+            ..Config::default()
+        };
+        let (_tmp, store) = store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+                (
+                    "docs/stories/STORY-001-mid.md",
+                    &doc_md("Mid", "story", "- implements: RFC-001"),
+                ),
+            ],
+            &config,
+        );
+        let doc = store.resolve_shorthand("STORY-001").unwrap();
+        let ctx = build_render_context(&store, doc, &RealFileSystem).unwrap();
 
         let prompt = parse_prompt(concat!(
             "---\n",

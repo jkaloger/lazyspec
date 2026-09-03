@@ -1,8 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{
-    starter_relationships, starter_types, Config, DocumentConfig, FilesystemConfig, Naming,
-    Severity, Templates, TypeDef, ValidationRule,
-};
+use lazyspec::engine::config::Config;
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::store::Store;
 use std::fs;
@@ -121,99 +118,12 @@ fn transition_check_skipped_for_non_status_updates() {
     assert_eq!(format!("{}", meta.status), "draft");
 }
 
-// A config whose rule requires the parent (rfc) at status `accepted` before a
-// `story` child may be created.
-fn config_with_parent_status_gate() -> Config {
-    let types: Vec<TypeDef> = starter_types();
-    Config {
-        documents: DocumentConfig {
-            types,
-            naming: Naming {
-                pattern: "{type}-{n:03}-{title}.md".to_string(),
-            },
-            sqids: None,
-            reserved: None,
-            github: None,
-        },
-        filesystem: FilesystemConfig {
-            templates: Templates {
-                dir: ".lazyspec/templates".to_string(),
-            },
-        },
-        relationships: starter_relationships(),
-        ui: Default::default(),
-        rules: vec![ValidationRule::ParentChild {
-            name: "stories-need-accepted-rfcs".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Error,
-            require_parent_status: Some("accepted".to_string()),
-        }],
-        ref_count_ceiling: 15,
-        certification: Default::default(),
-        agents: Default::default(),
-        skills: Default::default(),
-        web: None,
-        git_ref: Default::default(),
-    }
-}
-
-// AC5 — the gate blocks creation while no parent has reached the required status,
-// then allows it once one has.
+// ADR-033 — status-conditioned create gating is abandoned, not relocated. No
+// config can declare a gate any more, so `create` never consults a parent's
+// status: a child lands with its parent still in the lifecycle's first state.
 #[test]
-fn parent_status_gate_blocks_then_allows() {
+fn create_ignores_the_parents_status() {
     let fixture = TestFixture::new();
-    let config = config_with_parent_status_gate();
-
-    // A parent rfc at draft (not accepted).
-    fixture.write_rfc("RFC-001-test.md", "Parent", "draft");
-    let store = Store::load(fixture.root(), &config).unwrap();
-
-    let err = lazyspec::cli::create::run_with_body(
-        fixture.root(),
-        &config,
-        &store,
-        "story",
-        "Child",
-        "test",
-        None,
-        None,
-        |_| {},
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("accepted"), "got: {err}");
-
-    // No story document was written.
-    let stories: Vec<_> = fs::read_dir(fixture.root().join("docs/stories"))
-        .unwrap()
-        .collect();
-    assert!(stories.is_empty(), "no child should have been created");
-
-    // Promote the parent to accepted, reload, and retry.
-    fixture.write_rfc("RFC-001-test.md", "Parent", "accepted");
-    let store = Store::load(fixture.root(), &config).unwrap();
-
-    let path = lazyspec::cli::create::run_with_body(
-        fixture.root(),
-        &config,
-        &store,
-        "story",
-        "Child",
-        "test",
-        None,
-        None,
-        |_| {},
-    )
-    .unwrap()
-    .0;
-    assert!(path.exists(), "child document should now exist");
-}
-
-// AC5 — a child type whose rule has no require_parent_status is created freely.
-#[test]
-fn no_gate_when_require_parent_status_unset() {
-    let fixture = TestFixture::new();
-    // Default config: rules carry no require_parent_status.
     let config = Config::default();
     std::fs::write(
         fixture.root().join(".lazyspec.toml"),
@@ -221,7 +131,7 @@ fn no_gate_when_require_parent_status_unset() {
     )
     .unwrap();
 
-    // No parent rfc exists at all.
+    fixture.write_rfc("RFC-001-test.md", "Parent", "draft");
     let store = Store::load(fixture.root(), &config).unwrap();
 
     let path = lazyspec::cli::create::run_with_body(
@@ -237,5 +147,35 @@ fn no_gate_when_require_parent_status_unset() {
     )
     .unwrap()
     .0;
-    assert!(path.exists(), "child created freely without a gate");
+    assert!(path.exists(), "a draft parent does not refuse the child");
+}
+
+// ADR-033 — and with no parent document at all, which is the empty-project case
+// the old existence-query gate turned into a hard wall.
+#[test]
+fn create_succeeds_with_no_parent_document_at_all() {
+    let fixture = TestFixture::new();
+    let config = Config::default();
+    std::fs::write(
+        fixture.root().join(".lazyspec.toml"),
+        config.to_toml().unwrap(),
+    )
+    .unwrap();
+
+    let store = Store::load(fixture.root(), &config).unwrap();
+
+    let path = lazyspec::cli::create::run_with_body(
+        fixture.root(),
+        &config,
+        &store,
+        "story",
+        "Child",
+        "test",
+        None,
+        None,
+        |_| {},
+    )
+    .unwrap()
+    .0;
+    assert!(path.exists(), "child created freely on an empty project");
 }

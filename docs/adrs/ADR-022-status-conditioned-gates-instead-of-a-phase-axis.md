@@ -1,7 +1,7 @@
 ---
 title: Status-conditioned gates instead of a phase axis
 type: adr
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-06-21
 tags:

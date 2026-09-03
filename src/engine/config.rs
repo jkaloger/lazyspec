@@ -1,5 +1,5 @@
 use crate::engine::document::Status;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -12,11 +12,25 @@ pub enum Severity {
     Warning,
 }
 
-/// How a relationship participates in context traversal. `Chain` relationships
-/// form the parent-child DAG walked by `resolve_chain`/`resolve_forest`;
-/// `Related` relationships form the symmetric depth-bounded neighbourhood.
-/// Absence (`None` on `RelationshipDef`) means the relationship participates in
-/// neither walk.
+impl Severity {
+    /// How this severity is written on an `[[edges]]` row, and read back
+    /// wherever one is shown.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
+/// A role in context traversal. `Chain` is the parent-child DAG walked by
+/// `resolve_chain`/`resolve_forest`; `Related` is the symmetric depth-bounded
+/// neighbourhood.
+///
+/// Two declarations assign the role, and they do not union. On [`EdgeDef`] it
+/// names the role for the triple that row selects -- source type, relationship,
+/// target type -- and for no other; on [`RelationshipDef`] it is the blanket
+/// fallback, read only for relationships no `[[edges]]` row assigns a role to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Traversal {
@@ -24,26 +38,462 @@ pub enum Traversal {
     Related,
 }
 
+impl Traversal {
+    /// How this role is written on an `[[edges]]` row, and read back wherever
+    /// one is shown.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Traversal::Chain => "chain",
+            Traversal::Related => "related",
+        }
+    }
+}
+
+/// One entry in the `[[edges]]` block: a directed edge kind in the document DAG
+/// (RFC-067). `from` names the source type, `to` the permitted target types,
+/// `via` the relationship that realizes the edge. `required` is the severity of
+/// a finding when the edge is absent; `None` means the edge is legal but not
+/// demanded. `traversal` is the walk this edge joins (ADR-030); `None` means
+/// this row names no role, leaving the triple to any other matching row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
-#[serde(tag = "shape")]
-pub enum ValidationRule {
-    #[serde(rename = "parent-child")]
-    ParentChild {
-        name: String,
-        child: String,
-        parent: String,
-        severity: Severity,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        require_parent_status: Option<String>,
-    },
-    #[serde(rename = "relation-existence")]
-    RelationExistence {
-        name: String,
-        #[serde(rename = "type")]
-        doc_type: String,
-        require: String,
-        severity: Severity,
-    },
+pub struct EdgeDef {
+    pub name: String,
+    #[schemars(with = "TypeSelectorRepr")]
+    pub from: TypeSelector,
+    #[schemars(with = "TypeSelectorRepr")]
+    pub to: TypeSelector,
+    #[schemars(with = "RelSelectorRepr")]
+    pub via: RelSelector,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traversal: Option<Traversal>,
+}
+
+impl EdgeDef {
+    /// True iff this row's `via` and `to` cover a concrete relation, leaving
+    /// `from` to the caller. ADR-031's question is about a triple, but nothing
+    /// asks it that way: `from` gates a whole document, and only then does each
+    /// of its relations get asked about `via` and `to`. A wildcard position
+    /// matches any name; a type set matches its members.
+    pub(crate) fn matches_target(&self, via: &str, to: &str) -> bool {
+        self.via.matches(via) && self.to.matches(to)
+    }
+
+    /// How specific this row is: how many of `from`, `to`, `via` name something
+    /// rather than wildcarding, 0 through 3. ADR-031 orders requiredness by
+    /// this score; the only score comparison made so far is between two
+    /// overlapping rows at load, where equal scores make a disagreement
+    /// unresolvable and so an error.
+    ///
+    /// ADR-031 §Consequences accepts that this is coarse. A named position
+    /// scores one whether it lists one type or six, and every position weighs
+    /// the same, so `from = "iteration", to = "*"` and `from = "*", to =
+    /// ["story"]` both score one: they tie, and a tie that disagrees is
+    /// rejected at load rather than resolved by an unpredictable rule.
+    pub(crate) fn specificity(&self) -> usize {
+        [
+            self.from.is_concrete(),
+            self.to.is_concrete(),
+            self.via.is_concrete(),
+        ]
+        .into_iter()
+        .filter(|concrete| *concrete)
+        .count()
+    }
+
+    /// True iff some one concrete edge is covered by both rows, which is the
+    /// case exactly when all three positions intersect.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        self.from.intersects(&other.from)
+            && self.via.intersects(&other.via)
+            && self.to.intersects(&other.to)
+    }
+}
+
+/// ADR-031 keeps `name` mandatory on an edge so an error can identify a row by
+/// it, and `config_write` addresses rows by name when it reconciles `[[edges]]`.
+/// Neither reader survives a name that is empty or one two rows share, so both
+/// are refused here rather than worked around at either.
+fn reject_edge_name_collisions(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        if edge.name.is_empty() {
+            bail!(
+                "[[edges]] row {} declares an empty `name`; a row is addressed by its name, so \
+                 give it one",
+                index + 1
+            );
+        }
+        let duplicate = edges[index + 1..]
+            .iter()
+            .position(|other| other.name == edge.name);
+        if let Some(offset) = duplicate {
+            bail!(
+                "[[edges]] rows {} and {} are both named \"{}\"; a row is addressed by its name, \
+                 so rename one of them",
+                index + 1,
+                index + offset + 2,
+                edge.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// ADR-031: requiredness comes from the most specific matching row that states
+/// it, so two rows that can match one concrete edge at equal specificity and
+/// state *different* severities have no resolution. A row that omits `required`
+/// states no requiredness at all, so it ties with nothing — absence is not a
+/// disagreement. The error names both rows, which is why `name` is mandatory on
+/// an edge.
+fn reject_requiredness_ties(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        let Some(severity) = &edge.required else {
+            continue;
+        };
+        for other in &edges[index + 1..] {
+            let Some(other_severity) = &other.required else {
+                continue;
+            };
+            if severity == other_severity
+                || edge.specificity() != other.specificity()
+                || !edge.overlaps(other)
+            {
+                continue;
+            }
+            bail!(
+                "edges \"{}\" ({}) and \"{}\" ({}) can both match the same edge and are equally \
+                 specific, so neither wins: make one of them more specific, or have them agree",
+                edge.name,
+                requiredness_spelling(severity),
+                other.name,
+                requiredness_spelling(other_severity),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How a row's requiredness reads back to whoever wrote the TOML.
+fn requiredness_spelling(required: &Severity) -> &'static str {
+    match required {
+        Severity::Error => "required = \"error\"",
+        Severity::Warning => "required = \"warning\"",
+    }
+}
+
+/// ADR-031: traversal composes — an edge walks if any matching row gives it a
+/// role — so two rows that can match one concrete edge and name *different*
+/// roles cannot both be honoured. Unlike requiredness there is no
+/// most-specific-wins fallback to appeal to, so specificity is not consulted:
+/// a concrete row disagreeing with a wildcard row is as unresolvable as a tie.
+/// A row that omits `traversal` names no role and so disagrees with nothing.
+fn reject_traversal_disagreements(edges: &[EdgeDef]) -> Result<()> {
+    for (index, edge) in edges.iter().enumerate() {
+        let Some(traversal) = edge.traversal else {
+            continue;
+        };
+        for other in &edges[index + 1..] {
+            let Some(other_traversal) = other.traversal else {
+                continue;
+            };
+            if traversal == other_traversal || !edge.overlaps(other) {
+                continue;
+            }
+            bail!(
+                "edges \"{}\" ({}) and \"{}\" ({}) can both match the same edge and give it \
+                 different traversal roles: traversal composes rather than resolving by \
+                 specificity, so make them agree, or narrow one so they cannot both match",
+                edge.name,
+                traversal_spelling(traversal),
+                other.name,
+                traversal_spelling(other_traversal),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How a row's traversal role reads back to whoever wrote the TOML.
+fn traversal_spelling(traversal: Traversal) -> &'static str {
+    match traversal {
+        Traversal::Chain => "traversal = \"chain\"",
+        Traversal::Related => "traversal = \"related\"",
+    }
+}
+
+/// An `[[edges]]` row as written, before `via` has been checked. Serde's own
+/// "missing field `via`" names neither the offending edge nor `"*"` as the way
+/// to spell "any relationship", so the field is optional here and
+/// [`Config::parse`] reports its absence instead.
+#[derive(Deserialize)]
+struct RawEdgeDef {
+    name: String,
+    from: TypeSelector,
+    to: TypeSelector,
+    via: Option<RelSelector>,
+    #[serde(default)]
+    required: Option<Severity>,
+    #[serde(default)]
+    traversal: Option<Traversal>,
+}
+
+/// The wildcard spelling of any edge position (ADR-031).
+pub(crate) const WILDCARD: &str = "*";
+
+/// How a set of names on an edge position reads back to whoever wrote it: a
+/// lone name bare, exactly as `to_toml` re-emits it, and anything else as the
+/// list it was written as. The empty set falls out of the list arm as `[]`,
+/// which is the point -- a position that names nothing matches nothing, and
+/// spelling that `*` would say the row does the reverse of what it does.
+fn names_spelling(names: &[String]) -> String {
+    match names {
+        [only] => only.clone(),
+        many => format!("[{}]", many.join(", ")),
+    }
+}
+
+/// A type position on an `[[edges]]` row (`from`, `to`). `"*"` is [`Any`]; a
+/// bare type name and a one-element list are the same selector, so the pair
+/// re-emits as the bare name.
+///
+/// [`Any`]: TypeSelector::Any
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeSelector {
+    Any,
+    Types(Vec<String>),
+}
+
+/// The one rule for turning a set of written names into a selector, shared by
+/// both positions' constructors. A lone `"*"` is the wildcard; `"*"` beside a
+/// name is neither, and the loader refuses it inside a list, so it is refused
+/// here -- at the surface that assembled it, before anything is written.
+fn fold_wildcard(names: &[String]) -> Result<bool> {
+    if names == [WILDCARD] {
+        return Ok(true);
+    }
+    if names.iter().any(|name| name == WILDCARD) {
+        bail!(
+            "edge position {} mixes the wildcard with names: \"{}\" is a whole position, not one \
+             member of a set, so write either \"{}\" alone or the names it allows",
+            names_spelling(names),
+            WILDCARD,
+            WILDCARD
+        );
+    }
+    Ok(false)
+}
+
+impl TypeSelector {
+    /// A type position assembled from written names -- repeated CLI flags, a
+    /// TUI picker's set -- rather than deserialized from TOML. Folds the lone
+    /// wildcard the way [`Deserialize`] folds a bare `"*"`, so the two
+    /// producers cannot disagree about what `*` means.
+    ///
+    /// [`Deserialize`]: serde::Deserialize
+    pub fn from_names(names: Vec<String>) -> Result<Self> {
+        if fold_wildcard(&names)? {
+            return Ok(TypeSelector::Any);
+        }
+        Ok(TypeSelector::Types(names))
+    }
+
+    /// The declared type names this selector spells out. [`TypeSelector::Any`]
+    /// spells out none: it matches by wildcard rather than by naming a type, so
+    /// the declared-type check has nothing to look up.
+    pub fn names(&self) -> &[String] {
+        match self {
+            TypeSelector::Any => &[],
+            TypeSelector::Types(names) => names,
+        }
+    }
+
+    /// How this position reads back: the wildcard as the `"*"` its author
+    /// wrote, a set by its names. Shared by every surface that shows an edge --
+    /// the `init` DAG summary and the TUI settings panel -- so the two cannot
+    /// spell one row two ways.
+    pub fn spelling(&self) -> String {
+        match self {
+            TypeSelector::Any => WILDCARD.to_string(),
+            TypeSelector::Types(names) => names_spelling(names),
+        }
+    }
+
+    /// True iff this position covers the concrete type `type_name`.
+    pub(crate) fn matches(&self, type_name: &str) -> bool {
+        match self {
+            TypeSelector::Any => true,
+            TypeSelector::Types(names) => names.iter().any(|name| name == type_name),
+        }
+    }
+
+    /// True iff this position names types rather than matching by wildcard.
+    fn is_concrete(&self) -> bool {
+        match self {
+            TypeSelector::Any => false,
+            TypeSelector::Types(_) => true,
+        }
+    }
+
+    /// True iff some one concrete type is covered by both positions.
+    fn intersects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TypeSelector::Any, _) | (_, TypeSelector::Any) => true,
+            (TypeSelector::Types(ours), TypeSelector::Types(theirs)) => {
+                ours.iter().any(|name| theirs.contains(name))
+            }
+        }
+    }
+}
+
+/// The `via` position on an `[[edges]]` row. `"*"` is [`Any`]; a bare
+/// relationship name and a one-element list are the same selector, so the pair
+/// re-emits as the bare name. A set is a disjunction over its members (ADR-032),
+/// exactly as a type position is.
+///
+/// [`Any`]: RelSelector::Any
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelSelector {
+    Any,
+    Named(Vec<String>),
+}
+
+impl RelSelector {
+    /// [`TypeSelector::from_names`] for the `via` position, which no surface
+    /// offers a picker for: repeated `--via` flags, the wizard's prompt and the
+    /// settings panel's comma editor can each type a wildcard beside a name, so
+    /// this is where all three are refused.
+    pub fn from_names(names: Vec<String>) -> Result<Self> {
+        if fold_wildcard(&names)? {
+            return Ok(RelSelector::Any);
+        }
+        Ok(RelSelector::Named(names))
+    }
+
+    /// The declared relationship names this selector spells out.
+    /// [`RelSelector::Any`] spells out none: it matches by wildcard rather than
+    /// by naming a relationship, so the declared-relationship check has nothing
+    /// to look up.
+    pub fn names(&self) -> &[String] {
+        match self {
+            RelSelector::Any => &[],
+            RelSelector::Named(names) => names,
+        }
+    }
+
+    /// How this position reads back, on the same terms a type position does
+    /// ([`TypeSelector::spelling`]).
+    pub fn spelling(&self) -> String {
+        match self {
+            RelSelector::Any => WILDCARD.to_string(),
+            RelSelector::Named(names) => names_spelling(names),
+        }
+    }
+
+    /// True iff this position covers the concrete relationship `rel_name`.
+    pub(crate) fn matches(&self, rel_name: &str) -> bool {
+        match self {
+            RelSelector::Any => true,
+            RelSelector::Named(names) => names.iter().any(|name| name == rel_name),
+        }
+    }
+
+    /// True iff this position names a relationship rather than matching by
+    /// wildcard.
+    fn is_concrete(&self) -> bool {
+        match self {
+            RelSelector::Any => false,
+            RelSelector::Named(_) => true,
+        }
+    }
+
+    /// True iff some one concrete relationship is covered by both positions.
+    fn intersects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RelSelector::Any, _) | (_, RelSelector::Any) => true,
+            (RelSelector::Named(ours), RelSelector::Named(theirs)) => {
+                ours.iter().any(|name| theirs.contains(name))
+            }
+        }
+    }
+}
+
+/// The TOML spellings of a type position: `"*"`, a bare type name, or a list of
+/// type names.
+// Doubles as the serde and schema shape for `TypeSelector`; the doc comment
+// above is the `description` the emitted JSON schema carries.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum TypeSelectorRepr {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// The TOML spellings of the `via` position: `"*"`, a bare relationship name, or
+/// a list of relationship names.
+// Carries the serde and schema shape for `RelSelector`; the doc comment above is
+// the `description` the emitted JSON schema carries.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum RelSelectorRepr {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Serialize for TypeSelector {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            TypeSelector::Any => WILDCARD.serialize(serializer),
+            TypeSelector::Types(names) => match names.as_slice() {
+                [only] => only.serialize(serializer),
+                many => many.serialize(serializer),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeSelector {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match TypeSelectorRepr::deserialize(deserializer)? {
+            TypeSelectorRepr::One(name) if name == WILDCARD => TypeSelector::Any,
+            TypeSelectorRepr::One(name) => TypeSelector::Types(vec![name]),
+            TypeSelectorRepr::Many(names) => TypeSelector::Types(names),
+        })
+    }
+}
+
+impl Serialize for RelSelector {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            RelSelector::Any => WILDCARD.serialize(serializer),
+            RelSelector::Named(names) => match names.as_slice() {
+                [only] => only.serialize(serializer),
+                many => many.serialize(serializer),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RelSelector {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match RelSelectorRepr::deserialize(deserializer)? {
+            RelSelectorRepr::One(name) if name == WILDCARD => RelSelector::Any,
+            RelSelectorRepr::One(name) => RelSelector::Named(vec![name]),
+            RelSelectorRepr::Many(names) => RelSelector::Named(names),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
@@ -283,7 +733,7 @@ pub struct AttrDef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct TypeDef {
     /// The type's canonical singular name, used as its identifier in commands,
-    /// relationships, and rules (e.g. `rfc`, `story`).
+    /// relationships, and edges (e.g. `rfc`, `story`).
     pub name: String,
     /// The plural label shown in the TUI and used for grouping (e.g. `rfcs`).
     pub plural: String,
@@ -314,8 +764,12 @@ pub struct TypeDef {
     /// convention), so `create` and numbering treat it as a singleton.
     #[serde(default)]
     pub singleton: bool,
-    /// The name of another declared type that documents of this type belong
-    /// under, if any. A child must share its parent's store backend.
+    /// The name of another declared type that contains this one, if any. This
+    /// type's documents live under that type's `dir` and share its store
+    /// backend, and that type must be a `singleton`; `validate` reports
+    /// `ParentTypeNotSingleton` and `ParentTypeViolation` otherwise. Containment
+    /// only: it constrains no relationship, since linking is governed by
+    /// `[[edges]]` alone.
     #[serde(default)]
     pub parent_type: Option<String>,
     /// The ordered list of agent action skill names offered for this type. An
@@ -411,9 +865,9 @@ pub struct RelationshipDef {
     /// Absent for ordinary relationships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_native: Option<String>,
-    /// How this relationship participates in context traversal. `None` (the
-    /// default, absent from TOML) means it drives neither the chain walk nor the
-    /// related neighbourhood.
+    /// This relationship's blanket traversal role, holding for every pair of
+    /// types it links. The walks read it only where no `[[edges]]` row assigns
+    /// this relationship a role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traversal: Option<Traversal>,
 }
@@ -422,22 +876,29 @@ pub struct RelationshipDef {
 /// preceded the config registry. Used by `init`'s `starter_config`, the
 /// `to_toml` writer, and the test-only `Config::default()`. The load path
 /// carries none (ADR-011): a real config must declare `[[relationships]]`.
+///
+/// None of them carries a `traversal` marker. The walks these relationships used
+/// to declare are declared by [`starter_edges`]'s two blanket rows instead, and
+/// a row assigning a relationship a role suppresses that relationship's marker
+/// anyway (ADR-035) -- so keeping the markers would change no behaviour and
+/// would teach every new project to state its DAG in two tables, which is the
+/// defect the edge table exists to end (RFC-067 §Problem).
 pub fn starter_relationships() -> Vec<RelationshipDef> {
-    let directional = |name: &str, inverse: &str, traversal: Option<Traversal>| RelationshipDef {
+    let directional = |name: &str, inverse: &str| RelationshipDef {
         name: name.to_string(),
         inverse: Some(inverse.to_string()),
         github_native: None,
-        traversal,
+        traversal: None,
     };
     vec![
-        directional("implements", "implemented-by", Some(Traversal::Chain)),
-        directional("supersedes", "superseded-by", None),
-        directional("blocks", "blocked-by", None),
+        directional("implements", "implemented-by"),
+        directional("supersedes", "superseded-by"),
+        directional("blocks", "blocked-by"),
         RelationshipDef {
             name: "related-to".to_string(),
             inverse: None,
             github_native: None,
-            traversal: Some(Traversal::Related),
+            traversal: None,
         },
     ]
 }
@@ -646,10 +1107,12 @@ pub struct Config {
     pub relationships: Vec<RelationshipDef>,
     #[serde(rename = "tui")]
     pub ui: UiConfig,
-    // Serialized so `to_toml` writes `[[rules]]` into the config it emits, but
-    // deserialized via `RawConfig` in `Config::parse`, not the derive.
-    #[serde(skip_deserializing)]
-    pub rules: Vec<ValidationRule>,
+    // Serialized so `to_toml` writes `[[edges]]` into the config it emits, but
+    // deserialized via `RawConfig` in `Config::parse`, not the derive. An empty
+    // set is skipped: a bare `edges = []` key would be hoisted above the tables
+    // and collide with any `[[edges]]` header the user later appends.
+    #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<EdgeDef>,
     #[serde(skip)]
     pub ref_count_ceiling: usize,
     #[serde(default)]
@@ -806,9 +1269,22 @@ struct RawConfig {
     /// The relationship vocabulary, one per `[[relationships]]` block. Each
     /// declares a name and optional inverse; the block is required.
     relationships: Option<Vec<RelationshipDef>>,
-    /// Structural validation rules between types, one per `[[rules]]` block
-    /// (`parent-child` or `relation-existence` shapes), checked by `validate`.
-    rules: Option<Vec<ValidationRule>>,
+    // The retired `[[rules]]` table, read as opaque values and never as a
+    // shape: nothing in the load path understands a rule any more, and the one
+    // command that still does -- `fix --config` -- reads the source text
+    // itself. The field survives its type only so a config still declaring the
+    // table is refused by name rather than silently ignored (STORY-259,
+    // ADR-011). It is absent from the schema for the same reason: `[[rules]]`
+    // is not part of the config language the schema documents.
+    #[schemars(skip)]
+    rules: Option<Vec<toml::Value>>,
+    /// The document DAG's edge kinds, one per `[[edges]]` block: source type,
+    /// permitted target types, the relationship realizing the edge, and the
+    /// severity of its absence.
+    // `via` is optional on the raw shape only so its absence can be reported
+    // against the edge by name; the schema documents the field as required.
+    #[schemars(with = "Option<Vec<EdgeDef>>")]
+    edges: Option<Vec<RawEdgeDef>>,
     /// The `[templates]` block: where Markdown document templates live.
     templates: Option<Templates>,
     /// The `[naming]` block: the filename pattern new documents are created
@@ -947,31 +1423,103 @@ pub fn starter_types() -> Vec<TypeDef> {
     ]
 }
 
-/// The canonical starter validation rules. Not injected by the load path; only
-/// the config `init` writes and the test-only `Config::default()` use these.
-pub fn default_rules() -> Vec<ValidationRule> {
+/// The starter DAG stated as `[[edges]]` rows: what `init` writes into a fresh
+/// project (ADR-011 keeps the load path free of all of it), and what
+/// `fix --config` seeds into a config that has declared no DAG of its own.
+/// Three constraints and the two walks they hang on, which is the shape this
+/// repository's own migrated config carries.
+///
+/// The two chain constraints name `implements` rather than wildcarding `via`,
+/// because a wildcard would scaffold exactly the imprecision the edge table
+/// exists to escape.
+///
+/// The two blanket rows are what make the set a hierarchy and a neighbourhood
+/// rather than three demands for a link: `implements` chain and `related-to`
+/// related, between any pair of types, exactly as the relationships' global
+/// `traversal` markers once did. They wildcard both type positions on purpose
+/// (RFC-067 §"The traversal cost, stated plainly"): a scaffold that named pairs
+/// would emit a row per type pair, and the precision the table makes available
+/// is the project's to spend, not the scaffold's. They also suppress those
+/// markers (ADR-035), which is why they must be here and not left implicit: the
+/// concrete rows alone would suppress them too and narrow the chain to the two
+/// pairs they name. The concrete rows carry the chain role as well, because a
+/// wildcard `from` enumerates no child types
+/// ([`TraversalWalk::child_types_for`]) and the two findings that walk
+/// `(parent type, child type)` pairs have nothing else to read.
+///
+/// `adrs-need-relations` demands a relationship without naming one, which is
+/// `to = "*"`, `via = "*"` -- the shape RFC-067 §Design gives a
+/// `relation-existence` rule. The wildcards here are the intended ones, and it
+/// states no traversal: a wildcard `via` row that did would suppress every
+/// declared relationship's marker at once (ADR-035 §Consequences).
+///
+/// [`TraversalWalk::child_types_for`]: crate::engine::traversal::TraversalWalk
+pub fn starter_edges() -> Vec<EdgeDef> {
+    let implements = || RelSelector::Named(vec!["implements".to_string()]);
+    let one = |name: &str| TypeSelector::Types(vec![name.to_string()]);
     vec![
-        ValidationRule::ParentChild {
+        EdgeDef {
             name: "stories-need-rfcs".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Warning,
-            require_parent_status: None,
+            from: one("story"),
+            to: one("rfc"),
+            via: implements(),
+            required: Some(Severity::Warning),
+            traversal: Some(Traversal::Chain),
         },
-        ValidationRule::ParentChild {
+        EdgeDef {
             name: "iterations-need-stories".to_string(),
-            child: "iteration".to_string(),
-            parent: "story".to_string(),
-            severity: Severity::Error,
-            require_parent_status: None,
+            from: one("iteration"),
+            to: one("story"),
+            via: implements(),
+            required: Some(Severity::Error),
+            traversal: Some(Traversal::Chain),
         },
-        ValidationRule::RelationExistence {
+        EdgeDef {
             name: "adrs-need-relations".to_string(),
-            doc_type: "adr".to_string(),
-            require: "any-relation".to_string(),
-            severity: Severity::Error,
+            from: one("adr"),
+            to: TypeSelector::Any,
+            via: RelSelector::Any,
+            required: Some(Severity::Error),
+            traversal: None,
+        },
+        EdgeDef {
+            name: "implements-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: implements(),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        },
+        EdgeDef {
+            name: "related-to-traversal".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["related-to".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Related),
         },
     ]
+}
+
+/// The starter vocabulary with the ADR-035 traversal markers put back on it.
+/// This is not what `init` scaffolds -- a scaffolded project states its walks as
+/// [`starter_edges`] rows, which is why [`starter_relationships`] itself marks
+/// nothing. It is the marker fallback: the legacy spelling the loader still
+/// honours where no row assigns a relationship a role, which is the only thing
+/// [`Config::default`]'s edge-less fixture can walk on.
+#[cfg(any(test, feature = "test-support"))]
+fn legacy_marked_relationships() -> Vec<RelationshipDef> {
+    starter_relationships()
+        .into_iter()
+        .map(|rel| {
+            let traversal = match rel.name.as_str() {
+                "implements" => Some(Traversal::Chain),
+                "related-to" => Some(Traversal::Related),
+                _ => None,
+            };
+            RelationshipDef { traversal, ..rel }
+        })
+        .collect()
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -992,9 +1540,9 @@ impl Default for Config {
                     dir: ".lazyspec/templates".to_string(),
                 },
             },
-            relationships: starter_relationships(),
+            relationships: legacy_marked_relationships(),
             ui: UiConfig::default(),
-            rules: default_rules(),
+            edges: Vec::new(),
             ref_count_ceiling: 15,
             certification: CertificationConfig::default(),
             agents: AgentsConfig::default(),
@@ -1117,7 +1665,102 @@ impl Config {
             );
         }
 
-        let rules = raw.rules.unwrap_or_default();
+        // RFC-067: the DAG is declared in `[[edges]]` and nowhere else, so a
+        // config still declaring it as `[[rules]]` declares it twice. ADR-011:
+        // a hard error naming the remedy, no silent fallback to one of the two
+        // declarations. `parse_lenient` -- the read `fix --config` itself
+        // depends on (ADR-012) -- goes on parsing them, or the remedy this
+        // names could not read the config it repairs.
+        //
+        // Non-empty, because `rules = []` declares nothing and there is nothing
+        // in it for the remedy to translate: refusing it would name a fix that
+        // makes no change.
+        if !lenient && raw.rules.is_some_and(|rules| !rules.is_empty()) {
+            bail!(
+                "[[rules]] is retired: the document DAG is declared in [[edges]]. Run \
+                 `lazyspec fix --config --dry-run` to see what migrating this config \
+                 destroys, then `lazyspec fix --config` to migrate it"
+            );
+        }
+
+        let edges = raw
+            .edges
+            .unwrap_or_default()
+            .into_iter()
+            .map(|edge| {
+                let via = edge.via.with_context(|| {
+                    format!(
+                        "edge \"{}\" declares no `via`; name the relationship that realizes it, or `via = \"*\"` for any relationship",
+                        edge.name
+                    )
+                })?;
+                Ok(EdgeDef {
+                    name: edge.name,
+                    from: edge.from,
+                    to: edge.to,
+                    via,
+                    required: edge.required,
+                    traversal: edge.traversal,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for edge in &edges {
+            for (position, selector) in [("from", &edge.from), ("to", &edge.to)] {
+                for type_name in selector.names() {
+                    // A list is a set of type names, so `"*"` inside one is a
+                    // wildcard written where only a name is read. Reporting it
+                    // as an undeclared type sends the reader to `[[types]]` to
+                    // declare something they never meant to name.
+                    if type_name == WILDCARD {
+                        bail!(
+                            "edge \"{}\" writes the wildcard inside a list on `{}`; a wildcard is a \
+                             bare string, not a member of a set: write `{} = \"*\"`",
+                            edge.name,
+                            position,
+                            position
+                        );
+                    }
+                    if !types.iter().any(|t| &t.name == type_name) {
+                        bail!(
+                            "edge \"{}\" names unknown type \"{}\" (not declared in [[types]])",
+                            edge.name,
+                            type_name
+                        );
+                    }
+                }
+            }
+            for via in edge.via.names() {
+                // As on a type position, a list is a set of names, so a wildcard
+                // written inside one would be reported as a relationship the
+                // reader never meant to name.
+                if via == WILDCARD {
+                    bail!(
+                        "edge \"{}\" writes the wildcard inside a list on `via`; a wildcard is a \
+                         bare string, not a member of a set: write `via = \"*\"`",
+                        edge.name
+                    );
+                }
+                if !relationships.iter().any(|r| &r.name == via) {
+                    bail!(
+                        "edge \"{}\" names unknown relationship \"{}\" (not declared in [[relationships]])",
+                        edge.name,
+                        via
+                    );
+                }
+            }
+            // ADR-031: requiring an edge from `*` would demand it of every
+            // declared type, including those where it is nonsense.
+            if edge.required.is_some() && edge.from == TypeSelector::Any {
+                bail!(
+                    "edge \"{}\" sets `required` on a wildcard `from`, which would demand the edge from \
+                     every declared type; name the source types that must carry it, or drop `required`",
+                    edge.name
+                );
+            }
+        }
+        reject_edge_name_collisions(&edges)?;
+        reject_requiredness_ties(&edges)?;
+        reject_traversal_disagreements(&edges)?;
 
         let any_sqids = types
             .iter()
@@ -1210,7 +1853,7 @@ impl Config {
             },
             relationships,
             ui: raw.tui.unwrap_or_default(),
-            rules,
+            edges,
             ref_count_ceiling,
             certification: raw.certification.unwrap_or_default(),
             agents: raw.agents.unwrap_or_default(),
@@ -1466,25 +2109,1206 @@ name = "related-to"
             "schema must expose the top-level `types` property"
         );
 
-        // The internally `shape`-tagged ValidationRule enum lands as a `oneOf`
-        // of two subschemas, each pinning `shape` to a const kebab-case tag.
-        let variants = json["$defs"]["ValidationRule"]["oneOf"]
-            .as_array()
-            .expect("ValidationRule must be a oneOf of variant subschemas");
-        assert_eq!(variants.len(), 2, "two rule shapes");
+        // STORY-259 AC5. The retired `[[rules]]` table is not part of the config
+        // language any more, so the schema defines no shape for it and offers no
+        // key to state it under. `$defs` is asserted as well as `properties`
+        // because a schema that still carried the rule shape would go on
+        // documenting the retired grammar wherever a reader followed a `$ref`.
+        assert!(
+            json["$defs"]["ValidationRule"].is_null(),
+            "the schema must define no rule shape, got {}",
+            json["$defs"]["ValidationRule"]
+        );
+        assert!(
+            json["properties"]["rules"].is_null(),
+            "the schema must offer no `rules` key, got {}",
+            json["properties"]["rules"]
+        );
 
-        let shape_consts: Vec<&str> = variants
-            .iter()
-            .filter_map(|v| v["properties"]["shape"]["const"].as_str())
-            .collect();
+        let edge_props = &json["$defs"]["EdgeDef"]["properties"];
+        for field in ["name", "from", "to", "via", "required", "traversal"] {
+            assert!(
+                edge_props[field].is_object(),
+                "EdgeDef must expose `{field}`, got {edge_props}"
+            );
+        }
+        let type_selector = json["$defs"]["TypeSelectorRepr"].to_string();
         assert!(
-            shape_consts.contains(&"parent-child"),
-            "expected a parent-child shape const, got {shape_consts:?}"
+            json["$defs"]["TypeSelectorRepr"]["anyOf"].is_array(),
+            "a type position must document both the scalar and the list form"
         );
         assert!(
-            shape_consts.contains(&"relation-existence"),
-            "expected a relation-existence shape const, got {shape_consts:?}"
+            type_selector.contains('*'),
+            "a type position must document the wildcard spelling, got {type_selector}"
         );
+
+        let rel_selector = json["$defs"]["RelSelectorRepr"].to_string();
+        assert!(
+            json["$defs"]["RelSelectorRepr"]["anyOf"].is_array(),
+            "`via` must document both the scalar and the list form, got {rel_selector}"
+        );
+        assert!(
+            rel_selector.contains('*'),
+            "`via` must document the wildcard spelling, got {rel_selector}"
+        );
+    }
+
+    /// Two types and the relationship that joins them, for the `[[edges]]`
+    /// tests. Strict load rejects an edge naming anything absent from these.
+    const EDGE_PREAMBLE: &str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+inverse = "related-to"
+"#;
+
+    /// One `parent-child` constraint stated the old way, and the same
+    /// constraint stated as the `[[edges]]` row it translates to. The pair is
+    /// one predicate over two config shapes: strict load refuses the first and
+    /// accepts the second.
+    fn rules_declaration() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[rules]]
+name = "stories-need-rfcs"
+shape = "parent-child"
+child = "story"
+parent = "rfc"
+severity = "warning"
+"#
+        )
+    }
+
+    fn edges_declaration() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "warning"
+"#
+        )
+    }
+
+    // STORY-259 AC1: the DAG is declared in one place, so a config still
+    // declaring it as `[[rules]]` does not load. ADR-011's pattern: a hard
+    // error whose one sentence names the remedy.
+    #[test]
+    fn strict_load_refuses_a_config_declaring_rules_and_names_fix_config() {
+        let error = Config::parse(&rules_declaration()).expect_err("[[rules]] must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("[[rules]]"),
+            "the error must name the table it refuses, got: {message}"
+        );
+        assert!(
+            message.contains("fix --config"),
+            "the error must name the remedy, got: {message}"
+        );
+    }
+
+    // STORY-259 AC2: the other half of the same predicate. The constraint
+    // restated as a row loads, and the row is the one the config declared.
+    #[test]
+    fn strict_load_accepts_the_same_constraint_stated_as_an_edge() {
+        let config = Config::parse(&edges_declaration()).expect("[[edges]] must load");
+
+        assert_eq!(
+            config.edges,
+            vec![EdgeDef {
+                name: "stories-need-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: Some(Severity::Warning),
+                traversal: None,
+            }]
+        );
+    }
+
+    // ADR-012: the lenient read is the one place strict load is bypassed, and
+    // `fix --config` is the only caller. It has to go on ACCEPTING the table the
+    // refusal above names, or the remedy the refusal points at could not read
+    // the config it is meant to repair. What the blocks say is no longer this
+    // module's business -- the migration reads them off the source text
+    // (`ops::fix::config`) -- so all that is asserted here is that the read
+    // does not fail.
+    #[test]
+    fn the_lenient_read_still_accepts_the_rules_the_strict_load_refuses() {
+        Config::parse_lenient(&rules_declaration()).expect("the lenient read accepts rules");
+    }
+
+    // An empty array declares nothing, and `fix --config` finds nothing in it
+    // to translate — so refusing it would leave the user with a config the
+    // remedy cannot repair.
+    #[test]
+    fn strict_load_accepts_an_empty_rules_array() {
+        Config::parse(&format!("{EDGE_PREAMBLE}\nrules = []\n"))
+            .expect("an empty rules array declares nothing");
+    }
+
+    #[test]
+    fn edge_to_reads_a_scalar_as_a_single_element_list() {
+        let with_targets = |to: &str| {
+            format!(
+                "{EDGE_PREAMBLE}
+[[edges]]
+name = \"stories-implement-rfcs\"
+from = \"story\"
+to = {to}
+via = \"implements\"
+required = \"error\"
+"
+            )
+        };
+
+        let scalar = Config::parse(&with_targets("\"rfc\"")).unwrap();
+        let list = Config::parse(&with_targets("[\"rfc\"]")).unwrap();
+
+        assert_eq!(scalar.edges, list.edges);
+        assert_eq!(
+            scalar.edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string()])
+        );
+    }
+
+    #[test]
+    fn edge_to_reads_a_list_as_the_declared_type_set() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = ["story", "rfc"]
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(
+            config.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+        );
+    }
+
+    // An absent `via` must not be read as "any relationship" (ADR-031): the
+    // wildcard is explicit, so the omission is an error that has to point at it.
+    #[test]
+    fn edge_via_reads_a_scalar_as_a_single_element_set() {
+        let with_via = |via: &str| {
+            format!(
+                "{EDGE_PREAMBLE}
+[[edges]]
+name = \"stories-implement-rfcs\"
+from = \"story\"
+to = \"rfc\"
+via = {via}
+"
+            )
+        };
+
+        let scalar = Config::parse(&with_via("\"implements\"")).unwrap();
+        let list = Config::parse(&with_via("[\"implements\"]")).unwrap();
+
+        assert_eq!(scalar.edges, list.edges);
+        assert_eq!(
+            scalar.edges[0].via,
+            RelSelector::Named(vec!["implements".to_string()])
+        );
+    }
+
+    // ADR-032: a set in `via` is a disjunction over its members, so a row naming
+    // two relationships is satisfied by either.
+    #[test]
+    fn edge_via_reads_a_list_as_the_declared_relationship_set() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = "rfc"
+via = ["implements", "related-to"]
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert_eq!(
+            edge.via,
+            RelSelector::Named(vec!["implements".to_string(), "related-to".to_string()])
+        );
+        assert!(covers(edge, "story", "implements", "rfc"));
+        assert!(covers(edge, "story", "related-to", "rfc"));
+    }
+
+    // A one-element set and the bare name are the same selector, so the pair
+    // must re-emit as the spelling a human writes.
+    #[test]
+    fn edge_via_re_emits_a_one_element_set_as_a_bare_name() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = ["implements"]
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+
+        let emitted: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+
+        assert_eq!(
+            emitted["edges"].as_array().unwrap()[0]["via"],
+            toml::Value::from("implements")
+        );
+    }
+
+    #[test]
+    fn edge_via_a_set_holding_an_undeclared_relationship_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-supersede-rfcs"
+from = "story"
+to = ["rfc"]
+via = ["implements", "supersedes"]
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("supersedes"),
+            "names the offending member: {err}"
+        );
+        assert!(
+            err.contains("stories-supersede-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_without_via_fails_load_naming_the_edge_and_the_wildcard() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = "rfc"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-implement-work") && err.contains(r#"via = "*""#),
+            "a missing `via` must name the edge and the wildcard spelling, got {err}"
+        );
+    }
+
+    #[test]
+    fn edge_wildcard_positions_parse_to_the_any_selectors() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "*"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert_eq!(edge.from, TypeSelector::Any);
+        assert_eq!(edge.to, TypeSelector::Any);
+        assert_eq!(edge.via, RelSelector::Any);
+    }
+
+    // A position assembled from repeated flags or a picker's set: the lone
+    // wildcard is the wildcard, one name is that one name, and the mix the
+    // loader refuses inside a list is refused before it can be written.
+    #[test]
+    fn a_type_position_built_from_names_folds_the_lone_wildcard_and_refuses_a_mix() {
+        assert_eq!(
+            TypeSelector::from_names(vec![WILDCARD.to_string()]).unwrap(),
+            TypeSelector::Any
+        );
+        assert_eq!(
+            TypeSelector::from_names(vec!["story".to_string()]).unwrap(),
+            TypeSelector::Types(vec!["story".to_string()])
+        );
+
+        let err = TypeSelector::from_names(vec!["story".to_string(), WILDCARD.to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(WILDCARD) && err.contains("story"),
+            "the refusal must show the wildcard and the name it was mixed with, got {err}"
+        );
+    }
+
+    // `via` is a set of relationship names on the same terms `to` is a set of
+    // type names (ADR-032), so it folds and refuses the same way.
+    #[test]
+    fn a_via_position_built_from_names_folds_the_lone_wildcard_and_refuses_a_mix() {
+        assert_eq!(
+            RelSelector::from_names(vec![WILDCARD.to_string()]).unwrap(),
+            RelSelector::Any
+        );
+        assert_eq!(
+            RelSelector::from_names(vec!["implements".to_string()]).unwrap(),
+            RelSelector::Named(vec!["implements".to_string()])
+        );
+
+        let err = RelSelector::from_names(vec![WILDCARD.to_string(), "implements".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(WILDCARD) && err.contains("implements"),
+            "the refusal must show the wildcard and the name it was mixed with, got {err}"
+        );
+    }
+
+    /// ADR-031's question -- does this row cover the concrete edge `from -via->
+    /// to` -- asked whole. Production asks it in two halves, because `from`
+    /// gates a document and `via`/`to` gate one of its relations.
+    fn covers(edge: &EdgeDef, from: &str, via: &str, to: &str) -> bool {
+        edge.from.matches(from) && edge.matches_target(via, to)
+    }
+
+    // STORY-256 AC1: one wildcard row stands in for every type pair, so the
+    // relationship it names is the only thing left doing the matching.
+    #[test]
+    fn edge_with_wildcard_endpoints_matches_any_type_pair_on_the_named_relationship() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        for (from, to) in [("story", "rfc"), ("rfc", "story"), ("story", "story")] {
+            assert!(
+                covers(edge, from, "related-to", to),
+                "wildcard endpoints must match {from} -related-to-> {to}"
+            );
+        }
+        assert!(
+            !covers(edge, "story", "implements", "rfc"),
+            "a concrete `via` must not match another relationship"
+        );
+    }
+
+    #[test]
+    fn edge_with_concrete_positions_matches_only_the_declared_triple() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = ["rfc"]
+via = "implements"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert!(covers(edge, "story", "implements", "rfc"));
+        assert!(
+            !covers(edge, "rfc", "implements", "rfc"),
+            "a source type outside `from` must not match"
+        );
+        assert!(
+            !covers(edge, "story", "implements", "story"),
+            "a target type outside `to` must not match"
+        );
+        assert!(
+            !covers(edge, "story", "related-to", "rfc"),
+            "another relationship must not match"
+        );
+    }
+
+    #[test]
+    fn edge_with_wildcard_via_matches_any_relationship() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-relate-somehow"
+from = "story"
+to = "*"
+via = "*"
+"#
+        );
+
+        let edge = &Config::parse(&toml_str).unwrap().edges[0];
+
+        assert!(covers(edge, "story", "implements", "rfc"));
+        assert!(covers(edge, "story", "related-to", "story"));
+        assert!(
+            !covers(edge, "rfc", "implements", "story"),
+            "the concrete `from` still constrains the source type"
+        );
+    }
+
+    /// Two edges spanning every spelling a human writes, for the `to_toml`
+    /// round-trip tests.
+    fn wildcard_and_concrete_edges() -> String {
+        format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "*"
+
+[[edges]]
+name = "stories-implement-work"
+from = "story"
+to = ["story", "rfc"]
+via = "implements"
+
+[[edges]]
+name = "stories-reach-rfcs-either-way"
+from = "story"
+to = "rfc"
+via = ["implements", "related-to"]
+"#
+        )
+    }
+
+    // Every surface that shows an edge position shares one spelling, so the
+    // `init` DAG summary and the TUI settings panel cannot drift. It follows
+    // `to_toml`: a wildcard is bare, a lone name is bare, a set is a list.
+    #[test]
+    fn edge_position_spelling_follows_the_toml_it_was_written_as() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        assert_eq!(config.edges[0].from.spelling(), "*");
+        assert_eq!(config.edges[0].via.spelling(), "*");
+        assert_eq!(config.edges[1].from.spelling(), "story");
+        assert_eq!(config.edges[1].to.spelling(), "[story, rfc]");
+        assert_eq!(config.edges[1].via.spelling(), "implements");
+        assert_eq!(config.edges[2].via.spelling(), "[implements, related-to]");
+    }
+
+    // A `via` naming nothing matches no relationship (ADR-032), which is the
+    // opposite of the wildcard: spelling both `*` would tell a reader the row
+    // does the reverse of what it does.
+    #[test]
+    fn an_empty_edge_position_is_not_spelled_as_the_wildcard() {
+        assert_eq!(RelSelector::Named(Vec::new()).spelling(), "[]");
+        assert_eq!(TypeSelector::Types(Vec::new()).spelling(), "[]");
+        assert_eq!(RelSelector::Any.spelling(), "*");
+    }
+
+    // `Config::to_toml` backs the config writers in `src/cli/config.rs`, so a
+    // `"*"` that came back as `["*"]` would be propagated into a user's file.
+    #[test]
+    fn edge_selectors_re_emit_the_toml_spelling_they_were_written_in() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        let emitted: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        let edges = emitted["edges"].as_array().unwrap();
+
+        assert_eq!(edges[0]["from"], toml::Value::from("*"));
+        assert_eq!(edges[0]["to"], toml::Value::from("*"));
+        assert_eq!(edges[0]["via"], toml::Value::from("*"));
+        assert_eq!(edges[1]["from"], toml::Value::from("story"));
+        assert_eq!(edges[1]["to"], toml::Value::from(vec!["story", "rfc"]));
+        assert_eq!(edges[1]["via"], toml::Value::from("implements"));
+        assert_eq!(
+            edges[2]["via"],
+            toml::Value::from(vec!["implements", "related-to"])
+        );
+    }
+
+    #[test]
+    fn edge_selectors_survive_a_to_toml_round_trip() {
+        let config = Config::parse(&wildcard_and_concrete_edges()).unwrap();
+
+        let reparsed = Config::parse(&config.to_toml().unwrap()).unwrap();
+
+        assert_eq!(reparsed.edges, config.edges);
+    }
+
+    // ADR-030 moves the traversal role off the relationship name and onto the
+    // individual row. A row silent on it joins no walk, which is a different
+    // thing from joining one, so the absence has to survive a round trip as an
+    // absence rather than as a default.
+    #[test]
+    fn edge_traversal_round_trips_with_an_absent_role_omitted() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[[edges]]
+name = "stories-implement-stories"
+from = "story"
+to = "story"
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, Some(Traversal::Related));
+        assert_eq!(config.edges[2].traversal, None);
+
+        let emitted = config.to_toml().unwrap();
+        let edges = toml::from_str::<toml::Value>(&emitted).unwrap()["edges"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(edges[0]["traversal"], toml::Value::from("chain"));
+        assert_eq!(edges[1]["traversal"], toml::Value::from("related"));
+        assert!(
+            edges[2].get("traversal").is_none(),
+            "skip_serializing_if must omit an absent traversal: {emitted}"
+        );
+        assert_eq!(Config::parse(&emitted).unwrap().edges, config.edges);
+    }
+
+    #[test]
+    fn config_without_an_edge_table_loads_with_no_edges() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.edges.is_empty());
+    }
+
+    #[test]
+    fn edge_targeting_an_undeclared_type_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-spikes"
+from = "story"
+to = ["spike"]
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("spike"), "names the unknown type: {err}");
+        assert!(
+            err.contains("stories-implement-spikes"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_sourced_from_an_undeclared_type_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "spikes-implement-rfcs"
+from = "spike"
+to = ["rfc"]
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("spike"), "names the unknown type: {err}");
+        assert!(
+            err.contains("spikes-implement-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    // `["*"]` is a list whose one member happens to be the wildcard spelling,
+    // and a list is read as type names. Reporting `"*"` as an undeclared type
+    // sends the reader to `[[types]]` to declare a type they never meant.
+    #[test]
+    fn edge_with_a_wildcard_inside_a_list_says_how_to_spell_a_wildcard() {
+        for position in ["from", "to"] {
+            let toml_str = format!(
+                "{EDGE_PREAMBLE}
+[[edges]]
+name = \"listed-wildcard\"
+from = {}
+to = {}
+via = \"implements\"
+",
+                if position == "from" {
+                    "[\"*\"]"
+                } else {
+                    "\"story\""
+                },
+                if position == "to" {
+                    "[\"*\"]"
+                } else {
+                    "\"rfc\""
+                },
+            );
+
+            let err = Config::parse(&toml_str).unwrap_err().to_string();
+            assert!(
+                err.contains("listed-wildcard"),
+                "names the offending edge: {err}"
+            );
+            assert!(
+                err.contains(&format!("{position} = \"*\"")),
+                "shows the bare-string spelling for `{position}`: {err}"
+            );
+            assert!(
+                !err.contains("not declared in [[types]]"),
+                "must not send the reader to [[types]]: {err}"
+            );
+        }
+    }
+
+    // `via` is a set of relationship names on the same terms `to` is a set of
+    // type names, so a wildcard written inside one misdirects the same way.
+    #[test]
+    fn edge_with_a_wildcard_inside_a_via_list_says_how_to_spell_a_wildcard() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "listed-wildcard-via"
+from = "story"
+to = "rfc"
+via = ["*"]
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("listed-wildcard-via"),
+            "names the offending edge: {err}"
+        );
+        assert!(
+            err.contains(r#"via = "*""#),
+            "shows the bare-string spelling: {err}"
+        );
+        assert!(
+            !err.contains("not declared in [[relationships]]"),
+            "must not send the reader to [[relationships]]: {err}"
+        );
+    }
+
+    // ADR-031 keeps `name` mandatory so an error can identify a row by it, and
+    // `config_write` addresses rows by name when it reconciles `[[edges]]`.
+    // Two rows sharing one leave both readers unable to say which row they mean.
+    #[test]
+    fn two_edges_sharing_a_name_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+
+[[edges]]
+name = "stories-implement-rfcs"
+from = "rfc"
+to = "story"
+via = "related-to"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("stories-implement-rfcs"),
+            "names the duplicated name: {err}"
+        );
+        assert!(
+            err.contains('1') && err.contains('2'),
+            "names both rows: {err}"
+        );
+    }
+
+    // An empty `name` names the row nothing, so every message about it and every
+    // write back to it addresses the empty string.
+    #[test]
+    fn edge_with_an_empty_name_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = ""
+from = "story"
+to = "rfc"
+via = "implements"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("name"), "names the offending key: {err}");
+        assert!(err.contains("empty"), "says what is wrong with it: {err}");
+    }
+
+    #[test]
+    fn edge_via_an_undeclared_relationship_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-supersede-rfcs"
+from = "story"
+to = ["rfc"]
+via = "supersedes"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("supersedes"),
+            "names the unknown relationship: {err}"
+        );
+        assert!(
+            err.contains("stories-supersede-rfcs"),
+            "names the offending edge: {err}"
+        );
+    }
+
+    // STORY-256 AC4 / ADR-031: requiring an edge from `*` would demand it of
+    // every declared type, including the ones where it is nonsense.
+    #[test]
+    fn edge_requiring_a_wildcard_source_fails_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "everything-relates"
+from = "*"
+to = "*"
+via = "related-to"
+required = "error"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("everything-relates"),
+            "names the offending edge: {err}"
+        );
+        assert!(
+            err.contains("wildcard `from`"),
+            "names the wildcard source as the reason: {err}"
+        );
+    }
+
+    #[test]
+    fn edge_with_a_wildcard_source_and_no_requiredness_loads() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "everything-relates"
+from = "*"
+to = "*"
+via = "related-to"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].from, TypeSelector::Any);
+        assert_eq!(config.edges[0].required, None);
+    }
+
+    // STORY-256 AC3 / ADR-031: both rows below score two concrete positions and
+    // both cover `story -implements-> rfc`, so nothing picks between their
+    // severities.
+    #[test]
+    fn equally_specific_overlapping_edges_disagreeing_on_severity_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-strictly"
+from = "story"
+to = "*"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-implement-loosely"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "warning"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-implement-strictly") && err.contains("stories-implement-loosely"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("required"),
+            "names requiredness as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031: a row that omits `required` states no requiredness, so it ties
+    // with nothing. Absence is not a disagreement, and requiredness comes from
+    // the row that states it.
+    #[test]
+    fn equally_specific_overlapping_edges_where_only_one_states_required_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-must-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-may-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    // RFC-067 §Design's starter shape: a wildcard `related-to` row and a
+    // `relation-existence`-shaped demand. One concrete position each, and every
+    // position intersects, so `iteration -related-to-> story` is covered by
+    // both -- but only one of them states a requiredness, so there is nothing to
+    // break a tie over.
+    #[test]
+    fn a_wildcard_documentation_row_does_not_tie_with_an_equally_specific_demand() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[types]]
+name = "iteration"
+plural = "iterations"
+dir = "docs/iterations"
+prefix = "ITERATION"
+
+[[edges]]
+name = "iterations-need-something"
+from = "iteration"
+to = "*"
+via = "*"
+required = "error"
+
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    // The tie is still a load error where both rows state a severity, at the
+    // one concrete position ADR-031 §Consequences calls coarse. Both rows name
+    // `from` concretely because `required` on a wildcard `from` is rejected
+    // first, and their `from` sets intersect on `story`.
+    #[test]
+    fn two_stated_severities_tie_at_one_concrete_position() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-need-something"
+from = "story"
+to = "*"
+via = "*"
+required = "error"
+
+[[edges]]
+name = "work-wants-something"
+from = ["story", "rfc"]
+to = "*"
+via = "*"
+required = "warning"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-need-something") && err.contains("work-wants-something"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("equally specific"),
+            "gives the tie as the reason: {err}"
+        );
+    }
+
+    // ADR-031: the more specific row wins, so an overlap across specificity
+    // levels is a resolution rather than an ambiguity.
+    #[test]
+    fn overlapping_edges_of_unequal_specificity_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+
+[[edges]]
+name = "stories-relate-to-rfcs"
+from = "story"
+to = "rfc"
+via = "related-to"
+required = "error"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    #[test]
+    fn equally_specific_edges_that_cannot_both_match_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "rfcs-relate-to-stories"
+from = "rfc"
+to = "story"
+via = "related-to"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    #[test]
+    fn equally_specific_overlapping_edges_agreeing_on_requiredness_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-implement-strictly"
+from = "story"
+to = "*"
+via = "implements"
+required = "error"
+
+[[edges]]
+name = "stories-implement-rfcs-strictly"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "error"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges.len(), 2);
+    }
+
+    // STORY-257 AC3 / ADR-031: traversal composes, so two rows that can match
+    // `story -implements-> rfc` and name different roles have no resolution.
+    // Both rows below score two concrete positions.
+    #[test]
+    fn equally_specific_overlapping_edges_disagreeing_on_traversal_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-through-implements"
+from = "story"
+to = "*"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-relate-to-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+traversal = "related"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("stories-chain-through-implements")
+                && err.contains("stories-relate-to-rfcs"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("traversal"),
+            "names traversal as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031: unlike requiredness, traversal does not resolve by specificity.
+    // The concrete row below scores three and the wildcard row one, and that
+    // gap still leaves no answer for the edge they both cover.
+    #[test]
+    fn overlapping_edges_of_unequal_specificity_disagreeing_on_traversal_fail_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "general-relatedness"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = "rfc"
+via = "related-to"
+traversal = "chain"
+"#
+        );
+
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+
+        assert!(
+            err.contains("general-relatedness") && err.contains("stories-chain-to-rfcs"),
+            "names both conflicting edges: {err}"
+        );
+        assert!(
+            err.contains("traversal"),
+            "names traversal as the disagreement: {err}"
+        );
+    }
+
+    // ADR-031: a row silent on `traversal` states no role, so it disagrees with
+    // nothing -- the same conclusion the ADR reaches for an absent `required`.
+    // Silence is not "chain by default" and does not become the other row's
+    // role either, so each row keeps what it wrote.
+    #[test]
+    fn overlapping_edges_where_only_one_states_traversal_load() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-may-implement-anything"
+from = "story"
+to = "*"
+via = "implements"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, None);
+    }
+
+    // ADR-031: an edge walks if any matching row gives it a role, so two rows
+    // naming the *same* role compose rather than colliding.
+    #[test]
+    fn overlapping_edges_agreeing_on_traversal_each_keep_the_shared_role() {
+        let toml_str = format!(
+            "{EDGE_PREAMBLE}{}",
+            r#"
+[[edges]]
+name = "stories-chain-through-implements"
+from = "story"
+to = "*"
+via = "implements"
+traversal = "chain"
+
+[[edges]]
+name = "stories-chain-to-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+traversal = "chain"
+"#
+        );
+
+        let config = Config::parse(&toml_str).unwrap();
+
+        assert_eq!(config.edges[0].traversal, Some(Traversal::Chain));
+        assert_eq!(config.edges[1].traversal, Some(Traversal::Chain));
     }
 
     #[test]
@@ -2443,70 +4267,6 @@ interactive = 'claude "$LAZYSPEC_PROMPT"'
         let from_a = lc.targets_from("a");
         assert_eq!(from_a, vec!["b", "c"]);
         assert!(!from_a.contains(&"a"));
-    }
-
-    // AC5 (data): a parent-child rule with `require_parent_status` parses and the
-    // field is readable.
-    #[test]
-    fn parent_child_rule_parses_require_parent_status() {
-        let toml_str = r#"
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-accepted-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "error"
-require_parent_status = "accepted"
-"#;
-        let config = Config::parse(toml_str).unwrap();
-        match &config.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
-            other => panic!("unexpected rule: {other:?}"),
-        }
-    }
-
-    // AC5 (data): a parent-child rule WITHOUT the key parses with the field None.
-    #[test]
-    fn parent_child_rule_without_require_parent_status_is_none() {
-        let toml_str = r#"
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "stories-need-rfcs"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "warning"
-"#;
-        let config = Config::parse(toml_str).unwrap();
-        match &config.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert!(require_parent_status.is_none()),
-            other => panic!("unexpected rule: {other:?}"),
-        }
     }
 
     // AC1: a [[types.attributes]] block deserializes into TypeDef.attributes,

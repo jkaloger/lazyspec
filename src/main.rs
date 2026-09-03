@@ -764,13 +764,96 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Some(ConfigCommand::AddGate { name, status }) => {
+                Some(ConfigCommand::AddEdge {
+                    name,
+                    from,
+                    to,
+                    via,
+                    required,
+                    traversal,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
                     let pb =
-                        lazyspec::cli::spinner::op_spinner(format!("gating rule {name}"), json);
-                    match lazyspec::cli::config::run_add_gate(&cwd, &fs, &name, &status) {
-                        Ok(()) => lazyspec::cli::spinner::finish_ok(pb, "gate added"),
+                        lazyspec::cli::spinner::op_spinner(format!("adding edge {name}"), json);
+                    match lazyspec::cli::config::run_add_edge(
+                        &cwd,
+                        &fs,
+                        &name,
+                        &from,
+                        &to,
+                        &via,
+                        required.as_deref(),
+                        traversal.as_deref(),
+                    ) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge added");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_add_edge_json(&edge)?);
+                            }
+                        }
                         Err(e) => {
-                            lazyspec::cli::spinner::finish_err(pb, "add-gate failed");
+                            lazyspec::cli::spinner::finish_err(pb, "add-edge failed");
+                            return Err(e);
+                        }
+                    }
+                }
+                Some(ConfigCommand::SetEdge {
+                    name,
+                    from,
+                    to,
+                    via,
+                    required,
+                    no_required,
+                    traversal,
+                    no_traversal,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("updating edge {name}"), json);
+                    let edit = lazyspec::cli::config::EdgeEdit {
+                        from,
+                        to,
+                        via,
+                        required: lazyspec::cli::config::FieldEdit::from_flags(
+                            required,
+                            no_required,
+                        ),
+                        traversal: lazyspec::cli::config::FieldEdit::from_flags(
+                            traversal,
+                            no_traversal,
+                        ),
+                    };
+                    match lazyspec::cli::config::run_set_edge(&cwd, &fs, &name, edit) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge updated");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_set_edge_json(&edge)?);
+                            }
+                        }
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "set-edge failed");
+                            return Err(e);
+                        }
+                    }
+                }
+                Some(ConfigCommand::RemoveEdge {
+                    name,
+                    json: json_flag,
+                }) => {
+                    let json = json || json_flag;
+                    let pb =
+                        lazyspec::cli::spinner::op_spinner(format!("removing edge {name}"), json);
+                    match lazyspec::cli::config::run_remove_edge(&cwd, &fs, &name) {
+                        Ok(edge) => {
+                            lazyspec::cli::spinner::finish_ok(pb, "edge removed");
+                            if json {
+                                println!("{}", lazyspec::cli::config::run_remove_edge_json(&edge)?);
+                            }
+                        }
+                        Err(e) => {
+                            lazyspec::cli::spinner::finish_err(pb, "remove-edge failed");
                             return Err(e);
                         }
                     }

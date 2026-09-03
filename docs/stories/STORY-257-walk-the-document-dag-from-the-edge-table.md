@@ -1,7 +1,7 @@
 ---
 title: Walk the document DAG from the edge table
 type: story
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-08-29
 tags: []

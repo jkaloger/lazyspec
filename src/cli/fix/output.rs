@@ -80,13 +80,11 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
-    for name in &result.rules_added {
-        if dry_run {
-            out.push_str(&format!("Would add rule {}\n", name));
-        } else {
-            out.push_str(&format!("Added rule {}\n", name));
-        }
-    }
+    // No line names an added rule, and no result field carries one. A standard
+    // constraint the config was missing is declared as an `[[edges]]` row and
+    // seeded as one, so the "Wrote edge" line below is the whole report of it;
+    // a line calling the same name a rule would point the reader at a table
+    // that no longer loads.
 
     for name in &result.lifecycles_added {
         if dry_run {
@@ -96,8 +94,60 @@ pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> St
         }
     }
 
+    // The edge migration rewrites rather than appends, so a run can change the
+    // file while adding nothing. Reporting only the additions would let such a
+    // run print "nothing to add" over a rewrite.
+    for name in &result.edges_written {
+        if dry_run {
+            out.push_str(&format!("Would write edge {}\n", name));
+        } else {
+            out.push_str(&format!("Wrote edge {}\n", name));
+        }
+    }
+
+    for name in &result.rules_removed {
+        if dry_run {
+            out.push_str(&format!("Would remove rule {}\n", name));
+        } else {
+            out.push_str(&format!("Removed rule {}\n", name));
+        }
+    }
+
+    for name in &result.traversal_removed {
+        if dry_run {
+            out.push_str(&format!(
+                "Would remove traversal from relationship {}\n",
+                name
+            ));
+        } else {
+            out.push_str(&format!("Removed traversal from relationship {}\n", name));
+        }
+    }
+
+    // Last, so the destructions are the lines still on screen when the reader
+    // stops reading. Neither is recoverable from anything else in the plan: a
+    // comment leaves no trace in the migrated config, and the retired gate
+    // changes no finding on either side of the rewrite.
+    for lost in &result.comments_lost {
+        let verb = if dry_run { "Would lose" } else { "Lost" };
+        out.push_str(&format!(
+            "{verb} comment on {} {}: {}\n",
+            lost.block.label(),
+            lost.name,
+            lost.comment
+        ));
+    }
+
+    for name in &result.gates_dropped {
+        let verb = if dry_run { "Would drop" } else { "Dropped" };
+        out.push_str(&format!(
+            "{verb} the require_parent_status gate on rule {name}: \
+             status-conditioned create gating is retired with no successor (ADR-033)\n"
+        ));
+    }
+
     if out.is_empty() {
-        out.push_str("Config already up to date; nothing to add\n");
+        out.push_str("Config already up to date; nothing to add and nothing to migrate\n");
     }
 
     out

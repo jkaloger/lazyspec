@@ -10,13 +10,14 @@
 
 use crate::engine::context::ContextNode;
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
-use crate::engine::store::{extract_id_from_name, Store};
+use crate::engine::store::Store;
+use crate::engine::traversal::related_neighbours;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// One flattened graph row: a document positioned at a tree `depth`, carrying the
-/// fields the renderer shows plus its cross-cutting `related-to` annotations.
+/// fields the renderer shows plus its cross-cutting related-role annotations.
 #[derive(Debug, Clone)]
 pub struct GraphNode {
     pub path: PathBuf,
@@ -24,10 +25,10 @@ pub struct GraphNode {
     pub doc_type: DocType,
     pub status: Status,
     pub depth: usize,
-    /// Doc ids of this node's OWN depth-1 `related-to` neighbours, minus those on
-    /// its `implements` lineage (its transitive ancestors and descendants, already
+    /// Doc ids of this node's OWN depth-1 related-role neighbours, minus those on
+    /// its chain lineage (its transitive ancestors and descendants, already
     /// drawn as tree edges through the node). Siblings/cousins reachable only
-    /// through a shared ancestor ARE included — they have no `implements` path to
+    /// through a shared ancestor ARE included — they have no chain path to
     /// the node, so the link is genuinely cross-cutting. Display-only (RFC-006
     /// Graph mode Phase 1, rendered `┄▷ <id>` by the renderer), sorted for
     /// determinism. This is the node's own depth-1 set, NOT the `context`
@@ -196,7 +197,7 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// Flatten the engine's whole-store context forest into the flat
 /// `Vec<GraphNode>` the graph view renders. Walks the forest roots-first,
 /// depth-first, mirroring the CLI `render_tree` traversal: roots (nodes with no
-/// in-graph `implements` parent) sorted by path, children sorted by path, with
+/// in-graph chain parent) sorted by path, children sorted by path, with
 /// `depth` assigned by tree level.
 ///
 /// Each row's `reverse` flag is decided AT THE EDGE it was reached by, from the
@@ -245,26 +246,27 @@ fn compare_siblings(a: &DocMeta, b: &DocMeta, sort: &GraphSort) -> Ordering {
 /// are emitted as depth-0 subtrees after the root pass, so the render is complete
 /// and terminates.
 ///
-/// Each full node also carries its depth-1 `related-to` neighbours as a
-/// display-only annotation set (RFC-006 Graph mode Phase 1), sourced from the
-/// store's `forward_links`/`reverse_links` filtered to the `related-to` relation.
-/// A neighbour that lies on the node's own `implements` lineage — a transitive
+/// Each full node also carries its depth-1 related neighbours as a display-only
+/// annotation set (RFC-006 Graph mode Phase 1), sourced from the store's
+/// `forward_links`/`reverse_links` filtered to the triples the config gives the
+/// related traversal role — see [`related_neighbours`].
+/// A neighbour that lies on the node's own chain lineage — a transitive
 /// ancestor (parent, grandparent, …) or a transitive descendant (child,
 /// grandchild, …) — is excluded, because such a link is already drawn as a tree
 /// edge through this node and is not cross-cutting. Everything else IS surfaced,
 /// including siblings/cousins reachable only through a SHARED ANCESTOR (e.g. two
-/// docs that both `implements` the same root and are `related-to` each other):
-/// there is no `implements` path between them, so the link is genuinely
+/// docs that both take the same root as a chain parent and are `related-to` each
+/// other): there is no chain path between them, so the link is genuinely
 /// cross-cutting and the Story AC ("connected only by a related-to link, no
 /// implements path between them") requires it to surface.
 ///
 /// The exclusion is the node's OWN ancestors and descendants only — see
-/// [`implements_lineage_of`] for why the up/down walks must stay independent so a
+/// [`chain_lineage_of`] for why the up/down walks must stay independent so a
 /// shared ancestor's other children are not swept in. The ancestor direction
 /// matches the upward BFS `chain_paths` exclusion in `resolve_chain`
 /// (`engine/context.rs`). Note this annotation set is therefore NOT equal in
 /// general to `resolve_chain(id, 1).related`: `resolve_chain` also surfaces the
-/// related-to links of the node's `implements` ancestors, whereas this annotation
+/// related-role links of the node's chain ancestors, whereas this annotation
 /// is strictly the node's OWN depth-1 cross-cutting set.
 pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -> Vec<GraphNode> {
     // child adjacency: parent path -> child paths.
@@ -295,11 +297,11 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
         sort_siblings(kids);
     }
 
-    // Per-node `implements` lineage: the node's own transitive ancestors AND
-    // descendants. A related-to neighbour on this set is already drawn as a tree
+    // Per-node chain lineage: the node's own transitive ancestors AND
+    // descendants. A related-role neighbour on this set is already drawn as a tree
     // edge through the node, so it is not re-surfaced as a cross-cutting
     // annotation. Siblings and cousins reached only via a shared ancestor are NOT
-    // on the lineage and ARE surfaced (see flatten_forest / implements_lineage_of
+    // on the lineage and ARE surfaced (see flatten_forest / chain_lineage_of
     // doc-comments).
     let parents_of: HashMap<&PathBuf, &Vec<PathBuf>> =
         forest.iter().map(|n| (&n.doc.path, &n.parents)).collect();
@@ -308,7 +310,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
         .map(|n| {
             (
                 &n.doc.path,
-                implements_lineage_of(&n.doc.path, &parents_of, &children),
+                chain_lineage_of(&n.doc.path, &parents_of, &children),
             )
         })
         .collect();
@@ -367,7 +369,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
     out
 }
 
-/// The node's own `implements` lineage: its transitive ANCESTORS (parents,
+/// The node's own chain lineage: its transitive ANCESTORS (parents,
 /// grandparents, …) and its transitive DESCENDANTS (children, grandchildren, …),
 /// with the node's own path excluded. Used to exclude already-edge-connected
 /// related-to neighbours (links drawn as a tree edge through this node) from the
@@ -377,7 +379,7 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
 /// parents and a downward pass over children — that never cross-pollinate. The
 /// up-walk never descends and the down-walk never ascends, so an ANCESTOR's other
 /// children (the node's siblings/cousins) are never collected. That is the whole
-/// fix: a sibling reached only through a shared ancestor has no `implements` path
+/// fix: a sibling reached only through a shared ancestor has no chain path
 /// to the node, so its related-to link is genuinely cross-cutting and must
 /// surface (the Story AC's "connected only by a related-to link"). The earlier
 /// single-stack walk pushed both parents and children of every popped node, so
@@ -385,11 +387,11 @@ pub fn flatten_forest(forest: &[ContextNode], store: &Store, sort: &GraphSort) -
 ///
 /// The ancestor direction mirrors the upward BFS that builds `chain_paths` in
 /// `resolve_chain` (`engine/context.rs`). The descendant direction is also
-/// excluded because a direct/transitive child connected by a drawn `implements`
+/// excluded because a direct/transitive child connected by a drawn chain
 /// edge is on the tree, not cross-cutting (e.g. a root that both parents and is
 /// related-to its child must not annotate that child). Bounded by the forest
 /// size; the seen sets guard cycles.
-fn implements_lineage_of(
+fn chain_lineage_of(
     path: &Path,
     parents_of: &HashMap<&PathBuf, &Vec<PathBuf>>,
     children: &HashMap<PathBuf, Vec<PathBuf>>,
@@ -425,29 +427,20 @@ fn implements_lineage_of(
     lineage
 }
 
-/// The node's OWN depth-1 cross-cutting `related-to` neighbours as doc ids,
-/// sorted, excluding any neighbour on the node's `implements` lineage (a
-/// transitive ancestor or descendant, already drawn as a tree edge through the
-/// node). Reads the same propagated `forward_links`/`reverse_links` the `context`
-/// command's related set reads, but is NOT equal to `context <id> --json`'s
-/// `related` in general: that set also surfaces the related-to links of the
-/// node's ancestors, whereas this is the node's own depth-1 set only (see
+/// The node's OWN depth-1 cross-cutting related neighbours as doc ids, sorted,
+/// excluding any neighbour on the node's chain lineage (a transitive
+/// ancestor or descendant, already drawn as a tree edge through the node). Takes
+/// its neighbours from [`related_neighbours`], the same engine walk
+/// `resolve_chain`'s related BFS steps, but is NOT equal to `context <id>
+/// --json`'s `related` in general: that set also surfaces the related links of
+/// the node's ancestors, whereas this is the node's own depth-1 set only (see
 /// `flatten_forest` doc-comment).
 fn related_annotations(path: &Path, lineage: &HashSet<PathBuf>, store: &Store) -> Vec<String> {
-    let mut ids: BTreeSet<String> = BTreeSet::new();
-    for (rel, neighbour) in store.related_to(path) {
-        if rel.as_str() != "related-to" || lineage.contains(neighbour) {
-            continue;
-        }
-        let id = match store.get(neighbour) {
-            Some(doc) => doc.id.clone(),
-            None => neighbour
-                .file_stem()
-                .map(|s| extract_id_from_name(&s.to_string_lossy()))
-                .unwrap_or_default(),
-        };
-        ids.insert(id);
-    }
+    let ids: BTreeSet<String> = related_neighbours(store, path)
+        .into_iter()
+        .filter(|neighbour| !lineage.contains(&neighbour.doc.path))
+        .map(|neighbour| neighbour.doc.id.clone())
+        .collect();
     ids.into_iter().collect()
 }
 
@@ -531,36 +524,24 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::Config;
+    use crate::engine::config::{
+        Config, EdgeDef, RelSelector, RelationshipDef, Traversal, TypeSelector,
+    };
     use crate::engine::context::resolve_forest;
+    use crate::engine::store::test_support::{
+        doc_md, store_from_with_config, stories_mention_rfcs,
+    };
     use crate::engine::store::{extract_id_from_name, Store};
     use tempfile::TempDir;
 
-    /// Build a markdown doc with the given type and `related` block. `related`
-    /// is the YAML list body (e.g. `"- implements: RFC-001"`) or `"[]"` for
-    /// none.
-    fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
-        let related_block = if related == "[]" {
-            "related: []".to_string()
-        } else {
-            format!("related:\n{related}")
-        };
-        format!(
-            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
-        )
+    /// [`store_from_with`] under the starter config, for the tests that do not
+    /// declare traversal roles of their own.
+    fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
+        store_from_with(files, Config::default())
     }
 
-    /// Load a real `Store` from in-memory files written under a fresh TempDir,
-    /// going through `Store::load` so link-building runs as in production.
-    fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
-        (tmp, store)
+    fn store_from_with(files: &[(&str, &str)], config: Config) -> (TempDir, Store) {
+        store_from_with_config(files, &config)
     }
 
     /// The doc id of a `GraphNode` (derived from its path file stem).
@@ -1076,6 +1057,155 @@ mod tests {
         assert!(
             context_related.contains("RFC-009"),
             "resolve_chain surfaces the ancestor's related-to link, so the sets differ"
+        );
+    }
+
+    // --- the related role is declared, not hardcoded (RFC-067) ------------
+
+    /// A config whose ONLY related-role relationship is `mentions`, and which
+    /// declares no `related-to` at all: the legacy `[[relationships]]` marker,
+    /// under a name the graph used to filter out.
+    fn mentions_marked_related() -> Config {
+        Config {
+            relationships: vec![RelationshipDef {
+                name: "mentions".to_string(),
+                inverse: None,
+                github_native: None,
+                traversal: Some(Traversal::Related),
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn annotation_follows_the_configured_related_relationship() {
+        let (_tmp, store) = store_from_with(
+            &[
+                (
+                    "docs/rfcs/RFC-001-a.md",
+                    &doc_md("A", "rfc", "- mentions: RFC-002"),
+                ),
+                ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
+            ],
+            mentions_marked_related(),
+        );
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert_eq!(
+            related_of(&nodes, "RFC-001"),
+            vec!["RFC-002".to_string()],
+            "a project whose related relationship is `mentions` gets annotations"
+        );
+        assert_eq!(related_of(&nodes, "RFC-002"), vec!["RFC-001".to_string()]);
+    }
+
+    #[test]
+    fn annotation_ignores_a_relationship_no_declaration_gives_the_related_role() {
+        // The same store's links renamed to `related-to`, which this config says
+        // nothing about: the annotation set is what the config declares, so the
+        // name that used to be hardcoded carries no special weight either.
+        let (_tmp, store) = store_from_with(
+            &[
+                (
+                    "docs/rfcs/RFC-001-a.md",
+                    &doc_md("A", "rfc", "- related-to: RFC-002"),
+                ),
+                ("docs/rfcs/RFC-002-b.md", &doc_md("B", "rfc", "[]")),
+            ],
+            mentions_marked_related(),
+        );
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert!(related_of(&nodes, "RFC-001").is_empty());
+        assert!(related_of(&nodes, "RFC-002").is_empty());
+    }
+
+    #[test]
+    fn annotation_asks_the_triple_in_the_direction_the_link_was_declared() {
+        // STORY-001 -mentions-> RFC-001 is the declared triple; RFC-002
+        // -mentions-> STORY-002 is the same relationship the other way round and
+        // no row covers it. Both ends of a declared link are annotated (the
+        // reverse end asks the DECLARING doc's type as `from`, not its own), and
+        // neither end of an undeclared one is.
+        let (_tmp, store) = store_from_with(
+            &[
+                (
+                    "docs/stories/STORY-001-a.md",
+                    &doc_md("A", "story", "- mentions: RFC-001"),
+                ),
+                ("docs/rfcs/RFC-001-b.md", &doc_md("B", "rfc", "[]")),
+                (
+                    "docs/rfcs/RFC-002-c.md",
+                    &doc_md("C", "rfc", "- mentions: STORY-002"),
+                ),
+                ("docs/stories/STORY-002-d.md", &doc_md("D", "story", "[]")),
+            ],
+            stories_mention_rfcs(),
+        );
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert_eq!(related_of(&nodes, "STORY-001"), vec!["RFC-001".to_string()]);
+        assert_eq!(
+            related_of(&nodes, "RFC-001"),
+            vec!["STORY-001".to_string()],
+            "the reverse end asks story -mentions-> rfc, the direction declared"
+        );
+        assert!(
+            related_of(&nodes, "RFC-002").is_empty(),
+            "rfc -mentions-> story is not the declared triple"
+        );
+        assert!(
+            related_of(&nodes, "STORY-002").is_empty(),
+            "and its reverse end is not annotated either"
+        );
+    }
+
+    #[test]
+    fn annotation_follows_a_wildcard_row() {
+        // The starter shape ADR-031 keeps: one row, both endpoints wildcard.
+        let (_tmp, store) = store_from_with(
+            &[
+                (
+                    "docs/rfcs/RFC-001-a.md",
+                    &doc_md("A", "rfc", "- related-to: STORY-001"),
+                ),
+                ("docs/stories/STORY-001-b.md", &doc_md("B", "story", "[]")),
+            ],
+            Config {
+                relationships: Vec::new(),
+                edges: vec![EdgeDef {
+                    name: "anything-relates-to-anything".to_string(),
+                    from: TypeSelector::Any,
+                    to: TypeSelector::Any,
+                    via: RelSelector::Named(vec!["related-to".to_string()]),
+                    required: None,
+                    traversal: Some(Traversal::Related),
+                }],
+                ..Config::default()
+            },
+        );
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert_eq!(related_of(&nodes, "RFC-001"), vec!["STORY-001".to_string()]);
+        assert_eq!(related_of(&nodes, "STORY-001"), vec!["RFC-001".to_string()]);
+    }
+
+    #[test]
+    fn annotation_drops_a_neighbour_with_no_document_in_the_store() {
+        let (_tmp, store) = store_from(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &doc_md("A", "rfc", "- related-to: NOPE-001"),
+        )]);
+
+        let nodes = flatten_forest(&resolve_forest(&store, None), &store, &GraphSort::default());
+
+        assert!(
+            related_of(&nodes, "RFC-001").is_empty(),
+            "a dangling target has no type to ask the triple about, so it is not a neighbour"
         );
     }
 

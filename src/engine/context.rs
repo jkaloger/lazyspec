@@ -1,5 +1,6 @@
 use crate::engine::document::{DocMeta, RelationType};
 use crate::engine::store::{ResolveError, Store};
+use crate::engine::traversal::{chain_children, related_neighbours};
 use anyhow::Result;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -60,16 +61,16 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
     while let Some(current) = queue.pop_front() {
         let mut parents: Vec<PathBuf> = Vec::new();
         for rel in &current.related {
-            if !store
-                .chain_relationships
-                .iter()
-                .any(|r| r.as_str() == rel.rel_type.as_str())
-            {
-                continue;
-            }
             let Some(parent) = store.resolve_relation_target(&rel.target) else {
                 continue;
             };
+            if !store.traversal_walk.walks_chain(
+                current.doc_type.as_str(),
+                rel.rel_type.as_str(),
+                parent.doc_type.as_str(),
+            ) {
+                continue;
+            }
             if !parents.contains(&parent.path) {
                 parents.push(parent.path.clone());
             }
@@ -83,32 +84,18 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
 
     let nodes = topo_order(&discovered, &node_parents);
 
-    // Forward context: docs that link to the target via any configured
-    // parent-child relationship. Each is one hop out, reached through the
-    // target.
+    // Forward context: the target's chain children, each one hop out and
+    // reached through the target.
     let target_path = doc.path.clone();
-    let forward: Vec<RelatedRef> = store
-        .reverse_links
-        .get(&target_path)
-        .map(|links| {
-            links
-                .iter()
-                .filter(|(rel_type, _)| {
-                    store
-                        .chain_relationships
-                        .iter()
-                        .any(|r| r.as_str() == rel_type.as_str())
-                })
-                .filter_map(|(rel_type, source_path)| store.get(source_path).map(|d| (rel_type, d)))
-                .map(|(rel_type, d)| RelatedRef {
-                    doc: d,
-                    relation: rel_type.clone(),
-                    distance: 1,
-                    via: target_path.clone(),
-                })
-                .collect()
+    let forward: Vec<RelatedRef> = chain_children(store, &target_path)
+        .into_iter()
+        .map(|child| RelatedRef {
+            doc: child.doc,
+            relation: child.relation.clone(),
+            distance: 1,
+            via: target_path.clone(),
         })
-        .unwrap_or_default();
+        .collect();
 
     // Related: BFS over the configured related relationships (both directions),
     // bounded by `depth`. Hop 0's frontier is the chain/DAG nodes; each
@@ -128,44 +115,21 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
         let mut next_frontier: Vec<PathBuf> = Vec::new();
 
         for from in &frontier {
-            let mut neighbours: Vec<(RelationType, PathBuf)> = Vec::new();
-            if let Some(fwd) = store.forward_links.get(from) {
-                for (rel_type, target) in fwd {
-                    if store
-                        .related_relationships
-                        .iter()
-                        .any(|r| r == rel_type.as_str())
-                    {
-                        neighbours.push((rel_type.clone(), target.clone()));
-                    }
-                }
-            }
-            if let Some(rev) = store.reverse_links.get(from) {
-                for (rel_type, source) in rev {
-                    if store
-                        .related_relationships
-                        .iter()
-                        .any(|r| r == rel_type.as_str())
-                    {
-                        neighbours.push((rel_type.clone(), source.clone()));
-                    }
-                }
-            }
-            neighbours.sort_by(|a, b| a.1.cmp(&b.1));
+            let mut neighbours = related_neighbours(store, from);
+            neighbours.sort_by(|a, b| a.doc.path.cmp(&b.doc.path));
 
-            for (rel_type, neighbour) in neighbours {
-                if chain_paths.contains(&neighbour) || !related_seen.insert(neighbour.clone()) {
+            for neighbour in neighbours {
+                let path = &neighbour.doc.path;
+                if chain_paths.contains(path) || !related_seen.insert(path.clone()) {
                     continue;
                 }
-                if let Some(resolved) = store.get(&neighbour) {
-                    related.push(RelatedRef {
-                        doc: resolved,
-                        relation: rel_type,
-                        distance: hop,
-                        via: from.clone(),
-                    });
-                    next_frontier.push(neighbour);
-                }
+                related.push(RelatedRef {
+                    doc: neighbour.doc,
+                    relation: neighbour.relation.clone(),
+                    distance: hop,
+                    via: from.clone(),
+                });
+                next_frontier.push(path.clone());
             }
         }
 
@@ -187,8 +151,14 @@ pub fn resolve_chain<'a>(store: &'a Store, id: &str, depth: usize) -> Result<Res
 /// relations whose type carries no traversal marker still surface (BUG-013).
 /// Chain-typed relations and targets already on the chain stay excluded --
 /// they belong to the chain/forward sections -- and entries the related BFS
-/// already found dedupe on (relation type, target path). Callers that layer
-/// `doc.related` themselves (the web view) must not call this.
+/// already found dedupe on (relation type, target path).
+///
+/// All five surfaces that render a neighbourhood call this immediately after
+/// [`resolve_chain`] -- `cli::context`'s JSON and human renders, the TUI relations
+/// tab, the web doc page, and the agent prompt's `context.related` -- and none of
+/// them may skip it: a surface that also displays the raw `doc.related`
+/// frontmatter row is not thereby covered, because that row is a verbatim list of
+/// declared links (chain ones included) and not the neighbourhood the walk names.
 pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedContext<'a>) {
     let chain_paths: HashSet<&PathBuf> = resolved.nodes.iter().map(|n| &n.doc.path).collect();
     let mut seen: HashSet<(String, PathBuf)> = resolved
@@ -201,13 +171,14 @@ pub fn merge_declared_related<'a>(store: &'a Store, resolved: &mut ResolvedConte
     let declared: Vec<RelatedRef<'a>> = target
         .related
         .iter()
-        .filter(|rel| {
-            !store
-                .chain_relationships
-                .iter()
-                .any(|c| c.as_str() == rel.rel_type.as_str())
-        })
         .filter_map(|rel| store.resolve_relation_target(&rel.target).map(|d| (rel, d)))
+        .filter(|(rel, d)| {
+            !store.traversal_walk.walks_chain(
+                target.doc_type.as_str(),
+                rel.rel_type.as_str(),
+                d.doc_type.as_str(),
+            )
+        })
         .filter(|(_, d)| !chain_paths.contains(&d.path))
         .filter(|(rel, d)| seen.insert((rel.rel_type.to_string(), d.path.clone())))
         .map(|(rel, d)| RelatedRef {
@@ -286,16 +257,16 @@ fn chain_parents(store: &Store) -> HashMap<PathBuf, Vec<PathBuf>> {
         .map(|doc| {
             let mut parents: Vec<PathBuf> = Vec::new();
             for rel in &doc.related {
-                if !store
-                    .chain_relationships
-                    .iter()
-                    .any(|r| r.as_str() == rel.rel_type.as_str())
-                {
-                    continue;
-                }
                 let Some(parent) = store.resolve_relation_target(&rel.target) else {
                     continue;
                 };
+                if !store.traversal_walk.walks_chain(
+                    doc.doc_type.as_str(),
+                    rel.rel_type.as_str(),
+                    parent.doc_type.as_str(),
+                ) {
+                    continue;
+                }
                 if !parents.contains(&parent.path) {
                     parents.push(parent.path.clone());
                 }
@@ -532,49 +503,19 @@ fn topo_order<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{Config, Traversal};
+    use crate::engine::config::{
+        Config, EdgeDef, RelSelector, RelationshipDef, Traversal, TypeSelector,
+    };
+    use crate::engine::store::test_support::{
+        doc_md, store_from_with_config, stories_mention_rfcs, write_docs,
+    };
     use std::collections::BTreeSet;
     use tempfile::TempDir;
 
-    /// Build a markdown doc with the given type and `related` block. `related`
-    /// is the YAML list body (e.g. `"- implements: RFC-001"`) or `"[]"` for
-    /// none.
-    fn doc_md(title: &str, doc_type: &str, related: &str) -> String {
-        let related_block = if related == "[]" {
-            "related: []".to_string()
-        } else {
-            format!("related:\n{related}")
-        };
-        format!(
-            "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{related_block}\n---\n\n{title} body\n"
-        )
-    }
-
-    /// Load a real `Store` from in-memory files written under a fresh TempDir.
-    /// Goes through `Store::load` so link-building (including
-    /// `propagate_parent_links`) runs exactly as in production.
+    /// [`store_from_with_config`] under the starter config, for the tests that
+    /// do not pin traversal markers of their own.
     fn store_from(files: &[(&str, &str)]) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), &Config::default()).unwrap();
-        (tmp, store)
-    }
-
-    /// Like [`store_from`] but loads under a caller-supplied `config`, so a test
-    /// can pin the traversal markers (or their absence) that drive the walk.
-    fn store_from_with_config(files: &[(&str, &str)], config: &Config) -> (TempDir, Store) {
-        let tmp = TempDir::new().unwrap();
-        for (rel_path, contents) in files {
-            let full = tmp.path().join(rel_path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(&full, contents).unwrap();
-        }
-        let store = Store::load(tmp.path(), config).unwrap();
-        (tmp, store)
+        store_from_with_config(files, &Config::default())
     }
 
     /// Set of doc ids in a node slice, for order-insensitive membership asserts.
@@ -615,11 +556,12 @@ mod tests {
     }
 
     fn ids_in_order(paths: &[PathBuf]) -> Vec<String> {
-        paths
-            .iter()
-            .map(|p| p.file_stem().unwrap().to_string_lossy().to_string())
-            .map(|stem| crate::engine::store::extract_id_from_name(&stem))
-            .collect()
+        paths.iter().map(|p| id_of_path(p)).collect()
+    }
+
+    fn id_of_path(path: &std::path::Path) -> String {
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        crate::engine::store::extract_id_from_name(&stem)
     }
 
     // --- resolve_chain -----------------------------------------------------
@@ -818,11 +760,10 @@ mod tests {
     }
 
     // Verify item 2: a Chain relationship forms the chain purely from its
-    // `traversal` marker, with NO ParentChild rule declaring the link.
+    // `traversal` marker, with NO `[[edges]]` row declaring the link.
     #[test]
-    fn chain_forms_from_traversal_marker_without_validation_rule() {
-        let mut config = Config::default();
-        config.rules.clear();
+    fn chain_forms_from_traversal_marker_without_an_edge_row() {
+        let config = Config::default();
         assert!(
             config.relationship_by_name("implements").unwrap().traversal == Some(Traversal::Chain),
             "implements is Chain by marker"
@@ -883,6 +824,315 @@ mod tests {
         );
     }
 
+    /// A config in the arrangement RFC-067 §Problem.3 names: `targets` carries a
+    /// global `traversal = "chain"` marker AND one `[[edges]]` row declares it
+    /// chain for iteration -> milestone only. The global marker being present is
+    /// the point -- an edge row stating a traversal suppresses it, so the row is
+    /// the whole story for `targets`.
+    fn targets_walks_only_to_milestones() -> Config {
+        let mut config = Config::default();
+
+        let mut milestone = config
+            .documents
+            .types
+            .iter()
+            .find(|t| t.name == "rfc")
+            .expect("starter types declare rfc")
+            .clone();
+        milestone.name = "milestone".to_string();
+        milestone.plural = "milestones".to_string();
+        milestone.dir = "docs/milestones".to_string();
+        milestone.prefix = "MILESTONE".to_string();
+        config.documents.types.push(milestone);
+
+        config.relationships.push(RelationshipDef {
+            name: "targets".to_string(),
+            inverse: Some("targeted-by".to_string()),
+            github_native: None,
+            traversal: Some(Traversal::Chain),
+        });
+        config.edges.push(EdgeDef {
+            name: "iterations-target-milestones".to_string(),
+            from: TypeSelector::Types(vec!["iteration".to_string()]),
+            to: TypeSelector::Types(vec!["milestone".to_string()]),
+            via: RelSelector::Named(vec!["targets".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        });
+        config
+    }
+
+    /// One iteration targets a story and a milestone. STORY-257 AC1: the story's
+    /// context does not reach the iteration, because no row declares
+    /// iteration --targets--> story. AC2: the milestone's row does walk.
+    fn iteration_targeting_story_and_milestone() -> (TempDir, Store) {
+        store_from_with_config(
+            &[
+                (
+                    "docs/milestones/MILESTONE-001-launch.md",
+                    &doc_md("Launch", "milestone", "[]"),
+                ),
+                (
+                    "docs/stories/STORY-001-mid.md",
+                    &doc_md("Mid", "story", "[]"),
+                ),
+                (
+                    "docs/iterations/ITERATION-001-leaf.md",
+                    &doc_md(
+                        "Leaf",
+                        "iteration",
+                        "  - targets: STORY-001\n  - targets: MILESTONE-001",
+                    ),
+                ),
+            ],
+            &targets_walks_only_to_milestones(),
+        )
+    }
+
+    // STORY-257 AC1.
+    #[test]
+    fn chain_excludes_a_targets_link_no_edge_row_declares() {
+        let (_tmp, store) = iteration_targeting_story_and_milestone();
+
+        let resolved = resolve_chain(&store, "STORY-001", 1).unwrap();
+        let reached: BTreeSet<String> = resolved
+            .nodes
+            .iter()
+            .map(|n| n.doc.id.clone())
+            .chain(resolved.forward.iter().map(|r| r.doc.id.clone()))
+            .collect();
+
+        assert_eq!(
+            reached,
+            BTreeSet::from(["STORY-001".to_string()]),
+            "no row declares iteration --targets--> story, so the story stands alone"
+        );
+    }
+
+    // STORY-257 AC2.
+    #[test]
+    fn chain_includes_the_targets_link_an_edge_row_declares() {
+        let (_tmp, store) = iteration_targeting_story_and_milestone();
+
+        let resolved = resolve_chain(&store, "ITERATION-001", 1).unwrap();
+
+        assert_eq!(
+            node_ids(&resolved.nodes),
+            BTreeSet::from(["ITERATION-001".to_string(), "MILESTONE-001".to_string()]),
+            "the declared iteration --targets--> milestone row walks the chain"
+        );
+    }
+
+    // --- resolve_chain: links a child inherits from its parent -------------
+
+    const CHAIN_PARENT: &str = "docs/stories/STORY-001-parent/index.md";
+    const CHAIN_INHERITOR: &str = "docs/stories/STORY-001-parent/ITERATION-001.md";
+
+    /// One chain row with `to` concrete and `from` the caller's, over a parent
+    /// that declares `implements: RFC-001` and a nested child of a DIFFERENT
+    /// type that declares nothing and inherits the link through
+    /// [`Store::propagate_parent_links`]. A concrete `from` is the only shape
+    /// that can tell the declaring document from the inheriting one.
+    fn chain_parent_declares_child_inherits(from: TypeSelector) -> (TempDir, Store) {
+        let config = Config {
+            relationships: Vec::new(),
+            edges: vec![EdgeDef {
+                name: "implements-rfcs".to_string(),
+                from,
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: None,
+                traversal: Some(Traversal::Chain),
+            }],
+            ..Config::default()
+        };
+        store_from_with_config(
+            &[
+                (
+                    CHAIN_PARENT,
+                    &doc_md("Parent", "story", "- implements: RFC-001"),
+                ),
+                (CHAIN_INHERITOR, &doc_md("Child", "iteration", "[]")),
+                ("docs/rfcs/RFC-001-base.md", &doc_md("Base", "rfc", "[]")),
+            ],
+            &config,
+        )
+    }
+
+    /// The ids in a resolved context's `forward` section -- the target's chain
+    /// children, the one hop that reads the link maps rather than a doc's own
+    /// `related`.
+    fn forward_ids(store: &Store, id: &str) -> BTreeSet<String> {
+        resolve_chain(store, id, 1)
+            .unwrap()
+            .forward
+            .iter()
+            .map(|r| r.doc.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn forward_asks_an_inherited_chain_link_with_the_declaring_parents_type_as_from() {
+        let (_tmp, store) =
+            chain_parent_declares_child_inherits(TypeSelector::Types(vec!["story".to_string()]));
+
+        assert_eq!(
+            forward_ids(&store, "RFC-001"),
+            BTreeSet::from(["STORY-001".to_string(), "ITERATION-001".to_string()]),
+            "the parent stated the relation, so the parent's row admits the copy its child inherited"
+        );
+    }
+
+    #[test]
+    fn forward_does_not_ask_an_inherited_chain_link_with_the_inheritors_type_as_from() {
+        let (_tmp, store) =
+            chain_parent_declares_child_inherits(TypeSelector::Types(
+                vec!["iteration".to_string()],
+            ));
+
+        assert!(
+            forward_ids(&store, "RFC-001").is_empty(),
+            "iteration --implements--> rfc is an edge no document declared, from either end"
+        );
+    }
+
+    /// `related-to` links spanning three types, outbound and inbound, with a
+    /// two-hop reach: enough that a wildcard row's `from` and `to` positions
+    /// and the BFS's `distance` and `via` are all really being claimed.
+    fn related_neighbourhood_files() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "docs/rfcs/RFC-001-anchor.md",
+                doc_md("Anchor", "rfc", "- related-to: STORY-001"),
+            ),
+            (
+                "docs/stories/STORY-001-near.md",
+                doc_md("Near", "story", "- related-to: ITERATION-001"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-far.md",
+                doc_md("Far", "iteration", "[]"),
+            ),
+            (
+                "docs/adrs/ADR-001-inbound.md",
+                doc_md("Inbound", "adr", "- related-to: RFC-001"),
+            ),
+        ]
+    }
+
+    /// Every related entry as (id, distance, relation, id of the doc it was
+    /// reached through) in emitted order -- the whole resolved claim, so an
+    /// equivalence assertion cannot pass by comparing less than the output.
+    fn related_neighbourhood(store: &Store) -> Vec<(String, usize, String, String)> {
+        resolve_chain(store, "RFC-001", 2)
+            .unwrap()
+            .related
+            .iter()
+            .map(|r| {
+                (
+                    r.doc.id.clone(),
+                    r.distance,
+                    r.relation.to_string(),
+                    id_of_path(&r.via),
+                )
+            })
+            .collect()
+    }
+
+    // STORY-257 AC4.
+    #[test]
+    fn a_wildcard_related_row_reproduces_the_global_markers_neighbourhood() {
+        let owned = related_neighbourhood_files();
+        let files: Vec<(&str, &str)> = owned.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let tmp = write_docs(&files);
+
+        let by_marker = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        // The row is the whole story: `related-to`'s global marker is gone, so
+        // a neighbourhood can only come from the table.
+        let mut row_config = Config::default();
+        for rel in &mut row_config.relationships {
+            if rel.name == "related-to" {
+                rel.traversal = None;
+            }
+        }
+        row_config.edges.push(EdgeDef {
+            name: "anything-relates-to-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["related-to".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Related),
+        });
+        let by_row = Store::load(tmp.path(), &row_config).unwrap();
+
+        let expected = related_neighbourhood(&by_marker);
+        assert_eq!(
+            expected.len(),
+            3,
+            "the fixture must have a neighbourhood to compare"
+        );
+        assert_eq!(related_neighbourhood(&by_row), expected);
+    }
+
+    #[test]
+    fn related_bfs_asks_a_reverse_link_in_the_direction_it_was_declared() {
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (
+                    "docs/stories/STORY-001-a.md",
+                    &doc_md("A", "story", "- mentions: RFC-001"),
+                ),
+                ("docs/rfcs/RFC-001-b.md", &doc_md("B", "rfc", "[]")),
+                (
+                    "docs/rfcs/RFC-002-c.md",
+                    &doc_md("C", "rfc", "- mentions: STORY-002"),
+                ),
+                ("docs/stories/STORY-002-d.md", &doc_md("D", "story", "[]")),
+            ],
+            &stories_mention_rfcs(),
+        );
+
+        let neighbours = |id: &str| -> BTreeSet<String> {
+            resolve_chain(&store, id, 1)
+                .unwrap()
+                .related
+                .iter()
+                .map(|r| r.doc.id.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            neighbours("RFC-001"),
+            BTreeSet::from(["STORY-001".to_string()]),
+            "reading the link backwards still asks story -mentions-> rfc"
+        );
+        assert_eq!(
+            neighbours("STORY-001"),
+            BTreeSet::from(["RFC-001".to_string()])
+        );
+        assert!(
+            neighbours("RFC-002").is_empty(),
+            "rfc -mentions-> story is not the declared triple"
+        );
+        assert!(neighbours("STORY-002").is_empty());
+    }
+
+    #[test]
+    fn related_bfs_drops_a_neighbour_with_no_document_in_the_store() {
+        let (_tmp, store) = store_from(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &doc_md("A", "rfc", "- related-to: NOPE-001"),
+        )]);
+
+        let resolved = resolve_chain(&store, "RFC-001", 1).unwrap();
+
+        assert!(
+            resolved.related.is_empty(),
+            "a dangling target has no type to ask the triple about, so it is not a neighbour"
+        );
+    }
+
     // --- merge_declared_related ---------------------------------------------
 
     #[test]
@@ -936,6 +1186,49 @@ mod tests {
                 ("blocks".to_string(), "RFC-002".to_string()),
             ]
         );
+    }
+
+    // BUG-013 under an edge-table config: the roles come from `[[edges]]`, and
+    // `blocks` appears in no row, so no triple gives it a role at all. It must
+    // still surface at one hop.
+    #[test]
+    fn merge_declared_related_surfaces_a_relation_no_row_gives_a_role() {
+        let mut config = Config::default();
+        for rel in &mut config.relationships {
+            rel.traversal = None;
+        }
+        config.edges.push(EdgeDef {
+            name: "anything-relates-to-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["related-to".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Related),
+        });
+
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (
+                    "docs/rfcs/RFC-001-anchor.md",
+                    &doc_md("Anchor", "rfc", "- blocks: RFC-002"),
+                ),
+                ("docs/rfcs/RFC-002-near.md", &doc_md("Near", "rfc", "[]")),
+            ],
+            &config,
+        );
+
+        let mut resolved = resolve_chain(&store, "RFC-001", 1).unwrap();
+        assert!(
+            resolved.related.is_empty(),
+            "no row gives `blocks` a role, so the BFS drops it"
+        );
+
+        merge_declared_related(&store, &mut resolved);
+
+        assert_eq!(resolved.related.len(), 1);
+        assert_eq!(resolved.related[0].doc.id, "RFC-002");
+        assert_eq!(resolved.related[0].relation.as_str(), "blocks");
+        assert_eq!(resolved.related[0].distance, 1);
     }
 
     #[test]
@@ -1125,6 +1418,112 @@ mod tests {
             "resolve_forest over {} docs took {elapsed:?}; topo_order has regressed \
              to a quadratic scan-per-emitted-node",
             ROOTS * 2
+        );
+    }
+
+    /// A forest reduced to comparable values: the emitted order, each node's
+    /// parents in emitted order, and whether anchoring inverted them.
+    /// `ContextNode` borrows a `DocMeta` and carries no equality, so two forests
+    /// are compared through this projection. Both loads below read one fixture
+    /// directory, so the paths themselves compare.
+    fn forest_shape(forest: &[ContextNode]) -> Vec<(PathBuf, Vec<PathBuf>, bool)> {
+        forest
+            .iter()
+            .map(|node| {
+                (
+                    node.doc.path.clone(),
+                    node.parents.clone(),
+                    node.parents_inverted,
+                )
+            })
+            .collect()
+    }
+
+    /// RFC-067 §"The traversal cost, stated plainly" made executable: a wildcard
+    /// row buys no precision and exists to keep the config short, so it must
+    /// reproduce what the global marker did rather than approximate it. Two
+    /// loads of one fixture, differing only in where `implements` is declared to
+    /// walk, must yield the same whole-store forest -- same nodes, same order,
+    /// same parent edges.
+    #[test]
+    fn a_blanket_edge_row_rebuilds_the_forest_the_global_marker_built() {
+        let tmp = write_docs(&[
+            ("docs/rfcs/RFC-001-left.md", &doc_md("Left", "rfc", "[]")),
+            ("docs/rfcs/RFC-002-right.md", &doc_md("Right", "rfc", "[]")),
+            (
+                "docs/stories/STORY-001-first.md",
+                &doc_md("First", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-002-second.md",
+                &doc_md("Second", "story", "- implements: RFC-001"),
+            ),
+            (
+                "docs/stories/STORY-003-third.md",
+                &doc_md("Third", "story", "- implements: RFC-002"),
+            ),
+            (
+                "docs/iterations/ITERATION-001-shared.md",
+                &doc_md(
+                    "Shared",
+                    "iteration",
+                    "- implements: STORY-001\n- implements: STORY-002",
+                ),
+            ),
+            (
+                "docs/iterations/ITERATION-002-loose.md",
+                &doc_md("Loose", "iteration", "[]"),
+            ),
+        ]);
+
+        let by_global_marker = Config::default();
+        assert_eq!(
+            by_global_marker
+                .relationship_by_name("implements")
+                .unwrap()
+                .traversal,
+            Some(Traversal::Chain),
+            "the starter config marks implements chain; that marker is what the row must replace"
+        );
+
+        let mut by_blanket_row = by_global_marker.clone();
+        for rel in &mut by_blanket_row.relationships {
+            if rel.name == "implements" {
+                rel.traversal = None;
+            }
+        }
+        by_blanket_row.edges.push(EdgeDef {
+            name: "anything-implements-anything".to_string(),
+            from: TypeSelector::Any,
+            to: TypeSelector::Any,
+            via: RelSelector::Named(vec!["implements".to_string()]),
+            required: None,
+            traversal: Some(Traversal::Chain),
+        });
+
+        let marker_store = Store::load(tmp.path(), &by_global_marker).unwrap();
+        let row_store = Store::load(tmp.path(), &by_blanket_row).unwrap();
+        let by_marker = resolve_forest(&marker_store, None);
+        let by_row = resolve_forest(&row_store, None);
+
+        // The forest under comparison has real shape -- three roots, three
+        // levels, a diamond -- so equality below cannot pass by both sides being
+        // flat or empty.
+        assert_eq!(by_marker.len(), 7);
+        assert_eq!(
+            parents_of(&by_marker, "ITERATION-001"),
+            BTreeSet::from(["STORY-001".to_string(), "STORY-002".to_string()])
+        );
+        assert_eq!(
+            parents_of(&by_marker, "STORY-003"),
+            BTreeSet::from(["RFC-002".to_string()])
+        );
+        assert!(parents_of(&by_marker, "ITERATION-002").is_empty());
+
+        assert_eq!(
+            forest_shape(&by_row),
+            forest_shape(&by_marker),
+            "the blanket row must reproduce the global marker's forest exactly"
         );
     }
 

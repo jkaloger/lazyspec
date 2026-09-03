@@ -148,7 +148,7 @@ fn fs_doc_links_to_git_ref_doc_via_related_to() {
     let story_path = std::path::PathBuf::from("docs/stories/STORY-001-feature.md");
     let forward = store.forward_links_for(&story_path);
 
-    let targets: Vec<&std::path::Path> = forward.iter().map(|(_, p)| p.as_path()).collect();
+    let targets: Vec<&std::path::Path> = forward.iter().map(|l| l.endpoint.as_path()).collect();
     let has_iteration = targets
         .iter()
         .any(|p| p.to_string_lossy().contains("ITERATION-001"));
@@ -162,11 +162,12 @@ fn fs_doc_links_to_git_ref_doc_via_related_to() {
     // Also verify from the iteration's perspective: reverse links should point back to the story
     let iteration_path = forward
         .iter()
-        .find(|(_, p)| p.to_string_lossy().contains("ITERATION-001"))
-        .map(|(_, p)| p.clone())
+        .find(|l| l.endpoint.to_string_lossy().contains("ITERATION-001"))
+        .map(|l| l.endpoint.clone())
         .unwrap();
     let reverse = store.reverse_links_for(&iteration_path);
-    let reverse_sources: Vec<&std::path::Path> = reverse.iter().map(|(_, p)| p.as_path()).collect();
+    let reverse_sources: Vec<&std::path::Path> =
+        reverse.iter().map(|l| l.endpoint.as_path()).collect();
     assert!(
         reverse_sources
             .iter()
@@ -192,7 +193,7 @@ fn git_ref_doc_links_to_fs_doc_via_implements() {
     let forward = store.forward_links_for(&iteration_doc.path);
     let has_story = forward
         .iter()
-        .any(|(_, p)| p.to_string_lossy().contains("STORY-001"));
+        .any(|l| l.endpoint.to_string_lossy().contains("STORY-001"));
 
     assert!(
         has_story,
@@ -203,13 +204,13 @@ fn git_ref_doc_links_to_fs_doc_via_implements() {
     // Verify the story has reverse links back to the iteration
     let story_path = forward
         .iter()
-        .find(|(_, p)| p.to_string_lossy().contains("STORY-001"))
-        .map(|(_, p)| p.clone())
+        .find(|l| l.endpoint.to_string_lossy().contains("STORY-001"))
+        .map(|l| l.endpoint.clone())
         .unwrap();
     let reverse = store.reverse_links_for(&story_path);
     let has_iteration = reverse
         .iter()
-        .any(|(_, p)| p.to_string_lossy().contains("ITERATION-001"));
+        .any(|l| l.endpoint.to_string_lossy().contains("ITERATION-001"));
     assert!(
         has_iteration,
         "FS story's reverse links should include the git-ref iteration; got: {:?}",

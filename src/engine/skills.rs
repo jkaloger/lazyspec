@@ -28,8 +28,16 @@ const EMBEDDED_SKILLS: &[(&str, &str)] = &[
         include_str!("../../skills/execute/SKILL.md"),
     ),
     (
+        "orchestrate/SKILL.md",
+        include_str!("../../skills/orchestrate/SKILL.md"),
+    ),
+    (
         "review/SKILL.md",
         include_str!("../../skills/review/SKILL.md"),
+    ),
+    (
+        "review-work/SKILL.md",
+        include_str!("../../skills/review-work/SKILL.md"),
     ),
     (
         "systematic-debugging/SKILL.md",

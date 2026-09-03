@@ -93,12 +93,20 @@ fn unignore_on_document_without_field_succeeds() {
 #[test]
 fn ignore_then_validate_skips_document() {
     let fixture = TestFixture::new();
-    // Iteration without a story link triggers UnlinkedIteration error
+    // The demand has to be declared for the document to breach it:
+    // `Config::default()` states no DAG now that `[[rules]]` cannot load
+    // (STORY-259), so this states the standard set as `[[edges]]`.
+    let config = lazyspec::engine::config::Config {
+        edges: lazyspec::engine::config::starter_edges(),
+        ..fixture.config()
+    };
+    // An iteration without a story link leaves `iterations-need-stories`
+    // unsatisfied.
     fixture.write_iteration("ITERATION-001-sprint.md", "Sprint 1", "draft", None);
 
     // Verify the error exists before ignoring
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
     assert!(
         result.errors.iter().any(|e| {
             let msg = format!("{:?}", e);
@@ -118,8 +126,8 @@ fn ignore_then_validate_skips_document() {
     .unwrap();
 
     // Reload store and validate again
-    let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
     assert!(
         !result.errors.iter().any(|e| {
             let msg = format!("{:?}", e);

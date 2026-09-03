@@ -9,6 +9,7 @@ use ratatui::{
 use super::colors::StatusPalette;
 use crate::engine::document::Status;
 use crate::engine::git_status::GitFileStatus;
+use crate::tui::state::forms::PickerKind;
 use crate::tui::state::{App, FormField};
 
 use super::colors::status_color;
@@ -378,14 +379,13 @@ pub fn draw_override_key_prompt(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, popup_area);
 }
 
-/// The two-pane status-bar zone ordering editor: `Selected` (ordered, left) and
-/// `Available` (the remaining RFC-022 vocabulary, right). The focused pane gets a
-/// cyan border, the cursor row is highlighted. Render-only; all state lives in
-/// `app.settings_zone_editor`.
-pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
-    use crate::tui::state::forms::ZonePane;
+/// The two-pane set picker: `Selected` (left) and `Available` (the remaining
+/// vocabulary, right). The focused pane gets a cyan border, the cursor row is
+/// highlighted. Render-only; all state lives in `app.settings_set_picker`.
+pub fn draw_settings_set_picker(f: &mut Frame, app: &App) {
+    use crate::tui::state::forms::PickerPane;
 
-    let Some(editor) = app.settings_zone_editor.as_ref() else {
+    let Some(editor) = app.settings_set_picker.as_ref() else {
         return;
     };
 
@@ -398,17 +398,25 @@ pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup_area);
 
+    let (title, hint) = picker_chrome(editor.kind);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(" Status-bar zone order ");
+        .title(title);
     let inner = outer.inner(popup_area);
     f.render_widget(outer, popup_area);
 
+    // The refusal of an empty type set is shown inside the picker: the settings
+    // footer only carries an edit error while text entry is live.
+    let error = app.settings_edit_error.as_deref().unwrap_or_default();
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(if error.is_empty() { 0 } else { 1 }),
+            Constraint::Length(1),
+        ])
         .split(inner);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -433,8 +441,8 @@ pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
             )
     };
 
-    let selected_active = editor.pane == ZonePane::Selected;
-    let available_active = editor.pane == ZonePane::Available;
+    let selected_active = editor.pane == PickerPane::Selected;
+    let available_active = editor.pane == PickerPane::Available;
     let selected_list = pane("Selected", &editor.selected, selected_active);
     let available_list = pane("Available", &editor.available, available_active);
 
@@ -451,11 +459,39 @@ pub fn draw_settings_zone_editor(f: &mut Frame, app: &App) {
     f.render_stateful_widget(selected_list, panes[0], &mut selected_state);
     f.render_stateful_widget(available_list, panes[1], &mut available_state);
 
-    let hint = Paragraph::new(Line::from(Span::styled(
-        "[Tab: pane] [Space/Enter: add/remove] [K/J: reorder] [c: commit] [Esc: cancel]",
-        Style::default().fg(Color::DarkGray),
-    )));
-    f.render_widget(hint, rows[1]);
+    if !error.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                error,
+                Style::default().fg(Color::Red),
+            ))),
+            rows[1],
+        );
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        rows[2],
+    );
+}
+
+/// The picker's title and key-hint line. A `WildcardSet` binds no reorder keys,
+/// so its hint must not advertise them; its title says "any one" because a
+/// `required` edge over a set demands one member, not one edge per member
+/// (RFC-067) -- and Selected/Available panes would otherwise read as the latter.
+fn picker_chrome(kind: PickerKind) -> (&'static str, &'static str) {
+    match kind {
+        PickerKind::Ordered => (
+            " Status-bar zone order ",
+            "[Tab: pane] [Space/Enter: add/remove] [K/J: reorder] [c: commit] [Esc: cancel]",
+        ),
+        PickerKind::WildcardSet => (
+            " Types (any one matches) ",
+            "[Tab: pane] [Space/Enter: add/remove] [c: commit] [Esc: cancel]",
+        ),
+    }
 }
 
 /// The enum variant-picker overlay: a centered list of the field's variants with
@@ -1158,7 +1194,25 @@ fn display_name(path: &std::path::Path) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::window_start;
+    use super::{picker_chrome, window_start};
+    use crate::tui::state::forms::PickerKind;
+
+    // ITERATION-391 Task 4: the reorder keys are not bound for a type set, so
+    // the hint line must not offer them -- a help line advertising a dead key is
+    // the same drift as a dead key.
+    #[test]
+    fn a_type_set_pickers_hint_offers_no_reorder_keys() {
+        let (_, hint) = picker_chrome(PickerKind::WildcardSet);
+        assert!(!hint.contains("reorder"), "got: {hint}");
+        assert!(hint.contains("c: commit"));
+        assert!(hint.contains("Esc: cancel"));
+    }
+
+    #[test]
+    fn a_zone_pickers_hint_still_offers_reordering() {
+        let (_, hint) = picker_chrome(PickerKind::Ordered);
+        assert!(hint.contains("K/J: reorder"), "got: {hint}");
+    }
 
     #[test]
     fn window_start_zero_when_list_fits_in_window() {

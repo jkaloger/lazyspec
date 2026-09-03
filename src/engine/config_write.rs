@@ -3,8 +3,9 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 use crate::engine::config::{
     default_git_ref_remote, default_normalize, default_skills_entry, default_table_columns,
-    AttrDef, AttrKind, Authorship, Config, Edge, Lifecycle, NumberingStrategy, RelationshipDef,
-    ReservedFormat, Severity, TypeDef, ValidationRule,
+    AttrDef, AttrKind, Authorship, Config, Edge, EdgeDef, Lifecycle, NumberingStrategy,
+    RelSelector, RelationshipDef, ReservedFormat, Severity, Traversal, TypeDef, TypeSelector,
+    WILDCARD,
 };
 
 pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<String> {
@@ -22,7 +23,8 @@ pub fn write_config_in_place(existing_src: &str, buffer: &Config) -> Result<Stri
     write_agents(&mut doc, buffer);
     write_skills(&mut doc, buffer);
     write_git_ref(&mut doc, buffer);
-    write_rules(&mut doc, buffer);
+    remove_rules(&mut doc);
+    write_edges(&mut doc, buffer);
 
     Ok(doc.to_string())
 }
@@ -283,6 +285,11 @@ fn update_relationship_table(entry: &mut Table, def: &RelationshipDef) {
     set_str(entry, "name", &def.name);
     set_opt_str(entry, "inverse", def.inverse.as_deref());
     set_opt_str(entry, "github_native", def.github_native.as_deref());
+    set_opt_str(
+        entry,
+        "traversal",
+        def.traversal.as_ref().map(Traversal::as_str),
+    );
 }
 
 fn write_tui(doc: &mut DocumentMut, buffer: &Config) {
@@ -550,84 +557,147 @@ fn write_git_ref(doc: &mut DocumentMut, buffer: &Config) {
     );
 }
 
-fn write_rules(doc: &mut DocumentMut, buffer: &Config) {
-    if !doc.contains_key("rules") {
-        if buffer.rules.is_empty() {
+/// Delete the retired `[[rules]]` table, whatever it says. There is no buffer
+/// field to reconcile it against any more (STORY-259) and nothing may author
+/// one, so the writer's only business with the table is removing it -- which is
+/// what `fix --config` needs after translating its blocks to `[[edges]]`
+/// (ADR-032). Every other caller loads strictly and so cannot be holding a
+/// source that declares one, making this a no-op there.
+fn remove_rules(doc: &mut DocumentMut) {
+    doc.remove("rules");
+}
+
+/// Reconcile the `[[edges]]` blocks to the buffer, in place. Two callers share
+/// it: `fix --config`, translating a retired `[[rules]]` declaration (ADR-032),
+/// and a settings save carrying an edited row (STORY-260).
+///
+/// Reconciliation is by `name` (see [`reconcile_array_of_tables`]), which
+/// `Config::parse` refuses to let two rows share, so a loaded config addresses
+/// each row unambiguously. A settings buffer mid-rename can still hold two: it
+/// renders as two blocks and the save's re-parse refuses it (STORY-260).
+fn write_edges(doc: &mut DocumentMut, buffer: &Config) {
+    let declared = doc.contains_key("edges");
+    if !declared {
+        if buffer.edges.is_empty() {
             return;
         }
-        doc.insert("rules", Item::ArrayOfTables(ArrayOfTables::new()));
+        doc.insert("edges", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    let Some(rules) = doc.get_mut("rules").and_then(Item::as_array_of_tables_mut) else {
+    let vocabulary_position = (!declared).then(|| relationships_position(doc)).flatten();
+    let Some(edges) = doc.get_mut("edges").and_then(Item::as_array_of_tables_mut) else {
         return;
     };
-    reconcile_array_of_tables(rules, &buffer.rules, rule_name, update_rule_table);
-}
-
-fn rule_name(rule: &ValidationRule) -> &str {
-    match rule {
-        ValidationRule::ParentChild { name, .. } => name,
-        ValidationRule::RelationExistence { name, .. } => name,
-    }
-}
-
-fn update_rule_table(entry: &mut Table, rule: &ValidationRule) {
-    let shape_changed = entry.get("shape").and_then(Item::as_str) != Some(rule_shape(rule));
-    // A shape (enum) edit switches the rule's variant, so the previous variant's
-    // body keys are no longer valid and must be cleared before the new variant is
-    // written. `name`/`severity` are common to both variants.
-    if shape_changed {
-        for key in [
-            "child",
-            "parent",
-            "link",
-            "type",
-            "require",
-            "require_parent_status",
-        ] {
-            entry.remove(key);
+    reconcile_array_of_tables(
+        edges,
+        &buffer.edges,
+        |def| def.name.as_str(),
+        update_edge_table,
+    );
+    // A key the source never declared is appended to the document's key order,
+    // which renders a first `[[edges]]` block after every unrelated section --
+    // last in the file, however far that is from the vocabulary the rows name.
+    // Giving the fresh blocks the last `[[relationships]]` position puts them
+    // directly behind it instead, where a human writing them would.
+    if let Some(position) = vocabulary_position {
+        for table in edges.iter_mut() {
+            table.set_position(position);
         }
     }
-    match rule {
-        ValidationRule::ParentChild {
-            name,
-            child,
-            parent,
-            severity,
-            require_parent_status,
-        } => {
-            set_str(entry, "name", name);
-            set_str(entry, "shape", "parent-child");
-            set_str(entry, "child", child);
-            set_str(entry, "parent", parent);
-            set_str(entry, "severity", severity_str(severity));
-            set_opt_str(
-                entry,
-                "require_parent_status",
-                require_parent_status.as_deref(),
-            );
+}
+
+fn relationships_position(doc: &DocumentMut) -> Option<usize> {
+    doc.get("relationships")
+        .and_then(Item::as_array_of_tables)?
+        .iter()
+        .filter_map(Table::position)
+        .max()
+}
+
+fn update_edge_table(entry: &mut Table, def: &EdgeDef) {
+    set_str(entry, "name", &def.name);
+    set_type_selector(entry, "from", &def.from);
+    set_type_selector(entry, "to", &def.to);
+    set_rel_selector(entry, "via", &def.via);
+    set_opt_str(
+        entry,
+        "required",
+        def.required.as_ref().map(Severity::as_str),
+    );
+    set_opt_str(
+        entry,
+        "traversal",
+        def.traversal.as_ref().map(Traversal::as_str),
+    );
+}
+
+// A type position spelled the way a human writes it: the wildcard is a bare
+// string (`["*"]` is a wildcard inside a list, which the loader rejects), a lone
+// type name is bare, and only a genuine set becomes an array. A source that
+// already spells the selector as a list keeps that spelling, so rendering an
+// unedited config changes nothing.
+fn set_type_selector(entry: &mut Table, key: &str, selector: &TypeSelector) {
+    let names = match selector {
+        TypeSelector::Any => {
+            set_str(entry, key, WILDCARD);
+            return;
         }
-        ValidationRule::RelationExistence {
-            name,
-            doc_type,
-            require,
-            severity,
-        } => {
-            set_str(entry, "name", name);
-            set_str(entry, "shape", "relation-existence");
-            set_str(entry, "type", doc_type);
-            set_str(entry, "require", require);
-            set_str(entry, "severity", severity_str(severity));
+        TypeSelector::Types(names) => names,
+    };
+    if array_matches(entry.get(key).and_then(Item::as_array), names) {
+        return;
+    }
+    match names.as_slice() {
+        [only] => set_str(entry, key, only),
+        many => {
+            let array: Array = many.iter().map(|name| name.as_str()).collect();
+            set_value(entry, key, Value::Array(array));
+        }
+    }
+}
+
+// The `via` position, spelled the way [`set_type_selector`] spells a type
+// position: bare wildcard, bare lone name, array only for a genuine set, and an
+// existing list spelling left as it stands. The two are structurally the same
+// because a `via` is a set of relationship names on the same terms `to` is a set
+// of type names (ADR-032) -- they read different selector enums, so unifying
+// them would cost an abstraction over both.
+fn set_rel_selector(entry: &mut Table, key: &str, selector: &RelSelector) {
+    let names = match selector {
+        RelSelector::Any => {
+            set_str(entry, key, WILDCARD);
+            return;
+        }
+        RelSelector::Named(names) => names,
+    };
+    // `array_matches` reads an absent key as an empty set, which is how an
+    // OPTIONAL array key avoids being fabricated. `via` is mandatory, and the
+    // empty set is a `via` a migrated rule really carries (ADR-032), so the
+    // empty case has to be written rather than skipped.
+    if !names.is_empty() && array_matches(entry.get(key).and_then(Item::as_array), names) {
+        return;
+    }
+    match names.as_slice() {
+        [only] => set_str(entry, key, only),
+        many => {
+            let array: Array = many.iter().map(|name| name.as_str()).collect();
+            set_value(entry, key, Value::Array(array));
         }
     }
 }
 
 // Reconcile an `[[...]]` array-of-tables to `buffer` entries by IDENTITY (the
-// entry's `name`, unique per collection). Each surviving source table is updated
-// in place via `update` (preserving its decor/comments); deleted source tables
-// are removed by retaining only names still in the buffer (a middle delete drops
-// only that one table, others keep their comments); new buffer entries (names not
-// in the source) are appended as fresh tables. A rename (buffer name absent from
+// entry's `name`). Each surviving source table is updated in place via `update`
+// (preserving its decor/comments); deleted source tables are removed by
+// retaining only names still in the buffer (a middle delete drops only that one
+// table, others keep their comments); new buffer entries (names not in the
+// source) are appended as fresh tables. A rename (buffer name absent from
 // source) is treated as remove-old + append-new.
+//
+// A loadable config gives each entry a distinct name, but a live settings buffer
+// is mid-edit and can hold two under one name, so a source table is claimed by
+// at most one buffer entry: the second entry gets a fresh table rather than
+// overwriting the first's. That renders a buffer the loader refuses instead of
+// silently rendering one row fewer than the buffer holds.
 fn reconcile_array_of_tables<T>(
     tables: &mut ArrayOfTables,
     buffer: &[T],
@@ -639,26 +709,28 @@ fn reconcile_array_of_tables<T>(
         let name = table.get("name").and_then(Item::as_str);
         name.is_some_and(|n| buffer_names.contains(&n))
     });
+    let mut claimed = vec![false; tables.len()];
     for def in buffer {
         let name = name_of(def);
-        let existing = tables
-            .iter_mut()
-            .find(|t| t.get("name").and_then(Item::as_str) == Some(name));
-        match existing {
-            Some(table) => update(table, def),
-            None => {
-                let mut table = Table::new();
-                update(&mut table, def);
-                tables.push(table);
-            }
-        }
-    }
-}
-
-fn rule_shape(rule: &ValidationRule) -> &'static str {
-    match rule {
-        ValidationRule::ParentChild { .. } => "parent-child",
-        ValidationRule::RelationExistence { .. } => "relation-existence",
+        let unclaimed = tables.iter().enumerate().find_map(|(index, table)| {
+            let free = !claimed[index];
+            let matches = table.get("name").and_then(Item::as_str) == Some(name);
+            (free && matches).then_some(index)
+        });
+        let Some(index) = unclaimed else {
+            let mut table = Table::new();
+            update(&mut table, def);
+            tables.push(table);
+            claimed.push(true);
+            continue;
+        };
+        claimed[index] = true;
+        update(
+            tables
+                .get_mut(index)
+                .expect("the index came from iterating the same tables"),
+            def,
+        );
     }
 }
 
@@ -674,13 +746,6 @@ fn reserved_format_str(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
         ReservedFormat::Sqids => "sqids",
-    }
-}
-
-fn severity_str(s: &Severity) -> &'static str {
-    match s {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
     }
 }
 
@@ -818,7 +883,8 @@ fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, new: Value) {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        CertificationOverride, Config, RelationshipDef, StoreBackend, TypeDef,
+        CertificationOverride, Config, EdgeDef, RelSelector, RelationshipDef, StoreBackend,
+        Traversal, TypeDef, TypeSelector,
     };
 
     const SRC: &str = r#"# lazyspec configuration
@@ -1003,6 +1069,25 @@ name = "related-to"
         assert_eq!(s.min_length, 7);
     }
 
+    /// The same source without the rule, for the tests whose assertion is
+    /// about a type or a relationship and never needed a constraint. Strict
+    /// load refuses `[[rules]]` (STORY-259), so a rule the assertion does not
+    /// use would only cost the test its strict reparse.
+    const RULE_FREE_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+
+    /// A legacy source declaring one `[[rules]]` block, for the writer paths
+    /// that are about the retired table. Only [`Config::parse_lenient`] reads
+    /// it — the read `fix --config` uses (ADR-012) — because strict load
+    /// refuses the shape.
     const RULES_SRC: &str = r#"[[types]]
 name = "rfc"
 plural = "rfcs"
@@ -1020,95 +1105,6 @@ child = "story"
 parent = "rfc"
 severity = "error"
 "#;
-
-    // AC5 (writer): a parent-child rule with `require_parent_status` round-trips.
-    #[test]
-    fn require_parent_status_round_trips() {
-        let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
-            c.rules[0] = ValidationRule::ParentChild {
-                name: "story-has-rfc".to_string(),
-                child: "story".to_string(),
-                parent: "rfc".to_string(),
-                severity: Severity::Error,
-                require_parent_status: Some("accepted".to_string()),
-            };
-            c
-        };
-
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-        assert!(out.contains(r#"require_parent_status = "accepted""#));
-        let reparsed = Config::parse(&out).unwrap();
-        match &reparsed.rules[0] {
-            ValidationRule::ParentChild {
-                require_parent_status,
-                ..
-            } => assert_eq!(require_parent_status.as_deref(), Some("accepted")),
-            other => panic!("unexpected rule: {other:?}"),
-        }
-    }
-
-    // AC5 (writer): a shape change (parent-child -> relation-existence) drops the
-    // require_parent_status key.
-    #[test]
-    fn shape_change_drops_require_parent_status() {
-        const SRC_WITH_REQ: &str = r#"[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[rules]]
-name = "story-has-rfc"
-shape = "parent-child"
-child = "story"
-parent = "rfc"
-severity = "error"
-require_parent_status = "accepted"
-"#;
-        let buffer = {
-            let mut c = Config::parse(SRC_WITH_REQ).unwrap();
-            c.rules[0] = ValidationRule::RelationExistence {
-                name: "story-has-rfc".to_string(),
-                doc_type: "story".to_string(),
-                require: "implements".to_string(),
-                severity: Severity::Error,
-            };
-            c
-        };
-
-        let out = write_config_in_place(SRC_WITH_REQ, &buffer).unwrap();
-        assert!(!out.contains("require_parent_status"));
-        Config::parse(&out).unwrap();
-    }
-
-    #[test]
-    fn shape_change_clears_stale_variant_keys() {
-        let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
-            c.rules[0] = ValidationRule::RelationExistence {
-                name: "story-has-rfc".to_string(),
-                doc_type: "story".to_string(),
-                require: "implements".to_string(),
-                severity: Severity::Error,
-            };
-            c
-        };
-
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-
-        assert!(out.contains(r#"shape = "relation-existence""#));
-        assert!(out.contains(r#"type = "story""#));
-        assert!(out.contains(r#"require = "implements""#));
-        assert!(!out.contains("child"));
-        assert!(!out.contains("parent"));
-        assert!(!out.contains("link"));
-        Config::parse(&out).unwrap();
-    }
 
     #[test]
     fn adding_a_type_appends_and_preserves_existing_comments() {
@@ -1207,9 +1203,9 @@ name = "related-to"
 
     #[test]
     fn add_and_delete_in_one_render() {
-        // Buffer: add a type AND remove the one rule.
+        // Buffer: add a type; the render takes the source's one rule away.
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.documents.types.push(TypeDef {
                 name: "spec".to_string(),
                 plural: "specs".to_string(),
@@ -1234,7 +1230,6 @@ name = "related-to"
                 clickup_task_type: None,
                 clickup_custom_field_map: None,
             });
-            c.rules.clear();
             c
         };
 
@@ -1243,7 +1238,6 @@ name = "related-to"
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(reparsed.documents.types.len(), 2);
         assert!(reparsed.type_by_name("spec").is_some());
-        assert!(reparsed.rules.is_empty());
         assert!(!out.contains(r#"name = "story-has-rfc""#));
     }
 
@@ -1253,11 +1247,11 @@ name = "related-to"
         // value (Some -> other), then to None (Some -> None). This closes the latent
         // slice-3 gap where relationship scalar edits were never written.
         let buffer_some = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships[0].inverse = Some("done-by".to_string());
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer_some).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer_some).unwrap();
         assert!(out.contains(r#"inverse = "done-by""#));
         assert!(!out.contains(r#"inverse = "implemented-by""#));
         let reparsed = Config::parse(&out).unwrap();
@@ -1267,11 +1261,11 @@ name = "related-to"
         );
 
         let buffer_none = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships[0].inverse = None;
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer_none).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer_none).unwrap();
         assert!(!out.contains("inverse"));
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(
@@ -1283,7 +1277,7 @@ name = "related-to"
     #[test]
     fn adding_a_relationship_appends_and_reparses() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships.push(RelationshipDef {
                 name: "blocks".to_string(),
                 inverse: Some("blocked-by".to_string()),
@@ -1292,7 +1286,7 @@ name = "related-to"
             });
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer).unwrap();
         assert!(out.contains(r#"name = "blocks""#));
         assert!(out.contains(r#"inverse = "blocked-by""#));
         let reparsed = Config::parse(&out).unwrap();
@@ -1303,7 +1297,7 @@ name = "related-to"
     #[test]
     fn github_native_sub_issue_round_trips_through_writer() {
         let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
+            let mut c = Config::parse(RULE_FREE_SRC).unwrap();
             c.relationships.push(RelationshipDef {
                 name: "child".to_string(),
                 inverse: Some("parent".to_string()),
@@ -1312,7 +1306,7 @@ name = "related-to"
             });
             c
         };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
+        let out = write_config_in_place(RULE_FREE_SRC, &buffer).unwrap();
         assert!(out.contains(r#"github_native = "sub-issue""#), "got: {out}");
         let reparsed = Config::parse(&out).unwrap();
         assert_eq!(
@@ -1323,27 +1317,6 @@ name = "related-to"
                 .as_deref(),
             Some("sub-issue")
         );
-    }
-
-    #[test]
-    fn adding_a_rule_appends_and_reparses() {
-        let buffer = {
-            let mut c = Config::parse(RULES_SRC).unwrap();
-            c.rules.push(ValidationRule::RelationExistence {
-                name: "adrs-need-relations".to_string(),
-                doc_type: "adr".to_string(),
-                require: "any-relation".to_string(),
-                severity: Severity::Error,
-            });
-            c
-        };
-        let out = write_config_in_place(RULES_SRC, &buffer).unwrap();
-        let reparsed = Config::parse(&out).unwrap();
-        assert_eq!(reparsed.rules.len(), 2);
-        assert!(matches!(
-            &reparsed.rules[1],
-            ValidationRule::RelationExistence { name, .. } if name == "adrs-need-relations"
-        ));
     }
 
     const OVERRIDES_SRC: &str = r#"[[types]]
@@ -1707,6 +1680,450 @@ inverse = "implemented-by"
         let buffer = Config::parse(STATUSBAR_SRC).unwrap();
         let out = write_config_in_place(STATUSBAR_SRC, &buffer).unwrap();
         assert!(!out.contains("[git-ref]"), "got: {out}");
+    }
+
+    const TRAVERSAL_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "related-to"
+traversal = "related"
+
+# every adr answers to something
+[[rules]]
+name = "adrs-need-relations"
+shape = "relation-existence"
+type = "adr"
+require = "any-relation"
+severity = "error"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // The edge migration deletes the retired table, and there is no buffer
+    // field left to reconcile it against, so any render takes the key off the
+    // document outright. Asserted on the text: a reparse cannot tell an absent
+    // key from an empty one.
+    #[test]
+    fn rendering_takes_the_rules_key_off_the_document() {
+        let buffer = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
+
+        let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
+
+        assert!(!out.contains("rules"), "got: {out}");
+        assert!(
+            out.contains("[github]"),
+            "the section after it survives: {out}"
+        );
+        Config::parse(&out).expect("the rendered config strict-loads");
+    }
+
+    #[test]
+    fn clearing_a_relationship_traversal_removes_the_key() {
+        let buffer = {
+            let mut c = Config::parse_lenient(TRAVERSAL_SRC).unwrap();
+            for relationship in &mut c.relationships {
+                relationship.traversal = None;
+            }
+            c
+        };
+
+        let out = write_config_in_place(TRAVERSAL_SRC, &buffer).unwrap();
+
+        assert!(!out.contains("traversal"), "got: {out}");
+        let reparsed = Config::parse_lenient(&out).unwrap();
+        assert!(reparsed.relationships.iter().all(|r| r.traversal.is_none()));
+    }
+
+    #[test]
+    fn setting_a_relationship_traversal_writes_the_key() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.relationships[0].traversal = Some(Traversal::Chain);
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"traversal = "chain""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed
+                .relationship_by_name("implements")
+                .unwrap()
+                .traversal,
+            Some(Traversal::Chain)
+        );
+    }
+
+    fn wildcard_and_concrete_edges() -> Vec<EdgeDef> {
+        vec![
+            EdgeDef {
+                name: "stories-need-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Any,
+                required: Some(Severity::Warning),
+                traversal: None,
+            },
+            EdgeDef {
+                name: "related-to-traversal".to_string(),
+                from: TypeSelector::Any,
+                to: TypeSelector::Any,
+                via: RelSelector::Named(vec!["related-to".to_string()]),
+                required: None,
+                traversal: Some(Traversal::Related),
+            },
+        ]
+    }
+
+    #[test]
+    fn edges_are_written_with_every_key_and_round_trip() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains("[[edges]]"), "got: {out}");
+        assert!(out.contains(r#"required = "warning""#), "got: {out}");
+        assert!(out.contains(r#"traversal = "related""#), "got: {out}");
+        assert!(out.contains(r#"via = "related-to""#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.edges, wildcard_and_concrete_edges());
+    }
+
+    // ITERATION-368 Task 3 guards the same spelling in `to_toml`; the in-place
+    // writer is a second code path and needs its own assertion. `["*"]` is not
+    // just ugly -- a wildcard inside a list is rejected at load.
+    #[test]
+    fn a_wildcard_edge_position_is_written_as_a_bare_string() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"from = "*""#), "got: {out}");
+        assert!(out.contains(r#"to = "*""#), "got: {out}");
+        assert!(out.contains(r#"via = "*""#), "got: {out}");
+        assert!(!out.contains(r#"["*"]"#), "got: {out}");
+    }
+
+    #[test]
+    fn an_edge_naming_several_target_types_is_written_as_a_list() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "story-parent".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: None,
+                traversal: Some(Traversal::Chain),
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains(r#"from = "story""#), "got: {out}");
+        assert!(out.contains(r#"to = ["story", "rfc"]"#), "got: {out}");
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "rfc".to_string()])
+        );
+    }
+
+    // ADR-032: a `via` naming two relationships is what the migration writes for
+    // a config marking two of them chain, so the writer has to spell a set and
+    // read its own spelling back.
+    #[test]
+    fn an_edge_naming_several_relationships_is_written_as_a_list_and_round_trips() {
+        let via = RelSelector::Named(vec!["implements".to_string(), "related-to".to_string()]);
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "stories-reach-rfcs".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: via.clone(),
+                required: None,
+                traversal: None,
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(
+            out.contains(r#"via = ["implements", "related-to"]"#),
+            "got: {out}"
+        );
+        assert_eq!(Config::parse(&out).unwrap().edges[0].via, via);
+    }
+
+    // ADR-032: a rule the config marks no chain relationship for translates to
+    // an empty `via`. `via` is mandatory, so the empty set has to reach the file
+    // as `via = []` — skipping the key the way an optional array key is skipped
+    // would render a config that no longer loads.
+    #[test]
+    fn an_edge_naming_no_relationship_is_written_as_an_empty_list_and_round_trips() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.edges = vec![EdgeDef {
+                name: "stories-reach-nothing".to_string(),
+                from: TypeSelector::Types(vec!["story".to_string()]),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec![]),
+                required: Some(Severity::Warning),
+                traversal: Some(Traversal::Chain),
+            }];
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        assert!(out.contains("via = []"), "got: {out}");
+        assert_eq!(
+            Config::parse(&out).unwrap().edges[0].via,
+            RelSelector::Named(vec![])
+        );
+    }
+
+    // AC6 at the writer's level: a config already carrying `[[edges]]` is what a
+    // second migration run reads, and rendering it must change nothing.
+    #[test]
+    fn an_unchanged_edge_block_survives_byte_for_byte() {
+        const EDGES_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# the chain a story has to hang off
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = ["rfc"]
+via = "*"
+required = "warning"
+"#;
+        let buffer = Config::parse(EDGES_SRC).unwrap();
+
+        let out = write_config_in_place(EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(out, EDGES_SRC);
+    }
+
+    /// A DAG a human wrote: a comment above an edge block, an inline comment on
+    /// a key inside one, a recognised section after the blocks and a top-level
+    /// section the loader knows nothing about.
+    const COMMENTED_EDGES_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# every story hangs off an RFC
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"  # the only relationship that realizes it
+required = "warning"
+
+# and the walk back down
+[[edges]]
+name = "rfc-children"
+from = "rfc"
+to = "story"
+via = "implements"
+traversal = "chain"
+
+[github]
+repo = "owner/repo"
+
+[house-style]
+tone = "terse"
+"#;
+
+    // STORY-260 AC5. ADR-032 §Consequences accepts that a *translated* rule
+    // loses its comments; an *edited* edge is a different case, because
+    // `reconcile_array_of_tables` updates the table in place -- so a comment on
+    // a key the edit never touches survives, and the accepted loss on the
+    // migration path is no licence for the editor. Asserted on the text: a
+    // reparse cannot tell you a comment was dropped.
+    #[test]
+    fn editing_an_edge_target_leaves_every_other_byte_alone() {
+        let buffer = {
+            let mut c = Config::parse(COMMENTED_EDGES_SRC).unwrap();
+            c.edges[0].to = TypeSelector::Types(vec!["story".to_string()]);
+            c
+        };
+
+        let out = write_config_in_place(COMMENTED_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            changed_lines(COMMENTED_EDGES_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = "story""#)],
+            "got: {out}"
+        );
+        assert_eq!(
+            COMMENTED_EDGES_SRC.lines().count(),
+            out.lines().count(),
+            "got: {out}"
+        );
+        Config::parse(&out).expect("the rendered config strict-loads");
+    }
+
+    // A buffer holding two rows under one name is not loadable, but the settings
+    // panel reaches it mid-edit -- one keystroke into renaming a row. Rendering
+    // it as a single block would answer that edit by dropping a declared row;
+    // rendering both is what lets the loader refuse it and the panel say so.
+    #[test]
+    fn two_buffer_rows_sharing_a_name_each_render_their_own_block() {
+        let buffer = {
+            let mut c = Config::parse(COMMENTED_EDGES_SRC).unwrap();
+            c.edges[1].name = c.edges[0].name.clone();
+            c
+        };
+
+        let out = write_config_in_place(COMMENTED_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            out.matches("[[edges]]").count(),
+            2,
+            "both buffer rows are rendered: {out}"
+        );
+        let err = Config::parse(&out)
+            .expect_err("the rendered config does not load")
+            .to_string();
+        assert!(err.contains("stories-need-rfcs"), "got: {err}");
+    }
+
+    /// A config whose DAG has yet to be declared, ending in a section that has
+    /// nothing to do with it.
+    const NO_EDGES_SRC: &str = r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+# the relation vocabulary
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // The rows name the relationship vocabulary, so a first `[[edges]]` block
+    // belongs with it rather than after whatever section happens to end the
+    // file. Everything the source already said is left where it stood.
+    #[test]
+    fn an_inserted_edge_block_lands_with_the_vocabulary_it_names() {
+        let buffer = {
+            let mut c = Config::parse(NO_EDGES_SRC).unwrap();
+            c.edges = wildcard_and_concrete_edges();
+            c
+        };
+
+        let out = write_config_in_place(NO_EDGES_SRC, &buffer).unwrap();
+
+        assert_eq!(
+            out,
+            r#"[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+# the relation vocabulary
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[relationships]]
+name = "related-to"
+
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "*"
+required = "warning"
+
+[[edges]]
+name = "related-to-traversal"
+from = "*"
+to = "*"
+via = "related-to"
+traversal = "related"
+
+[github]
+repo = "owner/repo"
+"#
+        );
+        assert_eq!(
+            Config::parse(&out)
+                .expect("the rendered config strict-loads")
+                .edges,
+            wildcard_and_concrete_edges()
+        );
     }
 
     #[test]

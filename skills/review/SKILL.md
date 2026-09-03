@@ -1,21 +1,24 @@
 ---
 name: review
-description: Use when critiquing a document against its intent and acceptance criteria, or reviewing completed work, before advancing status.
+description: Use when critiquing a document -- its prose, its intent, its acceptance criteria -- before advancing its status.
 ---
 
 ```
 CONFORMANCE FIRST, QUALITY SECOND
 ```
 
+Review critiques **documents**. Its sibling /review-work critiques **code** against the document that specified it. If you are reading a diff rather than a document body, you are in the wrong skill.
+
 <HARD-GATE>
 Do NOT review quality before conformance. The document's acceptance criteria and declared intent come first; block on any conformance failure before looking at quality.
 Do NOT approve without fresh verification evidence gathered in this session.
+Do NOT review landed code here. Route to /review-work, which carries the convention stage and the diff verdicts.
 </HARD-GATE>
 
 <NEVER>
 - Do NOT write document files directly. Use `lazyspec create` and `lazyspec link`.
 - Do NOT edit a document you haven't read. Always `lazyspec show <id> --json` or `Read` first.
-- Do NOT skip the workflow pipeline. Respect the configured `parent_type` chain and `rules`.
+- Do NOT skip the workflow pipeline. Respect the configured DAG -- type boundaries come from the `edges` table and from nothing else; honor every edge.
 </NEVER>
 
 <GITHUB-ISSUES-DOCUMENTS>
@@ -38,13 +41,14 @@ Always run `lazyspec help <subcommand>` before using unfamiliar commands. Always
 
 Two-stage critique:
 
-**Stage 1 -- Conformance.** Does the document satisfy its declared intent and its acceptance criteria? For work being reviewed, verify each acceptance criterion with fresh evidence run in this session. Block on any conformance failure.
+**Stage 1 -- Conformance.** Does the document satisfy its declared intent and its acceptance criteria? Does it satisfy the `edges` its type sits on -- the rows whose `from` admits it, at the `required` severity each carries? Block on any conformance failure.
 
-**Stage 2 -- Quality.** Only after conformance passes: critique quality -- clarity, correctness, cohesion, and (for work) test quality. Flag unjustified tradeoffs.
+**Stage 2 -- Quality.** Only after conformance passes: critique quality -- clarity, correctness, cohesion, whether the acceptance criteria are actually checkable, whether a delivery document's task breakdown is sized for one agent pass. Flag unjustified tradeoffs.
 
 Express targets generically: "the document's acceptance criteria", "its declared intent". No type name is baked in.
 
 ## Routing
 
 - **On pass:** route to /advance to move status along the lifecycle edge that review precedes.
-- **On fail:** route back to the appropriate authoring verb (one at or below the type's ceiling: /scaffold, /co-write, or /generate) for a document, or to /execute for work.
+- **On fail:** route back to the appropriate authoring verb, one at or below the type's ceiling: /scaffold, /co-write, or /generate.
+- **Reviewing landed work rather than a document:** route to /review-work.

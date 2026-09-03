@@ -75,8 +75,9 @@ pub fn run(
 }
 
 /// Entry point for `fix --config`: inject the missing standard relationships
-/// and rules into `.lazyspec.toml`. Config-only scope — no documents are
-/// touched. Returns the process exit code.
+/// and edges into `.lazyspec.toml`, and translate a retired `[[rules]]` table
+/// into `[[edges]]`. Config-only scope — no documents are touched. Returns the
+/// process exit code.
 pub fn run_config(root: &Path, dry_run: bool, json: bool, fs: &dyn FileSystem) -> i32 {
     let result = match collect_config_fixes(root, dry_run, fs) {
         Ok(r) => r,

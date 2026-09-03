@@ -15,15 +15,15 @@ use std::path::PathBuf;
 use std::collections::BTreeMap;
 
 use crate::engine::config::{
-    Config, NumberingStrategy, ReservedFormat, Severity, StoreBackend, ValidationRule,
+    Config, EdgeDef, NumberingStrategy, ReservedFormat, Severity, StoreBackend, Traversal,
 };
 use crate::engine::document::{AttrValue, DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 #[cfg(feature = "agent")]
 use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
-    anchor_to_flat, App, ConfigDep, DocListNode, EditableField, FieldEditor, FieldPath,
-    FilterField, GraphNode, PreviewTab, RelKey, RuleKey, TypeKey,
+    anchor_to_flat, App, ConfigDep, DocListNode, EdgeKey, EditableField, FieldEditor, FieldPath,
+    FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
 };
 
 use super::colors::{status_color, tag_color, StatusPalette};
@@ -2032,13 +2032,6 @@ pub fn draw_graph(
     }
 }
 
-fn severity_str(s: &Severity) -> &'static str {
-    match s {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    }
-}
-
 fn reserved_format_str(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
@@ -2062,9 +2055,19 @@ const STORE_VARIANTS: &[&str] = &[
     "github-projects",
     "git-ref",
 ];
-const RULE_SHAPE_VARIANTS: &[&str] = &["parent-child", "relation-existence"];
-const SEVERITY_VARIANTS: &[&str] = &["error", "warning"];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
+
+/// How the panel spells a value that is not set. Shared by the render and by
+/// the optional enum cyclers' first entry, so the string a row shows and the
+/// variant the cycler matches against are one string.
+pub const UNSET_VARIANT: &str = "(unset)";
+
+/// `required` and `traversal` lead with the unset entry. Absence is a claim on
+/// an edge row -- no requiredness, no traversal role (RFC-067) -- so the cycler
+/// has to reach it, and `EnumCycle` indexes a flat variant list with no `Option`
+/// spelling of its own.
+const EDGE_REQUIRED_VARIANTS: &[&str] = &[UNSET_VARIANT, "error", "warning"];
+const EDGE_TRAVERSAL_VARIANTS: &[&str] = &[UNSET_VARIANT, "chain", "related"];
 
 fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> EditableField {
     EditableField {
@@ -2076,7 +2079,7 @@ fn field(label: &str, value: String, editor: FieldEditor, path: FieldPath) -> Ed
 }
 
 fn nullable_value(opt: Option<&str>) -> String {
-    opt.unwrap_or("(unset)").to_string()
+    opt.unwrap_or(UNSET_VARIANT).to_string()
 }
 
 fn statusbar_value(slot: Option<&Vec<String>>) -> String {
@@ -2234,93 +2237,56 @@ pub fn settings_fields(
         }
         3 => {
             if let Some(d) = drill {
-                if let Some(rule) = config.rules.get(d) {
-                    let key = |k| FieldPath::Rule { index: d, key: k };
-                    match rule {
-                        ValidationRule::ParentChild {
-                            name,
-                            child,
-                            parent,
-                            severity,
-                            ..
-                        } => {
-                            fields.push(field(
-                                "name",
-                                name.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Name),
-                            ));
-                            fields.push(field(
-                                "shape",
-                                "parent-child".to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: RULE_SHAPE_VARIANTS,
-                                },
-                                key(RuleKey::Shape),
-                            ));
-                            fields.push(field(
-                                "child",
-                                child.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Child),
-                            ));
-                            fields.push(field(
-                                "parent",
-                                parent.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Parent),
-                            ));
-                            fields.push(field(
-                                "severity",
-                                severity_str(severity).to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: SEVERITY_VARIANTS,
-                                },
-                                key(RuleKey::Severity),
-                            ));
-                        }
-                        ValidationRule::RelationExistence {
-                            name,
-                            doc_type,
-                            require,
-                            severity,
-                        } => {
-                            fields.push(field(
-                                "name",
-                                name.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Name),
-                            ));
-                            fields.push(field(
-                                "shape",
-                                "relation-existence".to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: RULE_SHAPE_VARIANTS,
-                                },
-                                key(RuleKey::Shape),
-                            ));
-                            fields.push(field(
-                                "doc_type",
-                                doc_type.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::DocType),
-                            ));
-                            fields.push(field(
-                                "require",
-                                require.clone(),
-                                FieldEditor::Text,
-                                key(RuleKey::Require),
-                            ));
-                            fields.push(field(
-                                "severity",
-                                severity_str(severity).to_string(),
-                                FieldEditor::EnumCycle {
-                                    variants: SEVERITY_VARIANTS,
-                                },
-                                key(RuleKey::Severity),
-                            ));
-                        }
-                    }
+                if let Some(e) = config.edges.get(d) {
+                    let key = |k| FieldPath::Edge { index: d, key: k };
+                    fields.push(field(
+                        "name",
+                        e.name.clone(),
+                        FieldEditor::Text,
+                        key(EdgeKey::Name),
+                    ));
+                    // The two type positions take the member-at-a-time picker
+                    // (AC3), whose vocabulary is `*` plus the declared type
+                    // names. `via` keeps the comma editor rather than a cycler
+                    // over the declared relationship names: `via` is a
+                    // disjunction over its members (ADR-032) and a
+                    // single-position cycler cannot spell one -- it would
+                    // silently narrow `via = ["a", "b"]` to one name on the
+                    // next press.
+                    fields.push(field(
+                        "from",
+                        e.from.spelling(),
+                        FieldEditor::TypeSet,
+                        key(EdgeKey::From),
+                    ));
+                    fields.push(field(
+                        "to",
+                        e.to.spelling(),
+                        FieldEditor::TypeSet,
+                        key(EdgeKey::To),
+                    ));
+                    fields.push(field(
+                        "via",
+                        e.via.spelling(),
+                        FieldEditor::List,
+                        key(EdgeKey::Via),
+                    ));
+                    fields.push(field(
+                        "required",
+                        nullable_value(e.required.as_ref().map(Severity::as_str)),
+                        FieldEditor::EnumCycle {
+                            variants: EDGE_REQUIRED_VARIANTS,
+                        },
+                        key(EdgeKey::Required),
+                    ));
+                    fields.push(field(
+                        "traversal",
+                        nullable_value(e.traversal.as_ref().map(Traversal::as_str)),
+                        FieldEditor::EnumCycle {
+                            variants: EDGE_TRAVERSAL_VARIANTS,
+                        },
+                        key(EdgeKey::Traversal),
+                    ));
                 }
             }
         }
@@ -2553,11 +2519,28 @@ fn settings_display_value(
     }
 }
 
+/// One `[[edges]]` row as its entry-list line: the row's name, then the triple
+/// it selects, read `from -via-> to`. Every position is spelled by the engine
+/// (`TypeSelector::spelling`), so the list shows the TOML the user wrote.
+fn edge_entry_line(edge: &EdgeDef) -> String {
+    format!(
+        "{}: {} -{}-> {}",
+        edge.name,
+        edge.from.spelling(),
+        edge.via.spelling(),
+        edge.to.spelling()
+    )
+}
+
 /// The navigable entry names for an entry-list collection (categories 1/2/3 and
 /// cat 6's certification overrides), read straight from the config model. The
 /// single source of truth for entry-list content: the render, the drilled-view
 /// title (`drill_entry_name`), and the legacy display-line builder all derive
 /// from it, so nothing reconstructs entry text from a rendered string.
+///
+/// An edge's "name" here is a display line rather than its identity: STORY-260
+/// AC1 wants the whole triple readable in the list, which is one screen, not
+/// two. `drill_entry_name` keeps the identity half.
 pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<String> {
     match category {
         1 => config
@@ -2571,14 +2554,7 @@ pub(super) fn settings_entry_names(category: usize, config: &Config) -> Vec<Stri
             .iter()
             .map(|r| r.name.clone())
             .collect(),
-        3 => config
-            .rules
-            .iter()
-            .map(|rule| match rule {
-                ValidationRule::ParentChild { name, .. } => name.clone(),
-                ValidationRule::RelationExistence { name, .. } => name.clone(),
-            })
-            .collect(),
+        3 => config.edges.iter().map(edge_entry_line).collect(),
         6 => {
             let mut keys: Vec<&String> = config.certification.overrides.keys().collect();
             keys.sort();
@@ -2605,7 +2581,7 @@ fn settings_lines_inner(
     // override entry-list below it. Everything else (including drilled collections)
     // is a pure field-view derived from `settings_fields`.
     if COLLECTIONS.contains(&category) && drill.is_none() {
-        return settings_entry_names(category, config)
+        return entry_list_rows(category, config)
             .into_iter()
             .enumerate()
             .map(|(i, name)| {
@@ -2621,14 +2597,9 @@ fn settings_lines_inner(
             .map(field_line)
             .collect();
         if drill.is_none() {
-            let names = settings_entry_names(category, config);
-            if names.is_empty() {
-                lines.push("(no overrides configured)".to_string());
-            } else {
-                for (i, name) in names.iter().enumerate() {
-                    let pfx = if i == entry { "▸ " } else { "  " };
-                    lines.push(format!("{}{}", pfx, name));
-                }
+            for (i, name) in entry_list_rows(category, config).iter().enumerate() {
+                let pfx = if i == entry { "▸ " } else { "  " };
+                lines.push(format!("{}{}", pfx, name));
             }
         }
         return lines;
@@ -2640,11 +2611,40 @@ fn settings_lines_inner(
         .collect()
 }
 
+/// The drilled-view breadcrumb for one entry. Every collection but Edges titles
+/// by the same string it lists, so this is `settings_entry_names` indexed. An
+/// edge lists as its whole triple and is titled by its `name` alone: a
+/// breadcrumb names the row that was drilled into.
 fn drill_entry_name(cat: usize, idx: usize, config: &Config) -> String {
+    if cat == 3 {
+        return config
+            .edges
+            .get(idx)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+    }
     settings_entry_names(cat, config)
         .get(idx)
         .cloned()
         .unwrap_or_default()
+}
+
+/// The rows an undrilled collection category lists: its entry names, or -- when
+/// it declares none, which every one of these categories permits -- one row
+/// naming what is missing and the key that adds it, since a blank pane names
+/// neither.
+fn entry_list_rows(category: usize, config: &Config) -> Vec<String> {
+    let names = settings_entry_names(category, config);
+    if !names.is_empty() {
+        return names;
+    }
+    let missing = match category {
+        1 => "document types",
+        2 => "relationships",
+        3 => "edges",
+        _ => "certification overrides",
+    };
+    vec![format!("(no {missing} configured -- press n to add one)")]
 }
 
 pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
@@ -2766,12 +2766,11 @@ pub fn draw_settings(f: &mut Frame, app: &App, area: Rect, config: &Config) {
                 rows.push(Row::new([Cell::from(field_line(fld))]));
             }
         }
-        let names = settings_entry_names(app.settings_category, config);
-        if app.settings_category == 6 && names.is_empty() {
-            rows.push(Row::new([Cell::from("(no overrides configured)")]));
-        } else {
-            rows.extend(names.into_iter().map(|n| Row::new([Cell::from(n)])));
-        }
+        rows.extend(
+            entry_list_rows(app.settings_category, config)
+                .into_iter()
+                .map(|n| Row::new([Cell::from(n)])),
+        );
         // cat 6's leading `normalize` field offsets the entry cursor by one; other
         // collections select the entry row directly.
         let selected = if app.settings_category == 6 {
@@ -2920,6 +2919,7 @@ pub(super) fn doc_row_cells_gh_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::{RelSelector, TypeSelector};
     use crate::engine::status_colors::StatusColors;
 
     #[test]
@@ -4086,7 +4086,12 @@ mod tests {
         let config = Config::default();
         let lines = settings_lines_inner(6, 0, None, &config);
         assert!(lines.iter().any(|l| l.starts_with("normalize:")));
-        assert!(lines.contains(&"(no overrides configured)".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("no certification overrides")),
+            "got: {lines:?}"
+        );
     }
 
     #[test]
@@ -4096,43 +4101,151 @@ mod tests {
         assert!(lines.is_empty());
     }
 
+    // STORY-259 retired the `[[rules]]` category; STORY-260 puts Edges in the
+    // slot it vacated, so index 3 is a collection again -- of `[[edges]]` rows,
+    // the only place the DAG is declared. Numbering moves down one.
     #[test]
-    fn settings_lines_validation_rules_not_drilled_shows_entries() {
-        let config = Config::default();
-        let lines = settings_lines_inner(3, 0, None, &config);
-        assert_eq!(lines.len(), config.rules.len());
-        assert!(lines.iter().any(|l| l.contains("stories-need-rfcs")));
-        assert!(lines.iter().any(|l| l.contains("iterations-need-stories")));
-        assert!(lines.iter().any(|l| l.contains("adrs-need-relations")));
-        assert!(lines.iter().any(|l| l.contains("▸")));
-    }
-
-    #[test]
-    fn settings_lines_validation_rules_drilled_parent_child() {
-        let config = Config::default();
-        let lines = settings_lines_inner(3, 0, Some(0), &config);
-        assert!(lines.contains(&"name: stories-need-rfcs".to_string()));
-        assert!(lines.contains(&"shape: parent-child".to_string()));
-        assert!(lines.contains(&"child: story".to_string()));
-        assert!(lines.contains(&"parent: rfc".to_string()));
-        assert!(lines.contains(&"severity: warning".to_string()));
+    fn settings_categories_offer_edges_where_validation_rules_was() {
+        let cats = App::settings_categories();
         assert!(
-            !lines.iter().any(|l| l.starts_with("link:")),
-            "the link field no longer renders: {lines:?}"
+            !cats.iter().any(|c| c.contains("Rule")),
+            "the rules editor is retired: {cats:?}"
         );
-        assert_eq!(lines.len(), 5);
+        assert_eq!(
+            cats[3], "Edges",
+            "Edges took the retired category's index: {cats:?}"
+        );
+        assert_eq!(cats[4], "Numbering", "Numbering sits below Edges: {cats:?}");
     }
 
+    /// A config carrying one fully-stated edge and one wildcard edge: between
+    /// them they exercise every position spelling the panel has to render.
+    fn edges_fixture() -> Config {
+        Config {
+            edges: vec![
+                EdgeDef {
+                    name: "iterations-implement-work".to_string(),
+                    from: TypeSelector::Types(vec!["iteration".to_string()]),
+                    to: TypeSelector::Types(vec!["story".to_string(), "bug".to_string()]),
+                    via: RelSelector::Named(vec!["implements".to_string()]),
+                    required: Some(Severity::Error),
+                    traversal: Some(Traversal::Chain),
+                },
+                EdgeDef {
+                    name: "general-relatedness".to_string(),
+                    from: TypeSelector::Any,
+                    to: TypeSelector::Any,
+                    via: RelSelector::Any,
+                    required: None,
+                    traversal: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    // STORY-260 AC1: the entry list is where a designer reads the DAG off, so
+    // an edge's line carries the whole triple rather than a bare name.
     #[test]
-    fn settings_lines_validation_rules_drilled_relation_existence() {
-        let config = Config::default();
-        let lines = settings_lines_inner(3, 0, Some(2), &config);
-        assert!(lines.contains(&"name: adrs-need-relations".to_string()));
-        assert!(lines.contains(&"shape: relation-existence".to_string()));
-        assert!(lines.contains(&"doc_type: adr".to_string()));
-        assert!(lines.contains(&"require: any-relation".to_string()));
-        assert!(lines.contains(&"severity: error".to_string()));
-        assert_eq!(lines.len(), 5);
+    fn settings_entry_names_carry_each_edge_triple() {
+        let names = settings_entry_names(3, &edges_fixture());
+
+        assert_eq!(
+            names,
+            vec![
+                "iterations-implement-work: iteration -implements-> [story, bug]",
+                "general-relatedness: * -*-> *",
+            ]
+        );
+    }
+
+    // STORY-260 AC1: drilling an edge shows its keys in `EdgeDef`'s order.
+    #[test]
+    fn settings_fields_edge_keys_render_in_declaration_order() {
+        let fields = settings_fields(3, 0, Some(0), &edges_fixture());
+
+        assert_eq!(
+            fields.iter().map(|f| f.label.as_str()).collect::<Vec<_>>(),
+            ["name", "from", "to", "via", "required", "traversal"]
+        );
+        assert_eq!(
+            fields.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+            [
+                "iterations-implement-work",
+                "iteration",
+                "[story, bug]",
+                "implements",
+                "error",
+                "chain",
+            ]
+        );
+        assert_eq!(
+            fields.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            [
+                EdgeKey::Name,
+                EdgeKey::From,
+                EdgeKey::To,
+                EdgeKey::Via,
+                EdgeKey::Required,
+                EdgeKey::Traversal,
+            ]
+            .map(|key| FieldPath::Edge { index: 0, key })
+        );
+    }
+
+    // STORY-260 AC3: the two type positions carry the member-at-a-time picker
+    // and nothing else -- leaving the interim comma editor live on either would
+    // be two spellings of one edit. `via` keeps the comma editor: it is a
+    // relationship set, and ITERATION-387 settled that.
+    #[test]
+    fn settings_fields_edge_type_positions_carry_the_picker_and_via_the_comma_editor() {
+        let fields = settings_fields(3, 0, Some(0), &edges_fixture());
+
+        assert_eq!(field_by_label(&fields, "from").editor, FieldEditor::TypeSet);
+        assert_eq!(field_by_label(&fields, "to").editor, FieldEditor::TypeSet);
+        assert_eq!(field_by_label(&fields, "via").editor, FieldEditor::List);
+    }
+
+    // STORY-260 AC2: the optional qualifiers cycle over a list that leads with
+    // the unset entry, so the cycler can say everything the file can -- an
+    // absent key included.
+    #[test]
+    fn settings_fields_edge_optional_qualifiers_cycle_through_unset() {
+        let fields = settings_fields(3, 0, Some(0), &edges_fixture());
+
+        assert_eq!(
+            field_by_label(&fields, "required").editor,
+            FieldEditor::EnumCycle {
+                variants: &["(unset)", "error", "warning"]
+            }
+        );
+        assert_eq!(
+            field_by_label(&fields, "traversal").editor,
+            FieldEditor::EnumCycle {
+                variants: &["(unset)", "chain", "related"]
+            }
+        );
+    }
+
+    // A row silent on `required`/`traversal` states no requiredness and joins
+    // no walk (ADR-030); the panel shows that as unset, not as a default value.
+    #[test]
+    fn settings_fields_edge_shows_an_unstated_qualifier_as_unset() {
+        let fields = settings_fields(3, 1, Some(1), &edges_fixture());
+
+        assert_eq!(field_by_label(&fields, "required").value, "(unset)");
+        assert_eq!(field_by_label(&fields, "traversal").value, "(unset)");
+        assert_eq!(field_by_label(&fields, "via").value, "*");
+    }
+
+    // The drilled view is titled by the edge's identity, not by the triple its
+    // entry-list line carries: a breadcrumb names the row it drilled into.
+    #[test]
+    fn drill_entry_name_titles_an_edge_by_name_alone() {
+        assert_eq!(
+            drill_entry_name(3, 0, &edges_fixture()),
+            "iterations-implement-work"
+        );
     }
 
     fn field_by_label<'a>(fields: &'a [EditableField], label: &str) -> &'a EditableField {
@@ -4301,12 +4414,56 @@ max_expanded_height = 8
         );
     }
 
+    // An entry list is entry names: the field list stays empty until a row is
+    // drilled, Edges (cat 3) included.
     #[test]
     fn settings_fields_entry_list_views_are_empty() {
-        let config = Config::default();
-        assert!(settings_fields(1, 0, None, &config).is_empty());
-        assert!(settings_fields(2, 0, None, &config).is_empty());
-        assert!(settings_fields(3, 0, None, &config).is_empty());
+        assert!(settings_fields(1, 0, None, &Config::default()).is_empty());
+        assert!(settings_fields(2, 0, None, &Config::default()).is_empty());
+        assert!(settings_fields(3, 0, None, &edges_fixture()).is_empty());
+    }
+
+    // A legal config can declare no edges, and none of the other collections
+    // has to be populated either, so the pane says what is missing and names
+    // the key that adds one rather than rendering blank.
+    #[test]
+    fn an_empty_entry_list_names_what_is_missing_and_how_to_add_it() {
+        let mut empty = Config::default();
+        empty.documents.types.clear();
+        empty.relationships.clear();
+        empty.edges.clear();
+        empty.certification.overrides.clear();
+
+        for (category, missing) in [
+            (1, "document types"),
+            (2, "relationships"),
+            (3, "edges"),
+            (6, "overrides"),
+        ] {
+            let rows = entry_list_rows(category, &empty);
+            assert_eq!(rows.len(), 1, "cat {category} lists nothing: {rows:?}");
+            assert!(
+                rows[0].contains(missing),
+                "cat {category} names what is missing: {}",
+                rows[0]
+            );
+            assert!(
+                rows[0].contains("press n"),
+                "cat {category} names the key that adds one: {}",
+                rows[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_populated_entry_list_is_its_entry_names_alone() {
+        let rows = entry_list_rows(3, &edges_fixture());
+
+        assert_eq!(rows.len(), edges_fixture().edges.len());
+        assert!(
+            !rows.iter().any(|row| row.contains("press n")),
+            "no hint where there are rows: {rows:?}"
+        );
     }
 
     #[test]
@@ -4321,9 +4478,16 @@ max_expanded_height = 8
 
     #[test]
     fn settings_fields_and_lines_agree_for_field_view() {
-        let config = Config::default();
-        // A representative field-view (drilled doc type) and a scalar category.
-        for (cat, drill) in [(0usize, None), (1usize, Some(0usize)), (9usize, None)] {
+        // Two drilled collections (a doc type, an edge), the first and last
+        // scalar categories, and one past the last category.
+        let cases: [(usize, Option<usize>, Config); 5] = [
+            (0, None, Config::default()),
+            (1, Some(0), Config::default()),
+            (3, Some(0), edges_fixture()),
+            (8, None, Config::default()),
+            (9, None, Config::default()),
+        ];
+        for (cat, drill, config) in cases {
             let fields = settings_fields(cat, 0, drill, &config);
             let lines = settings_lines_inner(cat, 0, drill, &config);
             let derived: Vec<String> = fields

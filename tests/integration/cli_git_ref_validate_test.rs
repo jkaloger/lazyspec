@@ -2,8 +2,15 @@ use lazyspec::engine::config::{Config, StoreBackend};
 use lazyspec::engine::store::Store;
 use lazyspec::engine::validation::ValidationIssue;
 
+/// The starter project with `iteration` moved onto a git ref, and the standard
+/// constraints stated as `[[edges]]` — the one declaration strict load accepts
+/// (STORY-259). `iterations-need-stories` is the demand these tests are about;
+/// it is a row now, so the finding is an `UnsatisfiedEdge`.
 fn config_with_git_ref_iterations() -> Config {
-    let mut config = Config::default();
+    let mut config = Config {
+        edges: lazyspec::engine::config::starter_edges(),
+        ..Config::default()
+    };
     for t in &mut config.documents.types {
         if t.name == "iteration" {
             t.store = StoreBackend::GitRef;
@@ -20,7 +27,8 @@ fn validate_catches_issues_in_git_ref_docs() {
     let cache_dir = fixture.root().join(".lazyspec/cache/iteration");
     std::fs::create_dir_all(&cache_dir).unwrap();
 
-    // Iteration with no implements link -- triggers MissingParentLink
+    // Iteration with no implements link -- leaves `iterations-need-stories`
+    // unsatisfied.
     std::fs::write(
         cache_dir.join("ITERATION-001-orphan.md"),
         "---\ntitle: \"Orphan Iteration\"\ntype: iteration\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
@@ -30,13 +38,13 @@ fn validate_catches_issues_in_git_ref_docs() {
     let store = Store::load(fixture.root(), &config).unwrap();
     let result = store.validate_full(&config);
 
-    let has_missing_parent = result
-        .errors
-        .iter()
-        .any(|e| matches!(e, ValidationIssue::MissingParentLink { .. }));
     assert!(
-        has_missing_parent,
-        "git-ref iteration without parent link should produce MissingParentLink error, got: {:?}",
+        result.errors.iter().any(|e| matches!(
+            e,
+            ValidationIssue::UnsatisfiedEdge { edge_name, .. }
+                if edge_name == "iterations-need-stories"
+        )),
+        "git-ref iteration without parent link should be an unsatisfied-edge error, got: {:?}",
         result.errors
     );
 }
@@ -66,7 +74,7 @@ fn validate_passes_for_valid_git_ref_docs() {
         .errors
         .iter()
         .filter(|e| match e {
-            ValidationIssue::MissingParentLink { child_type, .. } => child_type == "iteration",
+            ValidationIssue::UnsatisfiedEdge { from_type, .. } => from_type == "iteration",
             ValidationIssue::BrokenLink { source, .. } => {
                 source.to_string_lossy().contains("ITERATION")
             }

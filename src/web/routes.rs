@@ -10,7 +10,9 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
-use crate::engine::context::{resolve_chain, resolve_forest, resolve_forest_by_tag};
+use crate::engine::context::{
+    merge_declared_related, resolve_chain, resolve_forest, resolve_forest_by_tag,
+};
 use crate::engine::document::{DocType, Status};
 use crate::engine::fs::RealFileSystem;
 use crate::engine::github_url::github_url;
@@ -371,7 +373,18 @@ pub async fn doc_page(State(state): State<AppState>, AxumPath(id): AxumPath<Stri
     // depth 1 to match `lazyspec context`'s default. Resolution failure (the
     // unknown-id case already 404'd above) degrades to no Context section rather
     // than a 500.
-    let context = resolve_chain(&store, &doc.id, 1).ok();
+    //
+    // Both calls, in the order `cli::context` and the TUI relations tab make
+    // them. This route used to make only the first, on the reading that the page
+    // already lists `doc.related` -- but that list is the frontmatter row, a
+    // different section rendering every declared relation including the chain
+    // ones, so it is no substitute: the walk alone drops a relation whose type
+    // carries no traversal role at all (BUG-013), which is a peer the other two
+    // surfaces show and this one did not (STORY-257 AC6).
+    let context = resolve_chain(&store, &doc.id, 1).ok().map(|mut resolved| {
+        merge_declared_related(&store, &mut resolved);
+        resolved
+    });
     let colors = StatusColors::load(store.root()).unwrap_or_default();
 
     let mut page = DocPage::from_doc(

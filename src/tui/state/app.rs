@@ -1,10 +1,10 @@
 #[cfg(feature = "agent")]
 use super::forms::AgentDialog;
 use super::forms::{
-    CreateForm, DeleteConfirm, EditableField, FieldEditor, FieldPath, LinkEditor, OpenRequest,
-    OverrideKeyPrompt, ProvenanceEditor, RelKey, RuleKey, SettingsDeleteConfirm,
-    SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt, SettingsVariantPicker,
-    StatusPicker, TypeKey, ZoneOrderingEditor,
+    CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, LinkEditor,
+    OpenRequest, OverrideKeyPrompt, PickerKind, ProvenanceEditor, RelKey, SetPicker,
+    SettingsDeleteConfirm, SettingsDeleteTarget, SettingsImpactConfirm, SettingsQuitPrompt,
+    SettingsVariantPicker, StatusPicker, TypeKey,
 };
 use super::graph::flatten_forest;
 use super::settings_guard;
@@ -12,9 +12,9 @@ pub use crate::engine::graph::GraphNode;
 
 use crate::engine::cache::DiskCache;
 use crate::engine::config::{
-    default_normalize, CertificationOverride, Config, GithubConfig, NumberingStrategy,
-    RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, TypeDef,
-    ValidationRule,
+    default_normalize, CertificationOverride, Config, EdgeDef, GithubConfig, NumberingStrategy,
+    RelSelector, RelationshipDef, ReservedConfig, ReservedFormat, Severity, SqidsConfig,
+    StoreBackend, Traversal, TypeDef, TypeSelector, WILDCARD,
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
@@ -25,6 +25,7 @@ use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
 use crate::tui::views::keybinds::KeyContext;
+use crate::tui::views::panels::UNSET_VARIANT;
 use crate::tui::views::status_bar::StatusBarComponents;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
@@ -45,7 +46,11 @@ enum SettingsValue {
     Numbering(NumberingStrategy),
     Store(StoreBackend),
     ReservedFormat(ReservedFormat),
-    Severity(Severity),
+    /// An edge's `required`, whose absence states no requiredness at all
+    /// (RFC-067) -- so the carrier is the `Option`, not the severity.
+    OptSeverity(Option<Severity>),
+    /// An edge's `traversal`, absent when the row names no walk role (ADR-030).
+    OptTraversal(Option<Traversal>),
 }
 
 /// Parse and bounds-check a numeric settings input. Pure and unit-testable.
@@ -157,6 +162,117 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
     }
 }
 
+fn severity_from_variant(v: &str) -> Option<Severity> {
+    match v {
+        "error" => Some(Severity::Error),
+        "warning" => Some(Severity::Warning),
+        _ => None,
+    }
+}
+
+fn traversal_from_variant(v: &str) -> Option<Traversal> {
+    match v {
+        "chain" => Some(Traversal::Chain),
+        "related" => Some(Traversal::Related),
+        _ => None,
+    }
+}
+
+/// Parse a variant drawn from an optional field's list, whose first entry is
+/// `UNSET_VARIANT`. `Some(None)` is the unset entry, which clears the key; the
+/// outer `None` is an unrecognised variant, which writes nothing at all --
+/// preserving `settings_set_enum_variant`'s no-op on a variant it cannot parse.
+fn optional_variant<T>(variant: &str, parse: fn(&str) -> Option<T>) -> Option<Option<T>> {
+    if variant == UNSET_VARIANT {
+        return Some(None);
+    }
+    parse(variant).map(Some)
+}
+
+/// The rows the target-type picker shows as selected. `TypeSelector::Any` names
+/// no type, but the picker offers `*` as a choice alongside the declared names,
+/// so the wildcard seeds as that row -- and the exclusivity `SetPicker` enforces
+/// is what keeps it from ever sharing the set with one.
+fn type_selector_members(selector: &TypeSelector) -> Vec<String> {
+    match selector {
+        TypeSelector::Any => vec![WILDCARD.to_string()],
+        TypeSelector::Types(names) => names.clone(),
+    }
+}
+
+/// The raw read-back of the `via` position, seeding its comma editor: the
+/// wildcard as the `*` its author wrote, a set as its bare names. Unlike
+/// `RelSelector::spelling` a multi-name set carries no brackets, so it reads as
+/// the value the editor holds rather than as a rendered list.
+fn rel_position_raw(selector: &RelSelector) -> String {
+    match selector {
+        RelSelector::Any => WILDCARD.to_string(),
+        RelSelector::Named(names) => names.join(", "),
+    }
+}
+
+/// Why the panel will not take `names` as the edge position `path` addresses,
+/// or `None` if it will. Two refusals share the one channel, because two
+/// wordings for one refusal is the drift AC4 exists to prevent, one layer down:
+///
+/// A position that names nothing matches nothing, and the loader does not catch
+/// it -- its declared-name checks iterate `names()`, and an empty list iterates
+/// nothing. So the panel refuses the empty set at commit rather than reading it
+/// as `*`, which is a different claim the user did not make.
+///
+/// A wildcard mixed with a name is neither selector, and the position's own
+/// engine-side constructor is what says so -- the same one the CLI's repeated
+/// flags and the `init` wizard's prompts assemble through -- so no surface can
+/// word it differently or let a mix through.
+fn edge_position_refusal(path: &FieldPath, names: &[String]) -> Option<String> {
+    let (position, kind, assembled) = match path {
+        FieldPath::Edge {
+            key: EdgeKey::From, ..
+        } => ("from", "type", selector_refusal(from_type_names(names))),
+        FieldPath::Edge {
+            key: EdgeKey::To, ..
+        } => ("to", "type", selector_refusal(from_type_names(names))),
+        FieldPath::Edge {
+            key: EdgeKey::Via, ..
+        } => (
+            "via",
+            "relationship",
+            selector_refusal(from_rel_names(names)),
+        ),
+        _ => return None,
+    };
+    if names.is_empty() {
+        return Some(format!("`{position}` must name a {kind}, or `*` for any"));
+    }
+    assembled
+}
+
+fn from_type_names(names: &[String]) -> Result<TypeSelector> {
+    TypeSelector::from_names(names.to_vec())
+}
+
+fn from_rel_names(names: &[String]) -> Result<RelSelector> {
+    RelSelector::from_names(names.to_vec())
+}
+
+fn selector_refusal<T>(assembled: Result<T>) -> Option<String> {
+    assembled.err().map(|e| e.to_string())
+}
+
+/// An `[[edges]]` name no row in `edges` already holds. A row is addressed by
+/// its `name` -- `Config::parse` refuses two rows sharing one -- so a constant
+/// seed name would make the second `n` seed a row that cannot be saved.
+fn unused_edge_name(edges: &[EdgeDef]) -> String {
+    let taken = |name: &str| edges.iter().any(|edge| edge.name == name);
+    if !taken("edge") {
+        return "edge".to_string();
+    }
+    (2usize..)
+        .map(|n| format!("edge-{n}"))
+        .find(|name| !taken(name))
+        .expect("one of an unbounded sequence of candidates is unused")
+}
+
 fn reserved_format_variant(f: &ReservedFormat) -> &'static str {
     match f {
         ReservedFormat::Incremental => "incremental",
@@ -172,72 +288,8 @@ fn reserved_format_from_variant(v: &str) -> Option<ReservedFormat> {
     }
 }
 
-fn severity_from_variant(v: &str) -> Option<Severity> {
-    match v {
-        "error" => Some(Severity::Error),
-        "warning" => Some(Severity::Warning),
-        _ => None,
-    }
-}
-
 fn statusbar_raw(slot: Option<&Vec<String>>) -> String {
     slot.map(|v| v.join(", ")).unwrap_or_default()
-}
-
-/// The raw editable string for a rule body field, read from the variant in play.
-/// Fields absent from the current variant render empty.
-fn rule_raw(rule: &ValidationRule, key: &RuleKey) -> String {
-    match (rule, key) {
-        (ValidationRule::ParentChild { name, .. }, RuleKey::Name)
-        | (ValidationRule::RelationExistence { name, .. }, RuleKey::Name) => name.clone(),
-        (ValidationRule::ParentChild { .. }, RuleKey::Shape) => "parent-child".to_string(),
-        (ValidationRule::RelationExistence { .. }, RuleKey::Shape) => {
-            "relation-existence".to_string()
-        }
-        (ValidationRule::ParentChild { child, .. }, RuleKey::Child) => child.clone(),
-        (ValidationRule::ParentChild { parent, .. }, RuleKey::Parent) => parent.clone(),
-        (ValidationRule::RelationExistence { doc_type, .. }, RuleKey::DocType) => doc_type.clone(),
-        (ValidationRule::RelationExistence { require, .. }, RuleKey::Require) => require.clone(),
-        (ValidationRule::ParentChild { severity, .. }, RuleKey::Severity)
-        | (ValidationRule::RelationExistence { severity, .. }, RuleKey::Severity) => match severity
-        {
-            Severity::Error => "error".to_string(),
-            Severity::Warning => "warning".to_string(),
-        },
-        _ => String::new(),
-    }
-}
-
-/// Write a typed value into a rule body field. Mismatched key/variant
-/// combinations and value-kind mismatches are no-ops.
-fn rule_write(rule: &mut ValidationRule, key: &RuleKey, value: SettingsValue) {
-    match rule {
-        ValidationRule::ParentChild {
-            name,
-            child,
-            parent,
-            severity,
-            ..
-        } => match (key, value) {
-            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
-            (RuleKey::Child, SettingsValue::Text(s)) => *child = s,
-            (RuleKey::Parent, SettingsValue::Text(s)) => *parent = s,
-            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
-            _ => {}
-        },
-        ValidationRule::RelationExistence {
-            name,
-            doc_type,
-            require,
-            severity,
-        } => match (key, value) {
-            (RuleKey::Name, SettingsValue::Text(s)) => *name = s,
-            (RuleKey::DocType, SettingsValue::Text(s)) => *doc_type = s,
-            (RuleKey::Require, SettingsValue::Text(s)) => *require = s,
-            (RuleKey::Severity, SettingsValue::Severity(sev)) => *severity = sev,
-            _ => {}
-        },
-    }
 }
 
 pub struct CreateResult {
@@ -661,15 +713,16 @@ pub struct App {
     /// The spec-path key prompt for seeding a new certification override. The key
     /// is entered before the override is inserted into the buffer.
     pub override_key_prompt: OverrideKeyPrompt,
-    /// The two-pane status-bar zone ordering editor, active while a
-    /// `statusbar.left/center/right` row is being reordered. `Some` routes keys to
-    /// the zone editor instead of the field list; commit writes the chosen order
-    /// back into `settings_buffer` (RFC-023 slice 7).
-    pub settings_zone_editor: Option<ZoneOrderingEditor>,
+    /// The two-pane Selected/Available picker, active while a `statusbar` zone
+    /// row is being reordered (RFC-023 slice 7) or an edge's `from`/`to` target
+    /// set is being chosen (STORY-260 AC3). `Some` routes keys to the picker
+    /// instead of the field list; commit writes the chosen members back into
+    /// `settings_buffer`.
+    pub settings_set_picker: Option<SetPicker>,
     /// The enum variant-picker overlay, active while an enum field (numbering,
-    /// store, reserved format, rule severity, or rule shape) is being edited via
-    /// `Enter`. `Some` routes keys to the picker; selecting writes the chosen
-    /// variant back into `settings_buffer` (RFC-023 / STORY-144).
+    /// store, or reserved format) is being edited via `Enter`. `Some` routes keys
+    /// to the picker; selecting writes the chosen variant back into
+    /// `settings_buffer` (RFC-023 / STORY-144).
     pub settings_variant_picker: Option<SettingsVariantPicker>,
     /// Free-running render-loop counter, set each frame before `terminal.draw`.
     /// Drives spinner animation phase; shared with the header sync/push face.
@@ -812,7 +865,7 @@ impl App {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -973,8 +1026,8 @@ impl App {
             KeyContext::SettingsQuitPrompt
         } else if self.settings_editing {
             KeyContext::SettingsEditing
-        } else if self.settings_zone_editor.is_some() {
-            KeyContext::SettingsZoneEditor
+        } else if self.settings_set_picker.is_some() {
+            KeyContext::SettingsSetPicker
         } else if self.settings_variant_picker.is_some() {
             KeyContext::SettingsVariantPicker
         } else if self.settings_scaffold_offer.is_some() {
@@ -989,13 +1042,26 @@ impl App {
             "General",
             "Document Types",
             "Relationships",
-            "Validation Rules",
+            "Edges",
             "Numbering",
             "GitHub",
             "Certification",
             "Agents",
             "Interface",
         ]
+    }
+
+    /// The nav index of the category called `name`. Every jump names the
+    /// category it means and resolves it here, because an index literal does
+    /// not fail when a category is inserted above it -- it silently addresses
+    /// the neighbour (STORY-260 put `Edges` at index 3 and moved five
+    /// categories down one). The names are literals in this module, so a
+    /// lookup that misses is a typo, not a state a user can reach.
+    pub(crate) fn settings_category_index(name: &str) -> usize {
+        Self::settings_categories()
+            .iter()
+            .position(|cat| *cat == name)
+            .unwrap_or_else(|| panic!("no settings category named {name}"))
     }
 
     /// The `EditableField` under the field cursor in the current settings
@@ -1050,10 +1116,33 @@ impl App {
                     RelKey::Inverse => r.inverse.clone().unwrap_or_default(),
                 })
                 .unwrap_or_default(),
-            FieldPath::Rule { index, key } => buf
-                .rules
+            FieldPath::Edge { index, key } => buf
+                .edges
                 .get(*index)
-                .map(|r| rule_raw(r, key))
+                .map(|e| match key {
+                    EdgeKey::Name => e.name.clone(),
+                    // The two type positions take the picker, which seeds from
+                    // `type_selector_members`, so nothing routes them to the
+                    // text input this seeds.
+                    EdgeKey::From | EdgeKey::To => String::new(),
+                    EdgeKey::Via => rel_position_raw(&e.via),
+                    // An optional enum's raw string has to be a member of its
+                    // variant list, so absence reads back as the unset entry
+                    // the cycler indexes -- not as the empty string a Nullable
+                    // text field would want.
+                    EdgeKey::Required => e
+                        .required
+                        .as_ref()
+                        .map(Severity::as_str)
+                        .unwrap_or(UNSET_VARIANT)
+                        .to_string(),
+                    EdgeKey::Traversal => e
+                        .traversal
+                        .as_ref()
+                        .map(Traversal::as_str)
+                        .unwrap_or(UNSET_VARIANT)
+                        .to_string(),
+                })
                 .unwrap_or_default(),
             FieldPath::SqidsSalt => buf
                 .documents
@@ -1166,11 +1255,6 @@ impl App {
                     }
                 }
             }
-            FieldPath::Rule { index, key } => {
-                if let Some(rule) = buf.rules.get_mut(*index) {
-                    rule_write(rule, key, value);
-                }
-            }
             FieldPath::SqidsSalt => {
                 if let (Some(s), SettingsValue::Text(v)) = (buf.documents.sqids.as_mut(), value) {
                     s.salt = v;
@@ -1242,6 +1326,41 @@ impl App {
                     buf.ui.multiline.max_expanded_height = n as usize;
                 }
             }
+            FieldPath::Edge { index, key } => {
+                if let Some(e) = buf.edges.get_mut(*index) {
+                    match (key, value) {
+                        (EdgeKey::Name, SettingsValue::Text(s)) => e.name = s,
+                        // A committed `["*"]` is the wildcard and not a type
+                        // named `*` -- `type_selector_members` seeds the
+                        // wildcard as that one row, so an untouched wildcard
+                        // has to come back as one -- and the constructor is
+                        // what folds it. Its one refusal, a wildcard beside a
+                        // name, is reported by `edge_position_refusal` before
+                        // either commit path reaches here, so a position that
+                        // could not be assembled keeps the spelling it had
+                        // rather than the writer asserting an invariant it
+                        // does not own.
+                        (EdgeKey::From, SettingsValue::List(v)) => {
+                            if let Ok(from) = TypeSelector::from_names(v) {
+                                e.from = from;
+                            }
+                        }
+                        (EdgeKey::To, SettingsValue::List(v)) => {
+                            if let Ok(to) = TypeSelector::from_names(v) {
+                                e.to = to;
+                            }
+                        }
+                        (EdgeKey::Via, SettingsValue::List(v)) => {
+                            if let Ok(via) = RelSelector::from_names(v) {
+                                e.via = via;
+                            }
+                        }
+                        (EdgeKey::Required, SettingsValue::OptSeverity(o)) => e.required = o,
+                        (EdgeKey::Traversal, SettingsValue::OptTraversal(o)) => e.traversal = o,
+                        _ => {}
+                    }
+                }
+            }
             // Statusbar slot ordering and unset placeholders are not editable here.
             FieldPath::StatusbarLeft
             | FieldPath::StatusbarCenter
@@ -1257,9 +1376,13 @@ impl App {
         let Some(focused) = self.settings_focused_field() else {
             return;
         };
-        // A status-bar zone row opens the two-pane ordering editor, not text entry.
-        if focused.editor == FieldEditor::ZoneOrdering {
-            self.settings_open_zone_editor(focused.path);
+        // A two-pane row (a status-bar zone, an edge type position) opens the
+        // set picker, not text entry.
+        if matches!(
+            focused.editor,
+            FieldEditor::ZoneOrdering | FieldEditor::TypeSet
+        ) {
+            self.settings_open_picker(focused.path);
             return;
         }
         let editable = matches!(
@@ -1277,46 +1400,117 @@ impl App {
         self.settings_edit_error = None;
     }
 
-    /// Open the status-bar zone ordering editor for `path`, seeding it from the
-    /// matching buffer zone and its RFC-022 default names (so an unset zone starts
-    /// from what the bar actually renders, not a blank).
-    fn settings_open_zone_editor(&mut self, path: FieldPath) {
-        use crate::tui::views::status_bar::{
-            STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT, STATUS_BAR_DEFAULT_RIGHT,
-        };
-        let sb = &self.settings_buffer.ui.statusbar;
-        let (current, defaults): (Option<&Vec<String>>, &[&str]) = match path {
-            FieldPath::StatusbarLeft => (sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT),
-            FieldPath::StatusbarCenter => (sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER),
-            FieldPath::StatusbarRight => (sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT),
-            _ => return,
-        };
-        self.settings_zone_editor = Some(ZoneOrderingEditor::new(path.clone(), current, defaults));
-    }
-
-    /// Commit the active zone editor into the buffer at its `path`: a non-empty
-    /// list writes `Some(order)`; an empty list writes `Some(vec![])` (an explicit
-    /// clear, distinct from an untouched zone's `None`). Dirties the buffer and
-    /// closes the editor.
-    pub fn settings_commit_zone(&mut self) {
-        let Some(editor) = self.settings_zone_editor.take() else {
+    /// Open the two-pane set picker for `path`. No-op for a path with no picker.
+    fn settings_open_picker(&mut self, path: FieldPath) {
+        let Some(picker) = self.settings_picker_for(&path) else {
             return;
         };
-        let value = Some(editor.selected);
-        let sb = &mut self.settings_buffer.ui.statusbar;
-        match editor.path {
-            FieldPath::StatusbarLeft => sb.left = value,
-            FieldPath::StatusbarCenter => sb.center = value,
-            FieldPath::StatusbarRight => sb.right = value,
+        self.settings_edit_error = None;
+        self.settings_set_picker = Some(picker);
+    }
+
+    /// The picker `path` addresses: a status-bar zone seeded from the buffer zone
+    /// and its RFC-022 default names (so an unset zone starts from what the bar
+    /// actually renders, not a blank), over the component vocabulary and ordered;
+    /// an edge type position seeded from the position's own spelling, over `"*"`
+    /// plus every declared type name, unordered.
+    fn settings_picker_for(&self, path: &FieldPath) -> Option<SetPicker> {
+        use crate::tui::views::status_bar::{
+            STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_CENTER, STATUS_BAR_DEFAULT_LEFT,
+            STATUS_BAR_DEFAULT_RIGHT,
+        };
+        let owned = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let zone = |current: Option<&Vec<String>>, defaults: &[&str]| {
+            let selected = current.cloned().unwrap_or_else(|| owned(defaults));
+            SetPicker::new(
+                path.clone(),
+                selected,
+                owned(STATUS_BAR_COMPONENTS),
+                PickerKind::Ordered,
+            )
+        };
+        let sb = &self.settings_buffer.ui.statusbar;
+        match path {
+            FieldPath::StatusbarLeft => Some(zone(sb.left.as_ref(), STATUS_BAR_DEFAULT_LEFT)),
+            FieldPath::StatusbarCenter => Some(zone(sb.center.as_ref(), STATUS_BAR_DEFAULT_CENTER)),
+            FieldPath::StatusbarRight => Some(zone(sb.right.as_ref(), STATUS_BAR_DEFAULT_RIGHT)),
+            FieldPath::Edge { index, key } => {
+                let edge = self.settings_buffer.edges.get(*index)?;
+                let selector = match key {
+                    EdgeKey::From => &edge.from,
+                    EdgeKey::To => &edge.to,
+                    _ => return None,
+                };
+                Some(SetPicker::new(
+                    path.clone(),
+                    type_selector_members(selector),
+                    self.edge_type_vocabulary(),
+                    PickerKind::WildcardSet,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `"*"` plus every type the buffer declares, in declared order: the whole
+    /// vocabulary an edge type position may name. Offering anything else would
+    /// let the picker produce the unknown-type refusal the save then has to
+    /// report (ITERATION-389).
+    fn edge_type_vocabulary(&self) -> Vec<String> {
+        std::iter::once(WILDCARD.to_string())
+            .chain(
+                self.settings_buffer
+                    .documents
+                    .types
+                    .iter()
+                    .map(|t| t.name.clone()),
+            )
+            .collect()
+    }
+
+    /// Commit the active picker into the buffer at its `path`. A status-bar zone
+    /// writes `Some(order)` -- an empty list included, which is an explicit clear
+    /// distinct from an untouched zone's `None`. An edge type position runs
+    /// [`edge_position_refusal`] first and leaves the picker open on a refusal --
+    /// in the same words `via`'s comma editor refuses it. `SetPicker`'s
+    /// wildcard exclusivity means only the empty set can arise here, but the
+    /// check is the shared one so the two paths cannot drift.
+    pub fn settings_commit_picker(&mut self) {
+        let Some(picker) = self.settings_set_picker.take() else {
+            return;
+        };
+        if let Some(message) = edge_position_refusal(&picker.path, &picker.selected) {
+            self.settings_edit_error = Some(message);
+            self.settings_set_picker = Some(picker);
+            return;
+        }
+        let members = picker.selected;
+        match &picker.path {
+            FieldPath::StatusbarLeft => self.settings_buffer.ui.statusbar.left = Some(members),
+            FieldPath::StatusbarCenter => self.settings_buffer.ui.statusbar.center = Some(members),
+            FieldPath::StatusbarRight => self.settings_buffer.ui.statusbar.right = Some(members),
+            path @ FieldPath::Edge {
+                key: EdgeKey::From | EdgeKey::To,
+                ..
+            } => self.settings_write(path, SettingsValue::List(members)),
             _ => return,
         }
+        self.settings_edit_error = None;
         self.settings_dirty = true;
     }
 
-    /// Close the zone editor without writing; the buffer is untouched (an untouched
-    /// zone stays `None`).
-    pub fn settings_cancel_zone(&mut self) {
-        self.settings_zone_editor = None;
+    /// Close the picker without writing; the buffer is untouched (an untouched
+    /// zone stays `None`, an untouched type position keeps its spelling).
+    pub fn settings_cancel_picker(&mut self) {
+        self.settings_set_picker = None;
+        self.settings_edit_error = None;
+    }
+
+    /// True iff the open picker binds the reorder keys.
+    pub(crate) fn settings_picker_reorders(&self) -> bool {
+        self.settings_set_picker
+            .as_ref()
+            .is_some_and(SetPicker::reorders)
     }
 
     pub fn settings_cancel_edit(&mut self) {
@@ -1351,6 +1545,10 @@ impl App {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
+                if let Some(message) = edge_position_refusal(&focused.path, &list) {
+                    self.settings_edit_error = Some(message);
+                    return;
+                }
                 self.settings_write(&focused.path, SettingsValue::List(list));
                 self.settings_dirty = true;
                 self.settings_editing = false;
@@ -1368,6 +1566,7 @@ impl App {
             FieldEditor::Toggle
             | FieldEditor::EnumCycle { .. }
             | FieldEditor::ZoneOrdering
+            | FieldEditor::TypeSet
             | FieldEditor::ReadOnly => {}
         }
     }
@@ -1415,22 +1614,12 @@ impl App {
     /// auto-scaffolding the enum-cycle path does. This is the shared write the
     /// cycle path and the variant picker both call: the cycle computes `next` then
     /// delegates here, so cycle and pick converge on identical behaviour (RFC-023
-    /// STORY-144). Rule `shape` is special: it routes through the whole-rule
-    /// conversion (preserving name + severity) when `variant` names the *other*
-    /// shape, and is a no-op when it names the current one.
+    /// STORY-144).
     pub fn settings_set_enum_variant(&mut self, path: &FieldPath, variant: &str) {
         // Re-selecting the current variant is a no-op: no buffer write, no dirty.
         // The cycle path never reaches here unchanged (it advances the index); the
         // picker can, when the user re-picks the row already in force.
         if variant == self.settings_focused_raw() {
-            return;
-        }
-        if let FieldPath::Rule {
-            index,
-            key: RuleKey::Shape,
-        } = path
-        {
-            self.settings_cycle_rule_shape(*index);
             return;
         }
         match path {
@@ -1460,12 +1649,21 @@ impl App {
                     self.settings_dirty = true;
                 }
             }
-            FieldPath::Rule {
-                key: RuleKey::Severity,
+            FieldPath::Edge {
+                key: EdgeKey::Required,
                 ..
             } => {
-                if let Some(sev) = severity_from_variant(variant) {
-                    self.settings_write(path, SettingsValue::Severity(sev));
+                if let Some(severity) = optional_variant(variant, severity_from_variant) {
+                    self.settings_write(path, SettingsValue::OptSeverity(severity));
+                    self.settings_dirty = true;
+                }
+            }
+            FieldPath::Edge {
+                key: EdgeKey::Traversal,
+                ..
+            } => {
+                if let Some(traversal) = optional_variant(variant, traversal_from_variant) {
+                    self.settings_write(path, SettingsValue::OptTraversal(traversal));
                     self.settings_dirty = true;
                 }
             }
@@ -1513,34 +1711,6 @@ impl App {
                 self.settings_scaffold_offer = Some(result);
             }
         }
-    }
-
-    /// Convert `rules[index]` to the other `ValidationRule` variant, preserving
-    /// `name` and `severity` and seeding the new body fields to empty strings.
-    fn settings_cycle_rule_shape(&mut self, index: usize) {
-        let Some(rule) = self.settings_buffer.rules.get_mut(index) else {
-            return;
-        };
-        *rule = match rule {
-            ValidationRule::ParentChild { name, severity, .. } => {
-                ValidationRule::RelationExistence {
-                    name: std::mem::take(name),
-                    doc_type: String::new(),
-                    require: String::new(),
-                    severity: severity.clone(),
-                }
-            }
-            ValidationRule::RelationExistence { name, severity, .. } => {
-                ValidationRule::ParentChild {
-                    name: std::mem::take(name),
-                    child: String::new(),
-                    parent: String::new(),
-                    severity: severity.clone(),
-                    require_parent_status: None,
-                }
-            }
-        };
-        self.settings_dirty = true;
     }
 
     /// Save the settings buffer to `.lazyspec.toml`, pausing first when the edit
@@ -1591,6 +1761,22 @@ impl App {
     /// failure also jumps focus to the offending field. On success the dirty flag
     /// and footer clear and `config_reload_request` is raised so the run loop
     /// re-loads the config, rebuilds the store, and re-seeds the clean buffer.
+    ///
+    /// This is the one place a buffer meets the loader's judgement, and so the
+    /// answer to which of the panel's two commits STORY-260 AC4 means: the save,
+    /// not the field commit (ITERATION-389). `Config::parse` is whole-config and
+    /// all-or-nothing, and the save is the only whole-config action -- running
+    /// the same check at field-commit time would refuse an edge edit for a
+    /// violation elsewhere in the buffer (a salt the designer has not filled in
+    /// yet), and narrowing it to the edited row would be a second spelling of
+    /// the loader's predicates, which is the drift AC4 exists to prevent. It
+    /// would also refuse legitimate waypoints: widening `from` to `*` before
+    /// clearing `required` is a two-field edit whose intermediate does not load.
+    ///
+    /// So the engine seam ITERATION-389 offered -- lifting `parse_inner`'s
+    /// invariant block into a `Config::check` a live buffer could be handed to
+    /// -- was not taken, and needs no re-litigating on those grounds. What would
+    /// reopen it is a check that is genuinely per-row rather than per-config.
     fn settings_commit_write(&mut self, root: &Path) {
         let path = root.join(".lazyspec.toml");
         let src = match std::fs::read_to_string(&path) {
@@ -1642,9 +1828,20 @@ impl App {
     fn settings_jump_to_violation(&mut self) {
         self.settings_editing = false;
 
+        // 1. An `[[edges]]` row the loader refuses. First, because `parse_inner`
+        // checks the DAG before numbering and stores, and it bails on the first
+        // violation it finds -- so the earliest violation in its order is the one
+        // the footer is talking about.
+        if let Some((row, key)) = self.first_edge_violation() {
+            self.settings_jump_to_field("Edges", Some(row), |f| {
+                f.path == (FieldPath::Edge { index: row, key })
+            });
+            return;
+        }
+
         let buf = &self.settings_buffer;
 
-        // 1. A Sqids type with no valid [numbering.sqids] salt.
+        // 2. A Sqids type with no valid [numbering.sqids] salt.
         let needs_sqids = buf
             .documents
             .types
@@ -1659,11 +1856,11 @@ impl App {
             if !salt_ok {
                 // The salt is a focusable field only when the section exists.
                 if buf.documents.sqids.is_some() {
-                    self.settings_jump_to_field(4, None, |f| {
+                    self.settings_jump_to_field("Numbering", None, |f| {
                         matches!(f.path, FieldPath::SqidsSalt)
                     });
                 } else {
-                    self.settings_jump_to_field(1, Some(type_index), |f| {
+                    self.settings_jump_to_field("Document Types", Some(type_index), |f| {
                         matches!(
                             f.path,
                             FieldPath::Type {
@@ -1677,7 +1874,7 @@ impl App {
             }
         }
 
-        // 2. A GithubIssues type with no [github] section.
+        // 3. A GithubIssues type with no [github] section.
         if buf.documents.github.is_none() {
             let offending = buf
                 .documents
@@ -1685,7 +1882,7 @@ impl App {
                 .iter()
                 .position(|t| t.store == StoreBackend::GithubIssues);
             if let Some(type_index) = offending {
-                self.settings_jump_to_field(1, Some(type_index), |f| {
+                self.settings_jump_to_field("Document Types", Some(type_index), |f| {
                     matches!(
                         f.path,
                         FieldPath::Type {
@@ -1698,9 +1895,110 @@ impl App {
             }
         }
 
-        // 3. Any other constraint (reserved/relationships): best-effort landing on
-        // a relevant category, clamped, never crashing.
-        self.settings_jump_to_field(4, None, |_| false);
+        // 4. Any other constraint (reserved/relationships): best-effort landing on
+        // a relevant category, clamped, never crashing. It must not land on an
+        // edge field -- a violation no arm above claims is not the Edges panel's
+        // to answer for. The retired `[[rules]]` refusal (STORY-259) never
+        // reaches here at all: `write_config_in_place` deletes the table, so the
+        // bytes this jump is explaining cannot still declare one.
+        self.settings_jump_to_field("Numbering", None, |_| false);
+    }
+
+    /// The first `[[edges]]` violation `Config::parse` would bail on, as the row
+    /// index and the field at fault -- attribution only. The *message* is the
+    /// loader's, produced by re-parsing the bytes destined for disk; this walks
+    /// the buffer in the same order `parse_inner` does so the field it names is
+    /// the one that message is about.
+    ///
+    /// Each arm reads a predicate the engine already exposes -- the selectors'
+    /// `names()` and `EdgeDef::overlaps`/`specificity` -- or, for `name`, the
+    /// field itself, rather than re-deriving a check: a re-derivation here would
+    /// be the second spelling STORY-260 AC4 forbids, merely relocated from the
+    /// message to the attribution. Every arm is tested against a real refused
+    /// save for that reason: a divergence from the loader has to fail, not go
+    /// unnoticed.
+    fn first_edge_violation(&self) -> Option<(usize, EdgeKey)> {
+        let buf = &self.settings_buffer;
+        let declared_type = |name: &String| buf.type_by_name(name).is_some();
+        let declared_rel = |name: &String| buf.relationship_by_name(name).is_some();
+
+        for (row, edge) in buf.edges.iter().enumerate() {
+            // A wildcard written inside a list and an undeclared name are two
+            // messages but one field, so one arm covers both positions.
+            for (key, names) in [
+                (EdgeKey::From, edge.from.names()),
+                (EdgeKey::To, edge.to.names()),
+            ] {
+                if names
+                    .iter()
+                    .any(|name| name == WILDCARD || !declared_type(name))
+                {
+                    return Some((row, key));
+                }
+            }
+            if edge
+                .via
+                .names()
+                .iter()
+                .any(|via| via == WILDCARD || !declared_rel(via))
+            {
+                return Some((row, EdgeKey::Via));
+            }
+            // `from = "*"` is a legal position on its own; the row is refused
+            // because `required` is set on it, and clearing `required` is the fix
+            // that keeps the position the designer just declared.
+            if edge.required.is_some() && edge.from == TypeSelector::Any {
+                return Some((row, EdgeKey::Required));
+            }
+        }
+
+        // A `name` refusal names its own culprit: the empty one for a cleared
+        // name, and for a duplicate the LATER row, since the earlier row held
+        // the name first and renaming the row just edited leaves it alone.
+        for (row, edge) in buf.edges.iter().enumerate() {
+            if edge.name.is_empty() {
+                return Some((row, EdgeKey::Name));
+            }
+            let duplicate = buf.edges[row + 1..]
+                .iter()
+                .position(|other| other.name == edge.name);
+            if let Some(offset) = duplicate {
+                return Some((row + offset + 1, EdgeKey::Name));
+            }
+        }
+
+        // A pairwise refusal has no single culprit -- either row can be narrowed
+        // or changed to agree -- so the cursor goes to the row the loader's
+        // message names first, which is the earlier row whether or not it is the
+        // one just edited.
+        Self::first_pairwise_disagreement(&buf.edges)
+    }
+
+    /// The earlier row of the first pair of `[[edges]]` rows that overlap and
+    /// disagree, and the qualifier they disagree on: a requiredness tie at equal
+    /// specificity, then a traversal disagreement, which is the order
+    /// `parse_inner` asks in. Rows that omit the qualifier state nothing and so
+    /// disagree with nothing.
+    fn first_pairwise_disagreement(edges: &[EdgeDef]) -> Option<(usize, EdgeKey)> {
+        let ties = edges.iter().enumerate().find_map(|(row, edge)| {
+            let severity = edge.required.as_ref()?;
+            edges[row + 1..]
+                .iter()
+                .filter(|other| other.overlaps(edge) && other.specificity() == edge.specificity())
+                .any(|other| other.required.as_ref().is_some_and(|s| s != severity))
+                .then_some((row, EdgeKey::Required))
+        });
+        if ties.is_some() {
+            return ties;
+        }
+        edges.iter().enumerate().find_map(|(row, edge)| {
+            let traversal = edge.traversal?;
+            edges[row + 1..]
+                .iter()
+                .filter(|other| other.overlaps(edge))
+                .any(|other| other.traversal.is_some_and(|t| t != traversal))
+                .then_some((row, EdgeKey::Traversal))
+        })
     }
 
     /// Land the settings nav on the scaffold offer's required-but-empty field
@@ -1709,23 +2007,28 @@ impl App {
     pub(crate) fn settings_jump_to_scaffolded_field(&mut self, path: &FieldPath) {
         match path {
             FieldPath::SqidsSalt => {
-                self.settings_jump_to_field(4, None, |f| matches!(f.path, FieldPath::SqidsSalt));
+                self.settings_jump_to_field("Numbering", None, |f| {
+                    matches!(f.path, FieldPath::SqidsSalt)
+                });
             }
             // No other scaffolded section produces a required-empty field today; a
             // best-effort landing keeps this total without crashing.
-            _ => self.settings_jump_to_field(4, None, |_| false),
+            _ => self.settings_jump_to_field("Numbering", None, |_| false),
         }
     }
 
-    /// Land the settings nav on `category` (optionally drilled into `drill`) and
-    /// set the field cursor to the first field matching `pick`, clamped to the
-    /// field list. With no match the cursor is 0.
+    /// Land the settings nav on the category called `category` (optionally
+    /// drilled into `drill`) and set the field cursor to the first field
+    /// matching `pick`, clamped to the field list. With no match the cursor is
+    /// 0. Callers name the category rather than numbering it; see
+    /// [`App::settings_category_index`].
     fn settings_jump_to_field(
         &mut self,
-        category: usize,
+        category: &str,
         drill: Option<usize>,
         pick: impl Fn(&EditableField) -> bool,
     ) {
+        let category = Self::settings_category_index(category);
         self.settings_category = category;
         self.settings_drill = drill;
         if let Some(d) = drill {
@@ -2677,9 +2980,9 @@ impl App {
     }
 
     /// Seed a default entry into the current Vec-backed collection (Document
-    /// Types / Relationships / Validation Rules) and drill into it. Placeholder
-    /// fields carry starter/default values so the new entry is immediately
-    /// editable. Buffer-only; sets `settings_dirty`.
+    /// Types / Relationships / Edges) and drill into it. Placeholder fields
+    /// carry starter/default values so the new entry is immediately editable.
+    /// Buffer-only; sets `settings_dirty`.
     pub fn settings_seed_entry(&mut self) {
         match self.settings_category {
             1 => {
@@ -2718,17 +3021,29 @@ impl App {
                 });
                 self.settings_entry = self.settings_buffer.relationships.len() - 1;
             }
+            // A shape that loads, not a row worth keeping. The two arms above
+            // seed placeholder names because nothing cross-references them; an
+            // edge is cross-referenced, and strict load rejects an unknown type
+            // in `from`/`to` or an unknown relationship in `via` -- so a
+            // placeholder string here is a config that will not load, and
+            // reading a real name out of the buffer has nothing to read when
+            // the config declares a single relationship and no type pair.
+            //
+            // The consequence is the designer's to undo: ADR-031 and RFC-067
+            // both record that an all-wildcard row restores the blanket
+            // behaviour the edge table exists to escape. Do not "improve" this
+            // default by adding a severity -- ITERATION-370 refuses `required`
+            // on a wildcard `from`, so the row would stop loading.
             3 => {
-                self.settings_buffer
-                    .rules
-                    .push(ValidationRule::ParentChild {
-                        name: "rule".to_string(),
-                        child: String::new(),
-                        parent: String::new(),
-                        severity: Severity::Error,
-                        require_parent_status: None,
-                    });
-                self.settings_entry = self.settings_buffer.rules.len() - 1;
+                self.settings_buffer.edges.push(EdgeDef {
+                    name: unused_edge_name(&self.settings_buffer.edges),
+                    from: TypeSelector::Any,
+                    to: TypeSelector::Any,
+                    via: RelSelector::Any,
+                    required: None,
+                    traversal: None,
+                });
+                self.settings_entry = self.settings_buffer.edges.len() - 1;
             }
             _ => return,
         }
@@ -2824,15 +3139,16 @@ impl App {
                     r.name.clone(),
                 )
             }
+            // No analogue of the ADR-011 guard above: a config declaring zero
+            // edges is legal and validates clean, it just constrains nothing.
             3 => {
-                let Some(rule) = self.settings_buffer.rules.get(self.settings_entry) else {
+                let Some(e) = self.settings_buffer.edges.get(self.settings_entry) else {
                     return;
                 };
-                let name = match rule {
-                    ValidationRule::ParentChild { name, .. } => name.clone(),
-                    ValidationRule::RelationExistence { name, .. } => name.clone(),
-                };
-                (SettingsDeleteTarget::Index(self.settings_entry), name)
+                (
+                    SettingsDeleteTarget::Index(self.settings_entry),
+                    e.name.clone(),
+                )
             }
             6 => {
                 let mut keys: Vec<&String> = self
@@ -2882,10 +3198,10 @@ impl App {
                     self.settings_buffer.relationships.len()
                 }
                 3 => {
-                    if i < self.settings_buffer.rules.len() {
-                        self.settings_buffer.rules.remove(i);
+                    if i < self.settings_buffer.edges.len() {
+                        self.settings_buffer.edges.remove(i);
                     }
-                    self.settings_buffer.rules.len()
+                    self.settings_buffer.edges.len()
                 }
                 _ => 0,
             },
@@ -3359,11 +3675,11 @@ impl App {
             .collect();
         expanded.sort();
 
-        // Zone editor inner state (pane / cursor / both lists), or None.
-        let zone = self.settings_zone_editor.as_ref().map(|z| {
+        // Set picker inner state (pane / cursor / both lists), or None.
+        let set_picker = self.settings_set_picker.as_ref().map(|p| {
             format!(
                 "{:?}|{}|{:?}|{:?}",
-                z.pane, z.cursor, z.selected, z.available
+                p.pane, p.cursor, p.selected, p.available
             )
         });
         // Variant picker inner state (selected index), or None.
@@ -3405,7 +3721,7 @@ impl App {
                 "search_query_len={} search_selected={} ",
                 "settings_editing={} settings_edit_input_len={} settings_dirty={} ",
                 "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
-                "settings_quit_prompt.active={} zone={:?} variant={:?} ",
+                "settings_quit_prompt.active={} set_picker={:?} variant={:?} ",
                 "scaffold_offer={} settings_footer_error={} settings_edit_error={} ",
                 "graph_sort_col={} graph_sort_rev={} {}",
             ),
@@ -3466,7 +3782,7 @@ impl App {
             self.settings_entry,
             self.settings_drill,
             self.settings_quit_prompt.active,
-            zone,
+            set_picker,
             variant,
             self.settings_scaffold_offer.is_some(),
             self.settings_footer_error.is_some(),
@@ -3487,7 +3803,17 @@ impl App {
 pub(crate) mod parity_seed {
     use super::*;
     use crate::tui::views::keybinds::KeyContext;
+    use std::sync::OnceLock;
     use tempfile::TempDir;
+
+    /// Every `Picker` constructor probes the terminal and, under tmux, spawns
+    /// `tmux set -p allow-passthrough on`. Pay that once per test binary.
+    pub(crate) fn test_picker() -> ratatui_image::picker::Picker {
+        static PICKER: OnceLock<ratatui_image::picker::Picker> = OnceLock::new();
+        PICKER
+            .get_or_init(ratatui_image::picker::Picker::halfblocks)
+            .clone()
+    }
 
     /// Markdown for one seeded doc, with an optional `related:` block.
     fn doc_md(id: &str, doc_type: &str, related: &str) -> String {
@@ -3592,14 +3918,14 @@ pub(crate) mod parity_seed {
                 crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
-            picker: ratatui_image::picker::Picker::halfblocks(),
+            picker: parity_seed::test_picker(),
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             git_branch: None,
-            git_status_cache: GitStatusCache::new(tmp.path()),
+            git_status_cache: GitStatusCache::unqueried(tmp.path()),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
@@ -3623,7 +3949,7 @@ pub(crate) mod parity_seed {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -3909,24 +4235,30 @@ pub(crate) mod parity_seed {
                 app.settings_dirty = true;
                 app.settings_quit_prompt.active = true;
             }
-            KeyContext::SettingsZoneEditor => {
-                use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
+            KeyContext::SettingsSetPicker => {
+                use crate::tui::state::forms::{FieldPath, PickerKind, PickerPane, SetPicker};
+                use crate::tui::views::status_bar::STATUS_BAR_COMPONENTS;
                 app.view_mode = ViewMode::Settings;
-                // >= 2 selected + >= 2 available, cursor in the middle of selected
-                // (so K/J move-up/down both act and j/k both move).
-                let mut z = ZoneOrderingEditor::new(
+                // A status-bar zone, so the reorder keys the registry documents
+                // are live: >= 2 selected + >= 2 available, cursor in the middle
+                // of selected (so K/J move-up/down both act and j/k both move).
+                let mut picker = SetPicker::new(
                     FieldPath::StatusbarLeft,
-                    Some(&vec![
+                    vec![
                         "branch".to_string(),
                         "filter".to_string(),
                         "sync".to_string(),
-                    ]),
-                    &[],
+                    ],
+                    STATUS_BAR_COMPONENTS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    PickerKind::Ordered,
                 );
-                z.pane = ZonePane::Selected;
-                z.cursor = 1;
-                assert!(z.available.len() >= 2, "zone editor needs >= 2 available");
-                app.settings_zone_editor = Some(z);
+                picker.pane = PickerPane::Selected;
+                picker.cursor = 1;
+                assert!(picker.available.len() >= 2, "picker needs >= 2 available");
+                app.settings_set_picker = Some(picker);
             }
             KeyContext::SettingsVariantPicker => {
                 use crate::tui::state::forms::{FieldPath, SettingsVariantPicker};
@@ -3957,6 +4289,8 @@ mod tests {
     use super::*;
     use crate::engine::config::TypeDef;
     use crate::engine::store::Store;
+    use crate::engine::traversal::TraversalWalk;
+    use crate::tui::state::forms::PickerPane;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn make_dummy_node(index: usize) -> DocListNode {
@@ -3982,8 +4316,7 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
@@ -4074,14 +4407,14 @@ mod tests {
                 crate::tui::infra::terminal_caps::TerminalImageProtocol::Unsupported,
             tool_availability: crate::tui::content::diagram::ToolAvailability { d2: false },
             diagram_cache: crate::tui::content::diagram::DiagramCache::new(),
-            picker: ratatui_image::picker::Picker::halfblocks(),
+            picker: parity_seed::test_picker(),
             image_states: HashMap::new(),
             image_dimensions_cache: HashMap::new(),
             ascii_diagrams: false,
             diagram_blocks_cache: None,
             filtered_docs_cache: None,
             git_branch: None,
-            git_status_cache: GitStatusCache::new(Path::new(".")),
+            git_status_cache: GitStatusCache::unqueried(Path::new(".")),
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
@@ -4105,7 +4438,7 @@ mod tests {
             settings_delete_confirm: SettingsDeleteConfirm::new(),
             settings_impact_confirm: SettingsImpactConfirm::new(),
             override_key_prompt: OverrideKeyPrompt::new(),
-            settings_zone_editor: None,
+            settings_set_picker: None,
             settings_variant_picker: None,
             frame_idx: 0,
         };
@@ -4322,8 +4655,7 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
-            chain_relationships: vec!["implements".to_string()],
-            related_relationships: vec!["related-to".to_string()],
+            traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
         };
 
@@ -5887,16 +6219,16 @@ mod tests {
     // --- Settings field editors (ITERATION-188 Tasks 3/4/5) ---
 
     use crate::engine::config::{
-        GithubConfig, ReservedFormat, Severity, SqidsConfig, StoreBackend, ValidationRule,
+        EdgeDef, GithubConfig, RelSelector, ReservedFormat, SqidsConfig, StoreBackend, TypeSelector,
     };
 
     /// Build a settings-edit-ready app: set the buffer to `config`, focus the
-    /// given category and field, leave it clean and not editing.
-    fn settings_app(config: Config, category: usize, field: usize) -> App {
+    /// named category and the field at `field`, leave it clean and not editing.
+    fn settings_app(config: Config, category: &str, field: usize) -> App {
         let mut app = make_test_app(0);
         app.settings_buffer = config;
         app.settings_dirty = false;
-        app.settings_category = category;
+        app.settings_category = App::settings_category_index(category);
         app.settings_entry = 0;
         app.settings_drill = None;
         app.settings_field = field;
@@ -5938,7 +6270,7 @@ mod tests {
 
     #[test]
     fn ac1_text_edit_writes_to_buffer_and_dirties() {
-        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern
+        let mut app = settings_app(config_one_type(), "General", 0); // naming.pattern
         app.settings_start_edit();
         assert!(app.settings_editing);
         // Replace seeded input with a fresh value.
@@ -5960,7 +6292,7 @@ mod tests {
     fn ac2_toggle_statusbar_enabled_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, "Interface", 1); // statusbar.enabled
 
         app.settings_space();
         assert!(!app.settings_buffer.ui.statusbar.enabled);
@@ -5976,7 +6308,7 @@ mod tests {
     #[test]
     fn ac2_toggle_drilled_type_subdirectory_flips() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 6); // Document Types, subdirectory
+        let mut app = settings_app(config, "Document Types", 6); // subdirectory
         app.settings_drill = Some(0);
 
         let before = app.settings_buffer.documents.types[0].subdirectory;
@@ -5994,7 +6326,7 @@ mod tests {
             salt: "seed".to_string(),
             min_length: 3,
         });
-        let mut app = settings_app(config, 4, 1); // Numbering > sqids.min_length
+        let mut app = settings_app(config, "Numbering", 1); // sqids.min_length
 
         // Reject "0".
         app.settings_start_edit();
@@ -6040,7 +6372,7 @@ mod tests {
             repo: Some("old/repo".to_string()),
             cache_ttl: 60,
         });
-        let mut app = settings_app(config, 5, 0); // GitHub > repo
+        let mut app = settings_app(config, "GitHub", 0); // repo
 
         // Empty => None (not Some("")).
         app.settings_start_edit();
@@ -6074,7 +6406,7 @@ mod tests {
     #[test]
     fn ac6_list_splits_trims_drops_empties() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 10); // Document Types, agents
+        let mut app = settings_app(config, "Document Types", 10); // agents
         app.settings_drill = Some(0);
 
         app.settings_start_edit();
@@ -6106,7 +6438,7 @@ mod tests {
     #[test]
     fn ac7_numbering_cycles_and_wraps() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 5); // Document Types, numbering
+        let mut app = settings_app(config, "Document Types", 5); // numbering
         app.settings_drill = Some(0);
         assert_eq!(
             app.settings_buffer.documents.types[0].numbering,
@@ -6137,7 +6469,7 @@ mod tests {
     #[test]
     fn ac7_store_cycles_through_three_variants() {
         let config = config_one_type();
-        let mut app = settings_app(config, 1, 7); // Document Types, store
+        let mut app = settings_app(config, "Document Types", 7); // store
         app.settings_drill = Some(0);
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
@@ -6173,86 +6505,6 @@ mod tests {
     }
 
     #[test]
-    fn ac7_rule_severity_cycles() {
-        let mut config = config_one_type();
-        config.rules = vec![ValidationRule::ParentChild {
-            name: "r".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Error,
-            require_parent_status: None,
-        }];
-        let mut app = settings_app(config, 3, 4); // Validation Rules, severity (ParentChild)
-        app.settings_drill = Some(0);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild { severity, .. } => {
-                assert_eq!(*severity, Severity::Warning)
-            }
-            _ => panic!("variant changed unexpectedly"),
-        }
-        assert!(app.settings_dirty);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild { severity, .. } => {
-                assert_eq!(*severity, Severity::Error, "wraps")
-            }
-            _ => panic!("variant changed unexpectedly"),
-        }
-    }
-
-    #[test]
-    fn ac7_rule_shape_converts_variant_preserving_name_and_severity() {
-        let mut config = config_one_type();
-        config.rules = vec![ValidationRule::ParentChild {
-            name: "my-rule".to_string(),
-            child: "story".to_string(),
-            parent: "rfc".to_string(),
-            severity: Severity::Warning,
-            require_parent_status: None,
-        }];
-        let mut app = settings_app(config, 3, 1); // Validation Rules, shape
-        app.settings_drill = Some(0);
-
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::RelationExistence {
-                name,
-                doc_type,
-                require,
-                severity,
-            } => {
-                assert_eq!(name, "my-rule", "name preserved");
-                assert_eq!(*severity, Severity::Warning, "severity preserved");
-                assert_eq!(doc_type, "", "new body seeded empty");
-                assert_eq!(require, "", "new body seeded empty");
-            }
-            _ => panic!("shape cycle must convert to relation-existence"),
-        }
-        assert!(app.settings_dirty);
-
-        // Cycling shape again converts back to parent-child.
-        app.settings_space();
-        match &app.settings_buffer.rules[0] {
-            ValidationRule::ParentChild {
-                name,
-                child,
-                parent,
-                severity,
-                ..
-            } => {
-                assert_eq!(name, "my-rule");
-                assert_eq!(*severity, Severity::Warning);
-                assert_eq!(child, "");
-                assert_eq!(parent, "");
-            }
-            _ => panic!("shape cycle must convert back to parent-child"),
-        }
-    }
-
-    #[test]
     fn ac7_reserved_format_cycles() {
         let mut config = config_one_type();
         config.documents.reserved = Some(crate::engine::config::ReservedConfig {
@@ -6262,7 +6514,7 @@ mod tests {
         });
         // Numbering view: sqids absent => 2 ReadOnly fields, then reserved.remote(2),
         // reserved.format(3), reserved.max_retries(4).
-        let mut app = settings_app(config, 4, 3);
+        let mut app = settings_app(config, "Numbering", 3);
 
         app.settings_space();
         assert_eq!(
@@ -6293,7 +6545,7 @@ mod tests {
     /// A drilled-type app focused on the type's `numbering` EnumCycle, clean and
     /// not editing. cat 1 (Document Types), drilled into type 0, field 5.
     fn numbering_app(config: Config) -> App {
-        let mut app = settings_app(config, 1, 5);
+        let mut app = settings_app(config, "Document Types", 5);
         app.settings_drill = Some(0);
         app
     }
@@ -6368,7 +6620,7 @@ mod tests {
     // required-empty offer.
     #[test]
     fn ac5_store_to_github_issues_scaffolds_section_no_offer() {
-        let mut app = settings_app(config_one_type(), 1, 7); // store field
+        let mut app = settings_app(config_one_type(), "Document Types", 7); // store field
         app.settings_drill = Some(0);
         assert!(app.settings_buffer.documents.github.is_none());
 
@@ -6427,7 +6679,11 @@ mod tests {
             &config,
         );
 
-        assert_eq!(app.settings_category, 4, "landed on the Numbering category");
+        assert_eq!(
+            App::settings_categories()[app.settings_category],
+            "Numbering",
+            "landed on the Numbering category"
+        );
         assert_eq!(app.settings_drill, None);
         let fields = crate::tui::views::panels::settings_fields(
             app.settings_category,
@@ -6480,7 +6736,7 @@ mod tests {
     fn ac3_enter_on_bool_flips_buffer_and_dirties() {
         let mut config = config_one_type();
         config.ui.statusbar.enabled = true;
-        let mut app = settings_app(config, 8, 1); // Interface > statusbar.enabled
+        let mut app = settings_app(config, "Interface", 1); // statusbar.enabled
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6519,7 +6775,7 @@ mod tests {
     // AC2: Enter on a text field begins inline editing.
     #[test]
     fn ac2_enter_on_text_starts_editing() {
-        let mut app = settings_app(config_one_type(), 0, 0); // naming.pattern (Text)
+        let mut app = settings_app(config_one_type(), "General", 0); // naming.pattern (Text)
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6531,7 +6787,7 @@ mod tests {
     #[test]
     fn ac7_enter_on_readonly_is_noop() {
         // Numbering view with no sqids section: field 0 is ReadOnly.
-        let mut app = settings_app(config_one_type(), 4, 0);
+        let mut app = settings_app(config_one_type(), "Numbering", 0);
         let config = Config::default();
 
         app.handle_settings_key(KeyCode::Enter, KeyModifiers::NONE, Path::new("."), &config);
@@ -6574,7 +6830,7 @@ mod tests {
     #[test]
     fn ac9_enter_on_entry_list_drills_into_entry() {
         let config = config_with_types(&["rfc", "story"]);
-        let mut app = settings_app(config, 1, 0); // Document Types collection, not drilled
+        let mut app = settings_app(config, "Document Types", 0); // the collection, not drilled
         app.settings_entry = 1;
         let config = Config::default();
 
@@ -6711,23 +6967,559 @@ mod tests {
     #[test]
     fn readonly_field_start_edit_and_space_are_noops() {
         // Numbering view with no sqids section: sqids.salt is ReadOnly/Unset.
-        let mut app = settings_app(config_one_type(), 4, 0);
+        let mut app = settings_app(config_one_type(), "Numbering", 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "start_edit no-op on ReadOnly");
         app.settings_space();
         assert!(!app.settings_dirty, "space no-op on ReadOnly");
     }
 
+    /// A config whose DAG is one fully-stated edge row, for the Edges category.
+    fn config_one_edge() -> Config {
+        Config {
+            edges: vec![EdgeDef {
+                name: "a-implements-a".to_string(),
+                from: TypeSelector::Types(vec![type_a()]),
+                to: TypeSelector::Any,
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: Some(Severity::Error),
+                traversal: Some(Traversal::Chain),
+            }],
+            ..config_one_type()
+        }
+    }
+
+    /// A settings app focused on the labelled field of drilled edge row 0.
+    /// Tests address the field by label because an index does not fail when
+    /// `EdgeDef` gains a key -- it silently addresses the neighbour.
+    fn edge_field_app(config: Config, label: &str) -> App {
+        let mut app = settings_app(config, "Edges", 0);
+        focus_edge_field(&mut app, label);
+        app
+    }
+
+    /// Drill into edge row 0 and focus its labelled field, on an app built any
+    /// way (`settings_app` for buffer-only tests, `save_app` when the save has
+    /// to reach a real file).
+    fn focus_edge_field(app: &mut App, label: &str) {
+        focus_edge_row_field(app, 0, label);
+    }
+
+    /// [`focus_edge_field`] for a chosen row, so a pairwise refusal can be
+    /// provoked from the row that is not the one the cursor is expected to land
+    /// on.
+    fn focus_edge_row_field(app: &mut App, row: usize, label: &str) {
+        app.settings_category = App::settings_category_index("Edges");
+        app.settings_entry = row;
+        app.settings_drill = Some(row);
+        let fields = crate::tui::views::panels::settings_fields(
+            app.settings_category,
+            app.settings_entry,
+            app.settings_drill,
+            &app.settings_buffer,
+        );
+        app.settings_field = fields
+            .iter()
+            .position(|f| f.label == label)
+            .unwrap_or_else(|| panic!("no edge field labelled {label}: {fields:?}"));
+    }
+
+    fn edge_path(key: EdgeKey) -> FieldPath {
+        FieldPath::Edge { index: 0, key }
+    }
+
+    // STORY-260 AC2: `name` is a plain string on the row, so it takes the text
+    // write and reads straight back.
+    #[test]
+    fn edge_name_write_lands_in_the_buffer() {
+        let mut app = edge_field_app(config_one_edge(), "name");
+
+        app.settings_write(
+            &edge_path(EdgeKey::Name),
+            SettingsValue::Text("a-relates-a".to_string()),
+        );
+
+        assert_eq!(app.settings_buffer.edges[0].name, "a-relates-a");
+        assert_eq!(app.settings_focused_raw(), "a-relates-a");
+    }
+
+    // A type position is a set or the wildcard, and the picker's commit has to
+    // land both -- names as the set, `*` as the wildcard.
+    #[test]
+    fn edge_type_position_write_round_trips_set_and_wildcard() {
+        let mut app = edge_field_app(config_one_edge(), "to");
+        let to = edge_path(EdgeKey::To);
+
+        app.settings_write(
+            &to,
+            SettingsValue::List(vec!["story".to_string(), "bug".to_string()]),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["story".to_string(), "bug".to_string()])
+        );
+
+        app.settings_write(&to, SettingsValue::List(vec!["*".to_string()]));
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Any,
+            "`*` is the wildcard, not a type named `*`"
+        );
+    }
+
+    // `via` is a relationship set on the same terms (ADR-032), so it takes the
+    // same editor and the same wildcard round-trip.
+    #[test]
+    fn edge_via_write_round_trips_set_and_wildcard() {
+        let mut app = edge_field_app(config_one_edge(), "via");
+        let via = edge_path(EdgeKey::Via);
+
+        app.settings_write(
+            &via,
+            SettingsValue::List(vec!["blocks".to_string(), "implements".to_string()]),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].via,
+            RelSelector::Named(vec!["blocks".to_string(), "implements".to_string()])
+        );
+        assert_eq!(app.settings_focused_raw(), "blocks, implements");
+
+        app.settings_write(&via, SettingsValue::List(vec!["*".to_string()]));
+        assert_eq!(app.settings_buffer.edges[0].via, RelSelector::Any);
+    }
+
+    // `via`'s comma editor is the one edge position a wildcard can be typed
+    // beside a name in -- the two type positions take a picker that enforces
+    // exclusivity -- and a mix is neither selector. It is refused at commit in
+    // the engine constructor's own words, and edit mode stays open so the value
+    // can be corrected rather than the edit being lost.
+    #[test]
+    fn typing_a_wildcard_beside_a_relationship_name_is_refused_at_commit() {
+        let mut app = edge_field_app(config_one_edge(), "via");
+        let before = app.settings_buffer.edges[0].via.clone();
+
+        app.settings_start_edit();
+        app.settings_edit_input = format!("implements, {WILDCARD}");
+        app.settings_confirm_edit();
+
+        assert_eq!(app.settings_buffer.edges[0].via, before);
+        assert!(!app.settings_dirty, "a refused commit writes nothing");
+        assert!(
+            app.settings_editing,
+            "a refused commit keeps the editor open so the value can be corrected"
+        );
+        assert_eq!(
+            app.settings_edit_error.as_deref(),
+            Some(
+                RelSelector::from_names(vec!["implements".to_string(), WILDCARD.to_string()])
+                    .expect_err("a wildcard beside a name is neither selector")
+                    .to_string()
+                    .as_str()
+            ),
+            "the constructor's own words reach the panel"
+        );
+    }
+
+    // An absent `required` states no requiredness at all (RFC-067), so the
+    // write has to be able to clear the key and read the cleared state back as
+    // the cycler's unset position.
+    #[test]
+    fn edge_required_write_lands_and_reads_back_unset() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        let required = edge_path(EdgeKey::Required);
+
+        app.settings_write(
+            &required,
+            SettingsValue::OptSeverity(Some(Severity::Warning)),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Warning)
+        );
+        assert_eq!(app.settings_focused_raw(), "warning");
+
+        app.settings_write(&required, SettingsValue::OptSeverity(None));
+        assert_eq!(app.settings_buffer.edges[0].required, None);
+        assert_eq!(app.settings_focused_raw(), UNSET_VARIANT);
+    }
+
+    // An absent `traversal` names no role, leaving the triple to any other
+    // matching row (ADR-030) -- again a claim, not a default.
+    #[test]
+    fn edge_traversal_write_lands_and_reads_back_unset() {
+        let mut app = edge_field_app(config_one_edge(), "traversal");
+        let traversal = edge_path(EdgeKey::Traversal);
+
+        app.settings_write(
+            &traversal,
+            SettingsValue::OptTraversal(Some(Traversal::Related)),
+        );
+        assert_eq!(
+            app.settings_buffer.edges[0].traversal,
+            Some(Traversal::Related)
+        );
+        assert_eq!(app.settings_focused_raw(), "related");
+
+        app.settings_write(&traversal, SettingsValue::OptTraversal(None));
+        assert_eq!(app.settings_buffer.edges[0].traversal, None);
+        assert_eq!(app.settings_focused_raw(), UNSET_VARIANT);
+    }
+
+    // The cycler has to reach unset, because absence is reachable in the file
+    // and means something the panel would otherwise be unable to say.
+    #[test]
+    fn cycling_required_passes_through_unset_and_wraps_to_error() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        assert_eq!(app.settings_buffer.edges[0].required, Some(Severity::Error));
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Warning)
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required, None,
+            "the unset position is reachable by cycling"
+        );
+
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.edges[0].required,
+            Some(Severity::Error),
+            "cycling wraps past unset back to the first severity"
+        );
+    }
+
+    // Cycling to unset must remove the key rather than write a default.
+    // `EdgeDef.required` is `skip_serializing_if = "Option::is_none"`, so the
+    // rendered TOML is where the difference is visible.
+    #[test]
+    fn cycling_required_to_unset_renders_no_required_key() {
+        let mut app = edge_field_app(config_one_edge(), "required");
+        app.settings_space();
+        app.settings_space();
+
+        let toml = app.settings_buffer.to_toml().expect("buffer renders");
+
+        assert!(
+            !toml.contains("required ="),
+            "an unset qualifier writes no key: {toml}"
+        );
+    }
+
+    // The refusal is scoped to edge positions: `types[].agents` shares the
+    // comma editor, and an empty agents list is how that key is unset.
+    #[test]
+    fn clearing_the_agents_list_is_still_accepted() {
+        let mut config = config_one_type();
+        config.documents.types[0].agents = vec!["claude".to_string()];
+        let mut app = settings_app(config, "Document Types", 10); // agents
+        app.settings_drill = Some(0);
+
+        app.settings_start_edit();
+        app.settings_edit_input.clear();
+        app.settings_confirm_edit();
+
+        assert!(app.settings_buffer.documents.types[0].agents.is_empty());
+        assert!(app.settings_dirty);
+        assert!(app.settings_edit_error.is_none());
+    }
+
+    // --- STORY-260 AC3: the target-type picker (ITERATION-391) ---
+
+    /// Three declared types and one edge whose `to` is the wildcard: the whole
+    /// vocabulary the picker offers, and the variant it has to be able to leave.
+    fn config_three_types_one_edge() -> Config {
+        Config {
+            edges: vec![EdgeDef {
+                name: "a-implements-b".to_string(),
+                from: TypeSelector::Types(vec!["a".to_string()]),
+                to: TypeSelector::Any,
+                via: RelSelector::Named(vec!["implements".to_string()]),
+                required: None,
+                traversal: None,
+            }],
+            ..config_with_types(&["a", "b", "c"])
+        }
+    }
+
+    /// A settings app with the picker open on the labelled position of drilled
+    /// edge row 0, driven the way `Enter` drives it.
+    fn picker_app(label: &str) -> App {
+        let mut app = edge_field_app(config_three_types_one_edge(), label);
+        app.settings_start_edit();
+        assert!(
+            !app.settings_editing,
+            "`{label}` opens the picker, not the comma editor"
+        );
+        app
+    }
+
+    fn open_picker(app: &App) -> &SetPicker {
+        app.settings_set_picker
+            .as_ref()
+            .expect("the picker is open")
+    }
+
+    /// Add `name` from the Available pane, as `Space` does.
+    fn pick(app: &mut App, name: &str) {
+        let picker = app
+            .settings_set_picker
+            .as_mut()
+            .expect("the picker is open");
+        picker.pane = PickerPane::Available;
+        picker.cursor = picker
+            .available
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("{name} is not offered: {:?}", picker.available));
+        picker.add();
+    }
+
+    /// Remove `name` from the Selected pane, as `Space` does.
+    fn unpick(app: &mut App, name: &str) {
+        let picker = app
+            .settings_set_picker
+            .as_mut()
+            .expect("the picker is open");
+        picker.pane = PickerPane::Selected;
+        picker.cursor = picker
+            .selected
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("{name} is not selected: {:?}", picker.selected));
+        picker.remove();
+    }
+
+    // AC3: target types are added and removed one at a time, and the committed
+    // set is what the Selected pane holds -- not what any one keypress said.
+    #[test]
+    fn picking_two_target_types_then_dropping_one_commits_the_remaining_set() {
+        let mut app = picker_app("to");
+
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        unpick(&mut app, "b");
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["c".to_string()])
+        );
+        assert!(app.settings_dirty);
+        assert!(
+            app.settings_set_picker.is_none(),
+            "commit closes the picker"
+        );
+    }
+
+    // AC3: `*` is offered alongside the declared names, and the vocabulary is
+    // exactly that -- a name the config does not declare is the load error
+    // ITERATION-389 surfaces, and a picker that can produce it is a worse picker.
+    #[test]
+    fn the_target_picker_offers_the_wildcard_and_every_declared_type() {
+        let app = picker_app("to");
+        let picker = open_picker(&app);
+
+        let mut offered: Vec<&str> = picker
+            .selected
+            .iter()
+            .chain(picker.available.iter())
+            .map(String::as_str)
+            .collect();
+        offered.sort_unstable();
+        assert_eq!(offered, ["*", "a", "b", "c"]);
+    }
+
+    // `*` is the `TypeSelector::Any` variant, not a member of a set, so picking
+    // it clears the concrete names rather than joining them (ADR-031).
+    #[test]
+    fn picking_the_wildcard_clears_the_concrete_target_types() {
+        let mut app = picker_app("to");
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        app.settings_commit_picker();
+
+        app.settings_start_edit();
+        pick(&mut app, "*");
+        assert_eq!(
+            open_picker(&app).selected,
+            ["*"],
+            "the wildcard displaces the members it is not one of"
+        );
+        app.settings_commit_picker();
+
+        assert_eq!(app.settings_buffer.edges[0].to, TypeSelector::Any);
+    }
+
+    // The exclusivity holds in both directions: `Types(vec!["*"])` is a shape
+    // only this panel could produce, and the parser reads a scalar `"*"` as
+    // `Any`, so the picker must never assemble it.
+    #[test]
+    fn picking_a_type_while_the_wildcard_is_selected_drops_the_wildcard() {
+        let mut app = picker_app("to");
+        assert_eq!(
+            open_picker(&app).selected,
+            ["*"],
+            "a wildcard position seeds as the `*` its author wrote"
+        );
+
+        pick(&mut app, "b");
+        assert_eq!(open_picker(&app).selected, ["b"]);
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["b".to_string()])
+        );
+    }
+
+    // AC3 names `to`, but `from` is the same position on the same terms, and
+    // leaving two spellings live is the failure mode.
+    #[test]
+    fn the_from_position_opens_the_same_picker() {
+        let mut app = picker_app("from");
+        assert_eq!(open_picker(&app).selected, ["a"]);
+
+        pick(&mut app, "b");
+        app.settings_commit_picker();
+
+        assert_eq!(
+            app.settings_buffer.edges[0].from,
+            TypeSelector::Types(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    // A position that names nothing matches nothing, and the loader does not
+    // catch it -- its declared-type check iterates `names()`, and an empty list
+    // iterates nothing. The picker refuses it at commit in the words the comma
+    // editor used, because two wordings for one refusal is the drift AC4 is
+    // about, one layer down.
+    #[test]
+    fn committing_an_empty_target_set_is_refused_and_leaves_the_buffer_alone() {
+        let mut app = picker_app("to");
+        let before = app.settings_buffer.edges[0].to.clone();
+
+        unpick(&mut app, "*");
+        app.settings_commit_picker();
+
+        assert_eq!(app.settings_buffer.edges[0].to, before);
+        assert!(!app.settings_dirty, "a refused commit writes nothing");
+        assert_eq!(
+            app.settings_edit_error.as_deref(),
+            Some("`to` must name a type, or `*` for any")
+        );
+        assert!(
+            app.settings_set_picker.is_some(),
+            "a refused commit keeps the picker open so the set can be corrected"
+        );
+    }
+
+    // A type set is unordered -- `TypeSelector::Types` is a set spelled as a
+    // list and `EdgeDef::matches` is order-blind -- so the reorder keys would
+    // dirty the file and change no behaviour. They are not bound here.
+    #[test]
+    fn the_target_picker_binds_no_reorder_keys() {
+        let mut app = picker_app("to");
+        pick(&mut app, "b");
+        pick(&mut app, "c");
+        let before = open_picker(&app).selected.clone();
+        let picker = app.settings_set_picker.as_mut().unwrap();
+        picker.pane = PickerPane::Selected;
+        picker.cursor = 1;
+
+        press_settings(&mut app, KeyCode::Char('K'));
+        press_settings(&mut app, KeyCode::Char('J'));
+
+        assert_eq!(open_picker(&app).selected, before);
+        assert!(!open_picker(&app).reorders());
+    }
+
+    // The same keys still reorder a status-bar zone, whose order IS the render
+    // order: suppressing them for a type set must not suppress them there.
+    #[test]
+    fn a_status_bar_zone_picker_still_reorders() {
+        let mut app = settings_app(config_one_type(), "Interface", 2); // statusbar.left
+        app.settings_start_edit();
+        let picker = app.settings_set_picker.as_mut().expect("zone picker");
+        picker.pane = PickerPane::Selected;
+        picker.cursor = 1;
+        let expected = [picker.selected[1].clone(), picker.selected[0].clone()];
+
+        press_settings(&mut app, KeyCode::Char('K'));
+
+        assert_eq!(open_picker(&app).selected[..2], expected[..]);
+    }
+
+    /// Press `code` through the real settings key handler, so a test about a
+    /// keybinding is a test about the binding and not about the state op behind
+    /// it.
+    fn press_settings(app: &mut App, code: KeyCode) {
+        app.view_mode = ViewMode::Settings;
+        let root = app.store.root.clone();
+        let config = Config::default();
+        app.handle_key(code, KeyModifiers::NONE, &root, &config);
+    }
+
+    // A field's editor picks the commit path, and `settings_write` no-ops on a
+    // carrier mismatch by design -- so an editor paired with the wrong carrier
+    // is a silently dropped edit. Drive every edge key through the editor its
+    // own row declares and assert the buffer moved.
+    #[test]
+    fn every_edge_field_commits_through_the_editor_its_row_declares() {
+        for label in ["name", "from", "to", "via", "required", "traversal"] {
+            let mut app = edge_field_app(config_one_edge(), label);
+            let before = app.settings_buffer.edges[0].clone();
+            let editor = app
+                .settings_focused_field()
+                .expect("a drilled edge row has fields")
+                .editor;
+
+            match editor {
+                FieldEditor::Text | FieldEditor::List => {
+                    app.settings_start_edit();
+                    assert!(app.settings_editing, "{label} opens the text editor");
+                    app.settings_edit_input = "changed".to_string();
+                    app.settings_confirm_edit();
+                }
+                FieldEditor::TypeSet => {
+                    app.settings_start_edit();
+                    let picker = app
+                        .settings_set_picker
+                        .as_mut()
+                        .unwrap_or_else(|| panic!("{label} opens the picker"));
+                    picker.pane = PickerPane::Available;
+                    picker.cursor = 0;
+                    picker.add();
+                    app.settings_commit_picker();
+                }
+                FieldEditor::EnumCycle { .. } => app.settings_space(),
+                other => panic!("{label} carries an editor with no edge commit path: {other:?}"),
+            }
+
+            assert_ne!(
+                app.settings_buffer.edges[0], before,
+                "the {label} edit was dropped"
+            );
+            assert!(
+                app.settings_dirty,
+                "the {label} edit did not dirty the buffer"
+            );
+        }
+    }
+
     #[test]
     fn start_edit_noop_on_toggle_and_enumcycle() {
         let config = config_one_type();
         // Toggle field (Interface > ascii_diagrams at index 0).
-        let mut app = settings_app(config.clone(), 8, 0);
+        let mut app = settings_app(config.clone(), "Interface", 0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "Toggle does not use edit mode");
 
         // EnumCycle field (drilled type numbering).
-        let mut app = settings_app(config, 1, 5);
+        let mut app = settings_app(config, "Document Types", 5);
         app.settings_drill = Some(0);
         app.settings_start_edit();
         assert!(!app.settings_editing, "EnumCycle does not use edit mode");
@@ -6810,6 +7602,635 @@ inverse = "implemented-by"
         assert!(!app.settings_dirty, "dirty clears on success");
         assert_eq!(app.settings_footer_error, None, "footer clears on success");
         assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    /// A save fixture whose DAG is declared: a comment above the block, an
+    /// inline comment on a key inside it, and a section after it.
+    const EDGES_SAVE_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+# every story hangs off an RFC
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"  # the only relationship that realizes it
+required = "warning"
+
+[github]
+repo = "owner/repo"
+"#;
+
+    // STORY-260 AC5 through the save protocol: an edge edit reaches disk on the
+    // same terms as any other field, and a footer error left by an earlier
+    // failed save clears with it.
+    #[test]
+    fn saving_a_drilled_edge_edit_writes_it_and_asks_for_a_reload() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        focus_edge_field(&mut app, "to");
+        app.settings_start_edit();
+        pick(&mut app, "story");
+        app.settings_commit_picker();
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+        app.settings_footer_error = Some("an earlier save failed".to_string());
+
+        app.settings_save(tmp.path(), &Config::parse(EDGES_SAVE_SRC).unwrap());
+
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            Config::parse(&out).expect("the saved file loads").edges[0].to,
+            TypeSelector::Types(vec!["rfc".to_string(), "story".to_string()])
+        );
+        assert_eq!(
+            changed_config_lines(EDGES_SAVE_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = ["rfc", "story"]"#)],
+            "got: {out}"
+        );
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert_eq!(app.settings_footer_error, None, "footer clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+    }
+
+    // The loader refuses a wildcard written inside a list, so the picker's
+    // exclusivity has to reach disk as the scalar `"*"` -- `to = ["*"]` is a
+    // spelling only this panel could produce, and it would not load.
+    #[test]
+    fn picking_the_wildcard_saves_it_as_a_scalar() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        focus_edge_field(&mut app, "to");
+        app.settings_start_edit();
+        pick(&mut app, "*");
+        app.settings_commit_picker();
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error, None, "the save succeeded");
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            changed_config_lines(EDGES_SAVE_SRC, &out),
+            vec![(r#"to = "rfc""#, r#"to = "*""#)],
+            "got: {out}"
+        );
+    }
+
+    // Edges joining the writer's set is the moment a table that used to be left
+    // alone starts being rewritten on every save, so a save that carries no
+    // edit has to leave the file exactly as it found it -- a reformat of an
+    // untouched block would otherwise go unnoticed.
+    #[test]
+    fn saving_a_clean_buffer_leaves_a_declared_dag_byte_identical() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+
+        app.settings_save(tmp.path(), &Config::parse(EDGES_SAVE_SRC).unwrap());
+
+        assert_eq!(app.settings_footer_error, None, "the save succeeded");
+        assert_eq!(read_config_file(&tmp), EDGES_SAVE_SRC);
+    }
+
+    /// The `(before, after)` pairs of every line a save changed, positionally.
+    /// Line-for-line, because a save that reflows an untouched block is exactly
+    /// what these tests are looking for.
+    fn changed_config_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "line count moved:\n{after}"
+        );
+        before
+            .lines()
+            .zip(after.lines())
+            .filter(|(b, a)| b != a)
+            .collect()
+    }
+
+    // --- STORY-260 AC4: an edge edit the loader refuses (ITERATION-389) ---
+
+    /// A save fixture declaring two rows that overlap and agree on both
+    /// qualifiers, so it loads, and an edit to either qualifier produces a
+    /// pairwise refusal -- a requiredness tie, a traversal disagreement -- and
+    /// nothing else.
+    const TWO_EDGES_SAVE_SRC: &str = r#"[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[edges]]
+name = "stories-need-rfcs"
+from = "story"
+to = "rfc"
+via = "implements"
+required = "warning"
+traversal = "chain"
+
+[[edges]]
+name = "implementers-need-rfcs"
+from = ["story", "rfc"]
+to = "rfc"
+via = "implements"
+required = "warning"
+traversal = "chain"
+"#;
+
+    /// The message `Config::parse` gives for the exact bytes `app`'s buffer
+    /// would write over `src` -- the text the footer has to carry. Derived, not
+    /// spelled: a literal expectation here would be the second spelling AC4
+    /// forbids, written into the assertion meant to forbid it.
+    fn loader_refusal(src: &str, app: &App) -> String {
+        let destined =
+            crate::engine::config_write::write_config_in_place(src, &app.settings_buffer)
+                .expect("the writer renders the buffer");
+        Config::parse(&destined)
+            .expect_err("the bytes destined for disk do not load")
+            .to_string()
+    }
+
+    /// [`commit_edge_row_edit`] on drilled edge row 0, the row most of these
+    /// refusals are provoked from.
+    fn commit_edge_edit(app: &mut App, label: &str, input: &str) {
+        commit_edge_row_edit(app, 0, label, input);
+    }
+
+    /// Commit `input` into the labelled field of drilled edge row `row`. A text
+    /// or comma editor is driven the way the panel drives it -- open, type,
+    /// confirm. A type position is written into the buffer directly, because its
+    /// picker offers only declared type names: the unknown-type shapes these
+    /// save-refusal tests need reach the panel by loading a file that names a
+    /// type `[[types]]` does not, never by picking. The picker's own commit path
+    /// is covered by the AC3 tests above.
+    fn commit_edge_row_edit(app: &mut App, row: usize, label: &str, input: &str) {
+        focus_edge_row_field(app, row, label);
+        let focused = app
+            .settings_focused_field()
+            .expect("the cursor is on a field");
+        if focused.editor == FieldEditor::TypeSet {
+            let names = input.split(',').map(|s| s.trim().to_string()).collect();
+            app.settings_write(&focused.path, SettingsValue::List(names));
+            app.settings_dirty = true;
+        } else {
+            app.settings_start_edit();
+            app.settings_edit_input = input.to_string();
+            app.settings_confirm_edit();
+        }
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+    }
+
+    /// The buffer path under the settings cursor, read through the same field
+    /// list the render uses. `FieldPath::Edge` carries the drilled row, so the
+    /// path alone pins category, drill and field cursor together.
+    fn focused_path(app: &App) -> FieldPath {
+        app.settings_focused_field()
+            .expect("the cursor is on a field")
+            .path
+    }
+
+    fn save_edges(app: &mut App, tmp: &tempfile::TempDir, src: &str) {
+        app.settings_save(tmp.path(), &Config::parse(src).unwrap());
+    }
+
+    #[test]
+    fn saving_an_edge_naming_an_unknown_type_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_an_edge_naming_an_unknown_relationship_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "via", "nonsense");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_a_required_edge_widened_to_a_wildcard_from_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "*");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    #[test]
+    fn saving_edges_that_disagree_on_traversal_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Traversal, "related");
+        let refusal = loader_refusal(TWO_EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+    }
+
+    // A row is addressed by its `name`, so renaming one onto a name another row
+    // holds leaves two rows the file cannot tell apart. The refusal is the
+    // loader's, and the culprit is the later row: the earlier one held the name
+    // first, so renaming the row just edited leaves the other alone.
+    #[test]
+    fn saving_an_edge_renamed_onto_another_edges_name_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        let taken = app.settings_buffer.edges[0].name.clone();
+        commit_edge_row_edit(&mut app, 1, "name", &taken);
+        let refusal = loader_refusal(TWO_EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+        assert_eq!(
+            read_config_file(&tmp),
+            TWO_EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert_eq!(
+            focused_path(&app),
+            FieldPath::Edge {
+                index: 1,
+                key: EdgeKey::Name
+            }
+        );
+    }
+
+    // Clearing a `name` is the same hole from the other side: the row it leaves
+    // is addressed by nothing.
+    #[test]
+    fn saving_an_edge_with_a_cleared_name_is_refused_in_the_loaders_words() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "name", "");
+        let refusal = loader_refusal(EDGES_SAVE_SRC, &app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error.as_deref(), Some(&*refusal));
+        assert_eq!(
+            read_config_file(&tmp),
+            EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Name));
+    }
+
+    /// Set a drilled row's `required`/`traversal` through the enum cycler's
+    /// shared write, which reads the focused field, so the focus moves first.
+    fn cycle_edge_qualifier(app: &mut App, row: usize, key: EdgeKey, variant: &str) {
+        let label = match key {
+            EdgeKey::Required => "required",
+            EdgeKey::Traversal => "traversal",
+            other => panic!("{other:?} is not a cycled qualifier"),
+        };
+        focus_edge_row_field(app, row, label);
+        app.settings_set_enum_variant(&FieldPath::Edge { index: row, key }, variant);
+        assert!(app.settings_dirty, "the edit dirtied the buffer");
+    }
+
+    // The refusal is the whole outcome: the file keeps its bytes and the buffer
+    // keeps the edit, so the designer corrects it in place rather than retyping
+    // it.
+    #[test]
+    fn a_refused_edge_edit_writes_nothing_and_keeps_the_edit() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(
+            read_config_file(&tmp),
+            EDGES_SAVE_SRC,
+            "nothing was written"
+        );
+        assert!(app.settings_dirty, "the buffer stays dirty");
+        assert_eq!(
+            app.settings_buffer.edges[0].to,
+            TypeSelector::Types(vec!["nonsense".to_string()]),
+            "the buffer still holds the refused edit"
+        );
+        assert!(!app.config_reload_request, "no reload on a refusal");
+    }
+
+    // --- ITERATION-389 Task 4: the cursor lands on the edge field at fault ---
+
+    #[test]
+    fn a_refused_unknown_type_on_from_lands_the_cursor_on_from() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::From));
+    }
+
+    #[test]
+    fn a_refused_unknown_type_on_to_lands_the_cursor_on_to() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "to", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::To));
+    }
+
+    #[test]
+    fn a_refused_unknown_relationship_lands_the_cursor_on_via() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "via", "nonsense");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Via));
+    }
+
+    // A wildcard `from` is a legal position on its own; the row is refused
+    // because `required` is set on it, and clearing `required` is the fix that
+    // keeps the position the designer just declared.
+    #[test]
+    fn a_refused_required_wildcard_from_lands_the_cursor_on_required() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        commit_edge_edit(&mut app, "from", "*");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Required));
+    }
+
+    // A pairwise refusal has no single culprit -- either row can be narrowed or
+    // changed -- so the cursor goes to the row the message names first, which is
+    // the earlier row whether or not it is the one just edited.
+    #[test]
+    fn a_refused_requiredness_tie_lands_the_cursor_on_the_first_rows_required() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Required, "error");
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Required));
+    }
+
+    #[test]
+    fn a_refused_traversal_disagreement_lands_the_cursor_on_the_first_rows_traversal() {
+        let (tmp, mut app) = save_app(TWO_EDGES_SAVE_SRC);
+        cycle_edge_qualifier(&mut app, 1, EdgeKey::Traversal, "related");
+
+        save_edges(&mut app, &tmp, TWO_EDGES_SAVE_SRC);
+
+        assert_eq!(focused_path(&app), edge_path(EdgeKey::Traversal));
+    }
+
+    // A violation no edge arm claims must not be attributed to an edge field:
+    // the sqids arm owns it, and the buffer's edges are all sound.
+    #[test]
+    fn a_non_edge_violation_does_not_land_the_cursor_on_an_edge_field() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        app.settings_buffer.documents.types[0].numbering = NumberingStrategy::Sqids;
+        app.settings_buffer.documents.sqids = None;
+        app.settings_dirty = true;
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert!(
+            !matches!(focused_path(&app), FieldPath::Edge { .. }),
+            "landed on {:?}",
+            focused_path(&app)
+        );
+    }
+
+    // --- STORY-260 AC6: seeding and deleting an edge row (ITERATION-390) ---
+
+    /// A config declaring one type and exactly one relationship: the narrowest
+    /// vocabulary a seeded row has to survive, and the case where reading a
+    /// real type pair out of the buffer would have nothing to read.
+    fn config_one_relationship() -> Config {
+        Config {
+            relationships: vec![RelationshipDef {
+                name: "implements".to_string(),
+                inverse: Some("implemented-by".to_string()),
+                github_native: None,
+                traversal: None,
+            }],
+            ..config_one_type()
+        }
+    }
+
+    /// The buffer as the strict loader reads it back: rendered to TOML, then
+    /// parsed. Going through both is what makes an assertion a claim about what
+    /// loads rather than about the in-memory struct.
+    fn reparse_buffer(app: &App) -> Config {
+        Config::parse(&app.settings_buffer.to_toml().expect("the buffer renders"))
+            .expect("the rendered buffer loads")
+    }
+
+    /// Back out of the drilled row the way `Esc` does, so a second `n` is
+    /// reachable -- the key is bound only while nothing is drilled.
+    fn undrill(app: &mut App) {
+        app.settings_drill = None;
+    }
+
+    fn seed_edge(app: &mut App) {
+        app.settings_category = App::settings_category_index("Edges");
+        app.settings_seed_entry();
+    }
+
+    #[test]
+    fn seeding_an_edge_appends_a_wildcard_row_that_loads_and_drills_in() {
+        let mut app = settings_app(Config::default(), "Edges", 0);
+
+        app.settings_seed_entry();
+
+        assert_eq!(app.settings_buffer.edges.len(), 1);
+        let loaded = reparse_buffer(&app);
+        let seeded = loaded.edges.last().expect("the seeded row loads");
+        assert_eq!(seeded.from, TypeSelector::Any);
+        assert_eq!(seeded.to, TypeSelector::Any);
+        assert_eq!(seeded.via, RelSelector::Any);
+        assert_eq!(
+            seeded.required, None,
+            "ITERATION-370 refuses `required` on a wildcard `from`"
+        );
+        assert_eq!(seeded.traversal, None);
+        assert_eq!(app.settings_entry, 0);
+        assert_eq!(app.settings_drill, Some(0));
+        assert_eq!(app.settings_field, 0);
+        assert!(app.settings_dirty);
+    }
+
+    // The seed cannot name a type or a relationship out of the buffer the way
+    // a smarter default would: strict load rejects an unknown name in `from`,
+    // `to` and `via`, and this vocabulary offers no pair to read.
+    #[test]
+    fn seeding_an_edge_loads_against_a_config_declaring_one_relationship() {
+        let mut app = settings_app(config_one_relationship(), "Edges", 0);
+
+        app.settings_seed_entry();
+
+        assert_eq!(reparse_buffer(&app).edges.len(), 1);
+    }
+
+    // `write_edges` reconciles by `name` and `Config::parse` refuses two rows
+    // sharing one, so a constant seed name would make the second `n` seed a row
+    // no save could accept.
+    #[test]
+    fn seeding_twice_gives_two_distinctly_named_rows_that_load() {
+        let mut app = settings_app(Config::default(), "Edges", 0);
+
+        app.settings_seed_entry();
+        undrill(&mut app);
+        app.settings_seed_entry();
+
+        let loaded = reparse_buffer(&app);
+        let names: Vec<&str> = loaded.edges.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "a duplicate name is unaddressable");
+    }
+
+    // A config with zero edges is legal and validates clean -- it just
+    // constrains nothing -- so ADR-011's protected last relationship has no
+    // analogue here.
+    #[test]
+    fn deleting_the_only_edge_is_permitted_and_leaves_a_loading_config() {
+        let mut app = settings_app(config_one_edge(), "Edges", 0);
+        let name = app.settings_buffer.edges[0].name.clone();
+
+        app.settings_open_delete_confirm();
+        assert!(app.settings_delete_confirm.active);
+        assert_eq!(app.settings_delete_confirm.entry_label, name);
+        assert_eq!(
+            app.settings_buffer.edges.len(),
+            1,
+            "buffer unchanged until confirm"
+        );
+
+        app.settings_confirm_delete();
+
+        assert!(app.settings_buffer.edges.is_empty());
+        assert!(reparse_buffer(&app).edges.is_empty());
+        assert_eq!(app.settings_entry, 0, "the entry cursor is clamped");
+        assert!(app.settings_dirty);
+        assert!(!app.settings_delete_confirm.active);
+    }
+
+    // The in-place writer is a second code path from `to_toml`, so a seed whose
+    // validity is only asserted against the renderer proves nothing about the
+    // bytes a save actually produces.
+    #[test]
+    fn a_seeded_edge_reaches_disk_as_the_buffer_held_it() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+        let expected = app.settings_buffer.edges.clone();
+        assert_eq!(expected.len(), 2, "the declared row plus the seed");
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let written = Config::parse(&read_config_file(&tmp)).expect("the saved file loads");
+        assert_eq!(written.edges, expected);
+    }
+
+    /// The key lines of the last `[[edges]]` block in `src`, which is where a
+    /// seeded row lands.
+    fn last_edge_block(src: &str) -> Vec<&str> {
+        src.rsplit_once("[[edges]]")
+            .expect("an edges block")
+            .1
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take_while(|line| !line.starts_with('['))
+            .collect()
+    }
+
+    // How the row reads back to whoever opens the file: every position the bare
+    // wildcard (`["*"]` is a wildcard inside a list, which the loader rejects),
+    // and no `required` or `traversal` key at all.
+    #[test]
+    fn a_seeded_edge_is_written_as_three_bare_wildcards_and_nothing_else() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let out = read_config_file(&tmp);
+        assert_eq!(
+            last_edge_block(&out),
+            vec![
+                r#"name = "edge""#,
+                r#"from = "*""#,
+                r#"to = "*""#,
+                r#"via = "*""#,
+            ],
+            "got: {out}"
+        );
+    }
+
+    // Two seeded rows are the case the derived name exists for: addressing by
+    // `name`, the writer would emit one row for two constant-named seeds.
+    #[test]
+    fn two_seeded_edges_reach_disk_as_two_distinct_rows() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+        undrill(&mut app);
+        seed_edge(&mut app);
+        let expected = app.settings_buffer.edges.clone();
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        let written = Config::parse(&read_config_file(&tmp)).expect("the saved file loads");
+        assert_eq!(written.edges.len(), 3, "the declared row plus two seeds");
+        assert_eq!(written.edges, expected);
+    }
+
+    // AC6's whole claim: the seeded row needs no repair before it can be saved,
+    // so ITERATION-389's refusal path has nothing to refuse.
+    #[test]
+    fn a_save_straight_after_seeding_an_edge_is_not_refused() {
+        let (tmp, mut app) = save_app(EDGES_SAVE_SRC);
+        seed_edge(&mut app);
+
+        save_edges(&mut app, &tmp, EDGES_SAVE_SRC);
+
+        assert_eq!(app.settings_footer_error, None, "the save was refused");
+        assert!(!app.settings_dirty, "dirty clears on success");
+        assert!(app.config_reload_request, "reload is triggered on success");
+        assert_eq!(
+            app.settings_drill,
+            Some(1),
+            "the cursor stays on the seeded row rather than jumping to a fault"
+        );
     }
 
     // AC9: a save that would violate a cross-field constraint shows the footer,
@@ -7729,7 +9150,7 @@ inverse = "implemented-by"
     // AC1: seeding a Document Type appends a default TypeDef and drills in.
     #[test]
     fn ac1_seed_document_type_appends_default_and_drills() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         let before = app.settings_buffer.documents.types.len();
 
         app.settings_seed_entry();
@@ -7747,29 +9168,11 @@ inverse = "implemented-by"
         assert!(app.settings_dirty);
     }
 
-    // AC2: seeding a Validation Rule appends a ParentChild rule and drills in.
-    #[test]
-    fn ac2_seed_validation_rule_appends_parent_child_and_drills() {
-        let mut app = settings_app(Config::default(), 3, 0);
-        let before = app.settings_buffer.rules.len();
-
-        app.settings_seed_entry();
-
-        assert_eq!(app.settings_buffer.rules.len(), before + 1);
-        assert!(matches!(
-            app.settings_buffer.rules.last().unwrap(),
-            ValidationRule::ParentChild { .. }
-        ));
-        assert_eq!(app.settings_entry, before);
-        assert_eq!(app.settings_drill, Some(before));
-        assert!(app.settings_dirty);
-    }
-
     // AC3: seeding an override opens the key prompt without inserting; confirming
     // a non-empty key inserts the override (default normalize) and drills in.
     #[test]
     fn ac3_seed_override_prompts_then_inserts_on_confirm() {
-        let mut app = settings_app(Config::default(), 6, 0);
+        let mut app = settings_app(Config::default(), "Certification", 0);
         let before = app.settings_buffer.certification.overrides.len();
 
         app.settings_seed_override();
@@ -7809,7 +9212,7 @@ inverse = "implemented-by"
     // AC3 edge: an empty key on confirm inserts nothing.
     #[test]
     fn ac3_empty_override_key_inserts_nothing() {
-        let mut app = settings_app(Config::default(), 6, 0);
+        let mut app = settings_app(Config::default(), "Certification", 0);
         app.settings_seed_override();
         app.settings_confirm_override();
         assert!(app.settings_buffer.certification.overrides.is_empty());
@@ -7819,7 +9222,7 @@ inverse = "implemented-by"
     // the buffer; confirming removes it and dirties.
     #[test]
     fn ac4_delete_confirm_targets_then_removes_on_confirm() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         app.settings_entry = 0;
         let target_name = app.settings_buffer.documents.types[0].name.clone();
         let before = app.settings_buffer.documents.types.len();
@@ -7852,7 +9255,7 @@ inverse = "implemented-by"
     // AC5: cancelling the delete confirm leaves the buffer intact.
     #[test]
     fn ac5_delete_confirm_cancel_leaves_buffer_intact() {
-        let mut app = settings_app(Config::default(), 1, 0);
+        let mut app = settings_app(Config::default(), "Document Types", 0);
         let before = app.settings_buffer.documents.types.clone();
 
         app.settings_open_delete_confirm();
@@ -7876,7 +9279,7 @@ inverse = "implemented-by"
             }],
             ..Config::default()
         };
-        let mut app = settings_app(config, 2, 0);
+        let mut app = settings_app(config, "Relationships", 0);
         app.settings_entry = 0;
 
         app.settings_open_delete_confirm();
@@ -7908,7 +9311,7 @@ inverse = "implemented-by"
             ],
             ..Config::default()
         };
-        let mut app = settings_app(config, 2, 0);
+        let mut app = settings_app(config, "Relationships", 0);
         app.settings_entry = 0;
         let removed = app.settings_buffer.relationships[0].name.clone();
 
@@ -7998,6 +9401,13 @@ name = "related-to"
         assert_eq!(app.settings_footer_error, None);
     }
 
+    // ITERATION-382 asserted that a save left a rules-carrying config's rules
+    // intact, the panel having lost its rules editor. STORY-259 deletes the
+    // question rather than the answer: strict load refuses such a config, so
+    // the panel — which only ever renders a `Config` the load path handed it —
+    // can no longer be given one. `strict_load_refuses_a_config_declaring_rules_and_names_fix_config`
+    // in `engine::config` is where that now lives.
+
     // --- RFC-023 slice 7 / ITERATION-192: Interface category + zone ordering ---
 
     // AC2: the ascii_diagrams boolean toggles through the slice-3 Space path and
@@ -8007,7 +9417,7 @@ name = "related-to"
     fn iter192_ac2_ascii_diagrams_toggle_flips_and_dirties() {
         let mut config = config_one_type();
         config.ui.ascii_diagrams = false;
-        let mut app = settings_app(config, 8, 0); // Interface > ascii_diagrams
+        let mut app = settings_app(config, "Interface", 0); // ascii_diagrams
 
         app.settings_space();
         assert!(app.settings_buffer.ui.ascii_diagrams);
@@ -8022,7 +9432,7 @@ name = "related-to"
     #[test]
     fn iter192_ac3_max_expanded_height_rejects_then_accepts() {
         let config = config_one_type(); // [tui.multiline] absent -> default 5
-        let mut app = settings_app(config, 8, 5); // Interface > multiline.max_expanded_height
+        let mut app = settings_app(config, "Interface", 5); // multiline.max_expanded_height
         assert_eq!(app.settings_buffer.ui.multiline.max_expanded_height, 5);
 
         // Reject "0" (below min 1): prior value retained, error set, still editing.
@@ -8048,16 +9458,15 @@ name = "related-to"
     // and dirties it.
     #[test]
     fn iter192_ac4_zone_ordering_round_trip_into_buffer() {
-        use crate::tui::state::forms::ZonePane;
         use crate::tui::views::status_bar::STATUS_BAR_DEFAULT_LEFT;
 
         let config = config_one_type(); // statusbar.left is None
-        let mut app = settings_app(config, 8, 2); // Interface > statusbar.left
+        let mut app = settings_app(config, "Interface", 2); // statusbar.left
 
         // Enter opens the zone editor (routed via start_edit).
         app.settings_start_edit();
         let editor = app
-            .settings_zone_editor
+            .settings_set_picker
             .as_ref()
             .expect("zone editor opens for a ZoneOrdering field");
         let defaults: Vec<String> = STATUS_BAR_DEFAULT_LEFT
@@ -8070,8 +9479,8 @@ name = "related-to"
         );
 
         // Remove the first selected name (default left = [mode, type_filter, doc_count]).
-        let z = app.settings_zone_editor.as_mut().unwrap();
-        z.pane = ZonePane::Selected;
+        let z = app.settings_set_picker.as_mut().unwrap();
+        z.pane = PickerPane::Selected;
         z.cursor = 0;
         let removed = z.selected[0].clone();
         z.remove();
@@ -8079,22 +9488,22 @@ name = "related-to"
         assert!(z.available.contains(&removed));
 
         // Add git_branch from Available, then move it up one.
-        let z = app.settings_zone_editor.as_mut().unwrap();
-        z.pane = ZonePane::Available;
+        let z = app.settings_set_picker.as_mut().unwrap();
+        z.pane = PickerPane::Available;
         z.cursor = z
             .available
             .iter()
             .position(|n| n == "git_branch")
             .expect("git_branch available");
         z.add();
-        z.pane = ZonePane::Selected;
+        z.pane = PickerPane::Selected;
         z.cursor = z.selected.len() - 1; // git_branch landed at the end
         z.move_up();
         let expected = z.selected.clone();
 
-        app.settings_commit_zone();
+        app.settings_commit_picker();
         assert!(
-            app.settings_zone_editor.is_none(),
+            app.settings_set_picker.is_none(),
             "commit closes the editor"
         );
         assert_eq!(
@@ -8109,8 +9518,6 @@ name = "related-to"
     // persists as Some(vec![]); both survive an atomic save round-trip.
     #[test]
     fn iter192_ac4_untouched_vs_cleared_zone_persist() {
-        use crate::tui::state::forms::ZonePane;
-
         const SRC: &str = r#"[naming]
 pattern = "{type}-{n:03}-{title}.md"
 
@@ -8129,18 +9536,18 @@ left = ["mode"]
 center = ["warnings"]
 "#;
         let (tmp, mut app) = save_app(SRC);
-        app.settings_category = 8;
+        app.settings_category = App::settings_category_index("Interface");
 
         // Clear `center`: open its editor, remove all, commit -> Some(vec![]).
         app.settings_field = 3; // statusbar.center
         app.settings_start_edit();
-        let z = app.settings_zone_editor.as_mut().expect("center editor");
-        z.pane = ZonePane::Selected;
+        let z = app.settings_set_picker.as_mut().expect("center editor");
+        z.pane = PickerPane::Selected;
         while !z.selected.is_empty() {
             z.cursor = 0;
             z.remove();
         }
-        app.settings_commit_zone();
+        app.settings_commit_picker();
         assert_eq!(
             app.settings_buffer.ui.statusbar.center,
             Some(vec![]),
@@ -8174,20 +9581,22 @@ center = ["warnings"]
         );
     }
 
-    // AC5: the ordering editor only ever surfaces RFC-022 vocabulary -- both the
-    // seeded selected set and the available set are subsets of STATUS_BAR_COMPONENTS,
-    // and adding can only ever move a const name into selected.
+    // AC5: a zone picker only ever surfaces RFC-022 vocabulary -- both the
+    // seeded selected set and the available set are subsets of
+    // STATUS_BAR_COMPONENTS, and adding can only ever move a const name into
+    // selected. Driven through the App because the vocabulary is now the
+    // caller's to supply, so the const reaching the panes is the claim.
     #[test]
     fn iter192_ac5_editor_offers_only_vocabulary() {
-        use crate::tui::state::forms::{FieldPath, ZoneOrderingEditor, ZonePane};
-        use crate::tui::views::status_bar::{STATUS_BAR_COMPONENTS, STATUS_BAR_DEFAULT_RIGHT};
+        use crate::tui::views::status_bar::STATUS_BAR_COMPONENTS;
 
         let vocab: std::collections::HashSet<&str> =
             STATUS_BAR_COMPONENTS.iter().copied().collect();
-        let mut editor =
-            ZoneOrderingEditor::new(FieldPath::StatusbarRight, None, STATUS_BAR_DEFAULT_RIGHT);
+        let mut app = settings_app(config_one_type(), "Interface", 4); // statusbar.right
+        app.settings_start_edit();
+        let picker = app.settings_set_picker.as_ref().expect("zone picker");
 
-        for name in editor.selected.iter().chain(editor.available.iter()) {
+        for name in picker.selected.iter().chain(picker.available.iter()) {
             assert!(
                 vocab.contains(name.as_str()),
                 "{name} is offered but not in the RFC-022 vocabulary"
@@ -8196,14 +9605,14 @@ center = ["warnings"]
 
         // Exhaustively add everything available; selected must remain within vocab
         // and never exceed the full vocabulary.
-        editor.pane = ZonePane::Available;
-        while !editor.available.is_empty() {
-            editor.cursor = 0;
-            editor.add();
+        let picker = app.settings_set_picker.as_mut().unwrap();
+        picker.pane = PickerPane::Available;
+        while !picker.available.is_empty() {
+            picker.cursor = 0;
+            picker.add();
         }
-        assert!(editor.available.is_empty());
-        assert_eq!(editor.selected.len(), STATUS_BAR_COMPONENTS.len());
-        for name in &editor.selected {
+        assert_eq!(picker.selected.len(), STATUS_BAR_COMPONENTS.len());
+        for name in &picker.selected {
             assert!(vocab.contains(name.as_str()));
         }
     }
@@ -8212,8 +9621,13 @@ center = ["warnings"]
         SettingsVariantPicker::new(FieldPath::Naming, &["sqids", "reserved"], 0)
     }
 
-    fn dummy_zone_editor() -> ZoneOrderingEditor {
-        ZoneOrderingEditor::new(FieldPath::Naming, None, &["branch"])
+    fn dummy_set_picker() -> SetPicker {
+        SetPicker::new(
+            FieldPath::Naming,
+            vec!["branch".to_string()],
+            vec!["branch".to_string(), "sync".to_string()],
+            PickerKind::Ordered,
+        )
     }
 
     fn dummy_scaffold_offer() -> ScaffoldResult {
@@ -8347,8 +9761,8 @@ center = ["warnings"]
 
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
-        app.settings_zone_editor = Some(dummy_zone_editor());
-        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+        app.settings_set_picker = Some(dummy_set_picker());
+        assert_eq!(app.active_key_context(), KeyContext::SettingsSetPicker);
 
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
@@ -8374,15 +9788,15 @@ center = ["warnings"]
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
         app.settings_editing = true;
-        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_set_picker = Some(dummy_set_picker());
         assert_eq!(app.active_key_context(), KeyContext::SettingsEditing);
 
         // zone editor outranks the variant picker.
         let mut app = make_test_app(1);
         app.view_mode = ViewMode::Settings;
-        app.settings_zone_editor = Some(dummy_zone_editor());
+        app.settings_set_picker = Some(dummy_set_picker());
         app.settings_variant_picker = Some(dummy_variant_picker());
-        assert_eq!(app.active_key_context(), KeyContext::SettingsZoneEditor);
+        assert_eq!(app.active_key_context(), KeyContext::SettingsSetPicker);
 
         // variant picker outranks the scaffold offer.
         let mut app = make_test_app(1);
