@@ -1,0 +1,1004 @@
+{
+  "created_at": "2026-09-03T02:10:27Z",
+  "heads": {
+    "bundle-coherence": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "User chose chain over the recommended hub-and-spokes. Pack is designed once, complete, with no empty sockets; every RFC is written knowing exactly what sits beneath it. Accepts that pack, the highest-leverage piece, ships last.",
+        "rejected": [
+          {
+            "option": "independent bets",
+            "why_not": "pack --json shape reopened twice as spokes land, join described in three places"
+          },
+          {
+            "option": "hub and spokes",
+            "why_not": "pack ships first with empty signals/governs sockets; rejected as speculative shape-before-spokes"
+          }
+        ],
+        "text": "Chain: Pins -> Trust -> Pack, each a hard dependency of the next. Pins land first (frontmatter, validation, why). Trust lands second, reading governs globs for drift. Pack lands third with band and governs on every record from day one; its --json shape is designed once with nothing reserved."
+      },
+      "blocked_by": [
+        "candidate-3"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8Q662X0SJFKN78P7JW4",
+      "parent": null,
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "User chose chain over the recommended hub-and-spokes. Pack is designed once, complete, with no empty sockets; every RFC is written knowing exactly what sits beneath it. Accepts that pack, the highest-leverage piece, ships last.",
+        "rejected": [
+          {
+            "option": "independent bets",
+            "why_not": "pack --json shape reopened twice as spokes land, join described in three places"
+          },
+          {
+            "option": "hub and spokes",
+            "why_not": "pack ships first with empty signals/governs sockets; rejected as speculative shape-before-spokes"
+          }
+        ],
+        "text": "Chain: Pins -> Trust -> Pack, each a hard dependency of the next. Pins land first (frontmatter, validation, why). Trust lands second, reading governs globs for drift. Pack lands third with band and governs on every record from day one; its --json shape is designed once with nothing reserved."
+      },
+      "question": "Do the three candidates form a dependency chain (each builds on the last) or three independent bets — and does that change any pick?",
+      "rev": 2,
+      "seq": 7,
+      "slug": "bundle-coherence",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c1-data-model": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Everything pack needs exists or lands earlier in the chain: EdgeDef.traversal partitions chain/related, RelatedRef carries hops and path, DocMeta.governs from pins, band from staleness::compute. Only new primitive is a summary-section extractor. Zero config, principle 6.",
+        "rejected": [
+          {
+            "option": "[context] table for summary_section and default depth",
+            "why_not": "two knobs nobody asked for"
+          },
+          {
+            "option": "fold tier and band into ContextNode/RelatedRef",
+            "why_not": "resolve_chain feeds the TUI relations view on every render; a git subprocess for band there is a layering and performance regression"
+          }
+        ],
+        "text": "Nothing stored. One new module: `engine::pack::assemble(store, id, depth, git) -> Pack { records }`, each record `{ meta, tier, via, hops, band, governs, body }`. Built on resolve_chain + merge_declared_related. Tier from traversal and hops, band from staleness::compute, summary tier from a small `summary_section(body)` returning the `## Summary` block or the first heading block. DocMeta, Relation, EdgeDef, Store and .lazyspec.toml untouched."
+      },
+      "blocked_by": [
+        "candidate-1"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8NBMGFZPE9S3XYBYSD0",
+      "parent": "candidate-1",
+      "prior": null,
+      "question": "What does candidate 1 change in the engine data model (DocMeta, Relation, EdgeDef, Store) and in .lazyspec.toml?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "c1-data-model",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:23:25Z"
+    },
+    "c1-scope": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Chain-only after candidate-1 dropped the globals regime. Two or three iterations: engine assembly+tiers+band, CLI surface, TUI/web parity.",
+        "rejected": [
+          {
+            "option": "two regimes with globals",
+            "why_not": "concept dropped at candidate-1"
+          },
+          {
+            "option": "@ref expansion inline",
+            "why_not": "bloats bundle with no budget, muddies JSON record shape; agents pipe record ids into show -e"
+          },
+          {
+            "option": "per-relation context-tier override on the edge table",
+            "why_not": "no project has a non-chain strong relation yet, principle 6"
+          }
+        ],
+        "text": "Chain bundle, structural defaults only: target full, chain ancestors full, 1-hop related as Summary section (fallback first heading block), 2+ hops title line. Every record carries tier, relation path, staleness band, governs; stale demotes one tier.\nNon-goals in the first RFC: any second regime (globals/convention selection), @ref expansion (use show -e per record), per-relation tier override, token budget, MCP/export, new TUI screens. The convention --preamble session hook stays untouched."
+      },
+      "blocked_by": [
+        "candidate-1"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8N5PKM247AR3GE6GC75",
+      "parent": "candidate-1",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Delivers the two-regime thesis in one RFC; three iterations (engine assembly+tiers, globals+band, CLI/TUI/web surface). Pack lands after pins and trust so band and governs are available on every record from day one.",
+        "rejected": [
+          {
+            "option": "chain-only pack, globals via session hook",
+            "why_not": "ships half the thesis, agents still compose globals by hand"
+          },
+          {
+            "option": "@ref expansion inline",
+            "why_not": "bloats bundle with no budget, muddies JSON record shape; agents pipe record ids into show -e"
+          },
+          {
+            "option": "per-relation context-tier override on the edge table",
+            "why_not": "no project has a non-chain strong relation yet, principle 6"
+          }
+        ],
+        "text": "Two regimes, structural defaults only. Chain bundle: target full, chain ancestors full, 1-hop related as Summary section, 2+ hops title line. Globals: every doc of a global-marked type whose tags intersect the anchor's tags, full body, never walked. Every record carries tier, relation path, staleness band, governs; stale demotes one tier.\nNon-goals in the first RFC: @ref expansion (use show -e per record), per-relation tier override (edge-table attribute when a real non-chain strong relation appears), token budget, MCP/export, new TUI screens. The convention --preamble session hook stays; pack is the per-anchor call, not a hook replacement."
+      },
+      "question": "What is the smallest shippable slice of candidate 1, and what is explicitly out of its first RFC?",
+      "rev": 2,
+      "seq": 1,
+      "slug": "c1-scope",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:14:30Z"
+    },
+    "c1-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "No new command, existing context --json consumers unaffected, TUI relations tab and web doc page already walk the same resolve_chain structure at depth 1. RFC-064 non-goal: no new TUI screens.",
+        "rejected": [
+          {
+            "option": "flat ordered records[] with a section field",
+            "why_not": "second shape for the same graph, TUI/web would map it back into sections"
+          },
+          {
+            "option": "separate pack <id> command",
+            "why_not": "candidate-1 names context --pack; a new verb for a flag of behaviour"
+          }
+        ],
+        "text": "Extend the existing shape. `context <id> --pack [--json]` keeps `{target, chain, forward, related}` and adds `tier`, `band`, `governs`, `body` to every record. Chain ancestors full, forward chain descendants summary, related distance 1 summary, distance 2+ title with body null. Stale demotes one tier. Human output: markdown in that order, one heading per record with tier and band, then the body at that tier.\nTUI: tier label on each relations-tab row. Web: same label on the doc page context panel. Band badge on both belongs to c3-surface."
+      },
+      "blocked_by": [
+        "candidate-1"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8NF4MD3X8TMRHDM3F9K",
+      "parent": "candidate-1",
+      "prior": null,
+      "question": "What does candidate 1 expose on CLI (--json shape), and what is its TUI and web parity?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "c1-surface",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:54:23Z"
+    },
+    "c2-data-model": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Globs are needed: a test spec governs src/**/*_test.rs, which no directory-shaped node expresses. Per-type gate rejected as premature; unowned and ungated findings drive authoring, and a bug doc pinning code is a review problem not a schema one.",
+        "rejected": [
+          {
+            "option": "per-type gate TypeDef.governs bool",
+            "why_not": "one more knob before there is evidence of misuse"
+          },
+          {
+            "option": "code as a store-backed document type (directory nodes, governs as relation, edge rows for gate and unowned)",
+            "why_not": "elegant reuse of relations/edges/surfaces, but directory granularity cannot express cross-cutting globs; deferred as a presentation layer (one virtual node per distinct glob) over this design"
+          },
+          {
+            "option": "governs as declared attribute kind globs",
+            "why_not": "new list kind for one consumer"
+          }
+        ],
+        "text": "Engine: `DocMeta.governs: Vec<String>` and `DocMeta.reviewed: Option<String>` beside `provenance`, always parsed, empty default, globs compiled at load with globset. Config: one project table\n[governs]\nscope   = [\"src/**\"]   # files that must be owned\nunowned = \"warning\"    # off | warning | error\nroot    = \".\"          # code root, for a docs-repo split\nAny type may pin. No per-type gate in v1."
+      },
+      "blocked_by": [
+        "c2-pin-storage",
+        "candidate-2"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8P4JC6G4TNX5Z8HE2PZ",
+      "parent": "candidate-2",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Globs are needed: a test spec governs src/**/*_test.rs, which no directory-shaped node expresses. Per-type gate rejected as premature; unowned and ungated findings drive authoring, and a bug doc pinning code is a review problem not a schema one.",
+        "rejected": [
+          {
+            "option": "per-type gate TypeDef.governs bool",
+            "why_not": "one more knob before there is evidence of misuse"
+          },
+          {
+            "option": "code as a store-backed document type (directory nodes, governs as relation, edge rows for gate and unowned)",
+            "why_not": "elegant reuse of relations/edges/surfaces, but directory granularity cannot express cross-cutting globs; deferred as a presentation layer (one virtual node per distinct glob) over this design"
+          },
+          {
+            "option": "governs as declared attribute kind globs",
+            "why_not": "new list kind for one consumer"
+          }
+        ],
+        "text": "Engine: `DocMeta.governs: Vec<String>` and `DocMeta.reviewed: Option<String>` beside `provenance`, always parsed, empty default, globs compiled at load with globset. Config: one project table\n[governs]\nscope   = [\"src/**\"]   # files that must be owned\nunowned = \"warning\"    # off | warning | error\nroot    = \".\"          # code root, for a docs-repo split\nAny type may pin. No per-type gate in v1."
+      },
+      "question": "Where do pin config and validation live: scope glob(s), unowned severity, per-type opt-in — and which engine structs change?",
+      "rev": 2,
+      "seq": 2,
+      "slug": "c2-data-model",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c2-drift-anchor": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "One sha answers drift, rename and age through stock git commands lazyspec already shells out for. Fallback to date when absent keeps the field optional. Stamping on advance makes evergreen re-review a status bump rather than a separate chore.",
+        "rejected": [
+          {
+            "option": "date only",
+            "why_not": "day granularity, means created not reviewed, does not move on re-confirmation"
+          },
+          {
+            "option": "per-file blob hashes (@ref style)",
+            "why_not": "frontmatter explodes for module-level globs, stamp rewrites on every change"
+          },
+          {
+            "option": "tree hash of matched set",
+            "why_not": "exact boolean only, no diff or rename, lazyspec-defined hash unless globs align to dirs"
+          }
+        ],
+        "text": "One commit sha in frontmatter, `reviewed: <sha>`. Drift = `git diff --stat <sha>..HEAD -- <globs>`; rename = `git diff -M --name-status <sha>..HEAD`; age = commit time of <sha>. Stamped by the existing `pin` verb extended to docs, and as a side-effect of `advance` into an accepted-class status. Absent sha falls back to `date`."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-04T01:01:39Z",
+      "id": "01M1MYZ17EE0XFGPWDSBYJ72DP",
+      "parent": "c2-pin-storage",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "One sha answers drift, rename and age through stock git commands lazyspec already shells out for. Fallback to date when absent keeps the field optional. Stamping on advance makes evergreen re-review a status bump rather than a separate chore.",
+        "rejected": [
+          {
+            "option": "date only",
+            "why_not": "day granularity, means created not reviewed, does not move on re-confirmation"
+          },
+          {
+            "option": "per-file blob hashes (@ref style)",
+            "why_not": "frontmatter explodes for module-level globs, stamp rewrites on every change"
+          },
+          {
+            "option": "tree hash of matched set",
+            "why_not": "exact boolean only, no diff or rename, lazyspec-defined hash unless globs align to dirs"
+          }
+        ],
+        "text": "One commit sha in frontmatter, `reviewed: <sha>`. Drift = `git diff --stat <sha>..HEAD -- <globs>`; rename = `git diff -M --name-status <sha>..HEAD`; age = commit time of <sha>. Stamped by the existing `pin` verb extended to docs, and as a side-effect of `advance` into an accepted-class status. Absent sha falls back to `date`."
+      },
+      "question": "What anchor does a doc carry so git can compute drift, rename and age over its governed paths: the existing date field, a reviewed-at commit sha, per-file blob hashes (as @ref pin does), or a tree hash of the matched set?",
+      "rev": 2,
+      "seq": 2,
+      "slug": "c2-drift-anchor",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c2-pin-storage": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "reviewed sha and fix --governs both landed on frontmatter; a map file would split the anchor from the paths it anchors and give fix a non-doc target. Pins are a property of the doc, consistent with the model that all structure lives in frontmatter.",
+        "rejected": [
+          {
+            "option": "CODEOWNERS-style map file",
+            "why_not": "second loader, anchor split from paths, only case was docs living outside the code repo, handled by a configured code root instead"
+          },
+          {
+            "option": "per-directory markers",
+            "why_not": "litters the tree, walk-scan cost"
+          },
+          {
+            "option": "in-source comments",
+            "why_not": "per-file density problem of @ref inverted, language-specific comment syntax, pollutes code"
+          },
+          {
+            "option": "sidecar per doc",
+            "why_not": "frontmatter with an extra file"
+          },
+          {
+            "option": "instance rows in .lazyspec.toml",
+            "why_not": "config holds instance data, grows per spec"
+          }
+        ],
+        "text": "Spec frontmatter: `governs: [\"src/engine/context/**\"]` plus `reviewed: <sha>`. If docs live outside the code repo, both are relative to a configured code root; the RFC states that in one line."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-04T00:49:12Z",
+      "id": "01M1MY86YHFCMF59CPB0W0BERD",
+      "parent": "candidate-2",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "reviewed sha and fix --governs both landed on frontmatter; a map file would split the anchor from the paths it anchors and give fix a non-doc target. Pins are a property of the doc, consistent with the model that all structure lives in frontmatter.",
+        "rejected": [
+          {
+            "option": "CODEOWNERS-style map file",
+            "why_not": "second loader, anchor split from paths, only case was docs living outside the code repo, handled by a configured code root instead"
+          },
+          {
+            "option": "per-directory markers",
+            "why_not": "litters the tree, walk-scan cost"
+          },
+          {
+            "option": "in-source comments",
+            "why_not": "per-file density problem of @ref inverted, language-specific comment syntax, pollutes code"
+          },
+          {
+            "option": "sidecar per doc",
+            "why_not": "frontmatter with an extra file"
+          },
+          {
+            "option": "instance rows in .lazyspec.toml",
+            "why_not": "config holds instance data, grows per spec"
+          }
+        ],
+        "text": "Spec frontmatter: `governs: [\"src/engine/context/**\"]` plus `reviewed: <sha>`. If docs live outside the code repo, both are relative to a configured code root; the RFC states that in one line."
+      },
+      "question": "Where does the doc-to-code pin mapping live: spec frontmatter, a single CODEOWNERS-style map file, per-directory markers, in-source comments, sidecar files, or config?",
+      "rev": 2,
+      "seq": 4,
+      "slug": "c2-pin-storage",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:56Z"
+    },
+    "c2-rename-handling": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "fix is already the verb that rewrites frontmatter (broken links). One command repairs all pins after a refactor; the heuristic glob is reviewable in the resulting diff.",
+        "rejected": [
+          {
+            "option": "suggest only",
+            "why_not": "one more manual edit step per broken pin for no safety gain, since fix output is a reviewable diff"
+          },
+          {
+            "option": "follow renames at query time",
+            "why_not": "frontmatter rots permanently and every query pays a rename walk"
+          },
+          {
+            "option": "rename-stable targets (module paths, packages)",
+            "why_not": "language-specific and they rename too"
+          }
+        ],
+        "text": "Detect + propose + fix. Zero-match glob is a validation finding carrying `renamed: [{from,to}]` from `git diff -M --name-status <reviewed>..HEAD` and a `suggested_glob` (longest common prefix of new paths + /**). `fix --governs` rewrites the glob and leaves `reviewed` untouched so drift still reports. RFC prose: pin at module-dir depth, never per file."
+      },
+      "blocked_by": [
+        "c2-drift-anchor"
+      ],
+      "created_at": "2026-09-04T00:59:01Z",
+      "id": "01M1MYT6G2K4EHN81VGMEV6PKR",
+      "parent": "c2-pin-storage",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "fix is already the verb that rewrites frontmatter (broken links). One command repairs all pins after a refactor; the heuristic glob is reviewable in the resulting diff.",
+        "rejected": [
+          {
+            "option": "suggest only",
+            "why_not": "one more manual edit step per broken pin for no safety gain, since fix output is a reviewable diff"
+          },
+          {
+            "option": "follow renames at query time",
+            "why_not": "frontmatter rots permanently and every query pays a rename walk"
+          },
+          {
+            "option": "rename-stable targets (module paths, packages)",
+            "why_not": "language-specific and they rename too"
+          }
+        ],
+        "text": "Detect + propose + fix. Zero-match glob is a validation finding carrying `renamed: [{from,to}]` from `git diff -M --name-status <reviewed>..HEAD` and a `suggested_glob` (longest common prefix of new paths + /**). `fix --governs` rewrites the glob and leaves `reviewed` untouched so drift still reports. RFC prose: pin at module-dir depth, never per file."
+      },
+      "question": "How do pins survive code renames: validation-only detection, git rename detection with a fix proposal, rename-stable targets, coarse-glob guidance, or process (CI)?",
+      "rev": 2,
+      "seq": 1,
+      "slug": "c2-rename-handling",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c2-scope": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "User picked C and reframed unowned-file reporting as a validation finding rather than a command: validate already emits findings, exits non-zero in CI, and has --json, so no new surface is needed. Drives dogfood authoring here.",
+        "rejected": [
+          {
+            "option": "frontmatter + validation only",
+            "why_not": "zero agent leverage until something queries the field"
+          },
+          {
+            "option": "frontmatter + why only",
+            "why_not": "leaves the coverage gap invisible, nothing drives authoring"
+          },
+          {
+            "option": "retire @ref in the same RFC",
+            "why_not": "subtraction, cutting is deferred"
+          }
+        ],
+        "text": "Three parts: (1) `governs:` glob list in frontmatter, glob-matches-zero-files is a validation warning; (2) `why <path>` lists docs whose globs match the path, `show` displays governs; (3) unowned code is a validation finding, not a command: a configured scope glob (e.g. src/**) under which every file must be matched by at least one doc's governs, severity configurable.\nOut of first RFC: drift/staleness (Trust), TUI/web beyond show, glob suggestion from git history, symbol-level pins, @ref deprecation."
+      },
+      "blocked_by": [
+        "candidate-2"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8NYWS193DZ83PQHHAK7",
+      "parent": "candidate-2",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "User picked C and reframed unowned-file reporting as a validation finding rather than a command: validate already emits findings, exits non-zero in CI, and has --json, so no new surface is needed. Drives dogfood authoring here.",
+        "rejected": [
+          {
+            "option": "frontmatter + validation only",
+            "why_not": "zero agent leverage until something queries the field"
+          },
+          {
+            "option": "frontmatter + why only",
+            "why_not": "leaves the coverage gap invisible, nothing drives authoring"
+          },
+          {
+            "option": "retire @ref in the same RFC",
+            "why_not": "subtraction, cutting is deferred"
+          }
+        ],
+        "text": "Three parts: (1) `governs:` glob list in frontmatter, glob-matches-zero-files is a validation warning; (2) `why <path>` lists docs whose globs match the path, `show` displays governs; (3) unowned code is a validation finding, not a command: a configured scope glob (e.g. src/**) under which every file must be matched by at least one doc's governs, severity configurable.\nOut of first RFC: drift/staleness (Trust), TUI/web beyond show, glob suggestion from git history, symbol-level pins, @ref deprecation."
+      },
+      "question": "What is the smallest shippable slice of candidate 2, and what is explicitly out of its first RFC?",
+      "rev": 2,
+      "seq": 1,
+      "slug": "c2-scope",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c2-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Minimal parity leaves the one new question (what governs this file) CLI-only, breaking the TUI/web parity rule. Search already runs over the store; a path-to-glob pass is small. Columns and marks are cosmetic follow-ups.",
+        "rejected": [
+          {
+            "option": "minimal parity (frontmatter fields + validation panel only)",
+            "why_not": "why is CLI-only"
+          },
+          {
+            "option": "governs column in tui.table/tui.graph and web relbars mark",
+            "why_not": "cosmetic, follow-up story not RFC scope"
+          }
+        ],
+        "text": "CLI: `why <path> [--json]` -> [{id,type,title,status,glob,reviewed,drifted}]; `show --json` gains governs/reviewed; `validate --json` gains governs-no-match (renamed[], suggested_glob) and governs-unowned (path); `fix --governs` applies suggestions; `pin <id>` stamps reviewed: HEAD.\nTUI/web: governs/reviewed render as frontmatter fields, new findings appear in the validation panel, and fuzzy search (TUI `/`, web search box) accepts a file path and lists the docs whose globs match it."
+      },
+      "blocked_by": [
+        "candidate-2"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8PAVW43E9PBVB27F8CH",
+      "parent": "candidate-2",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Minimal parity leaves the one new question (what governs this file) CLI-only, breaking the TUI/web parity rule. Search already runs over the store; a path-to-glob pass is small. Columns and marks are cosmetic follow-ups.",
+        "rejected": [
+          {
+            "option": "minimal parity (frontmatter fields + validation panel only)",
+            "why_not": "why is CLI-only"
+          },
+          {
+            "option": "governs column in tui.table/tui.graph and web relbars mark",
+            "why_not": "cosmetic, follow-up story not RFC scope"
+          }
+        ],
+        "text": "CLI: `why <path> [--json]` -> [{id,type,title,status,glob,reviewed,drifted}]; `show --json` gains governs/reviewed; `validate --json` gains governs-no-match (renamed[], suggested_glob) and governs-unowned (path); `fix --governs` applies suggestions; `pin <id>` stamps reviewed: HEAD.\nTUI/web: governs/reviewed render as frontmatter fields, new findings appear in the validation panel, and fuzzy search (TUI `/`, web search box) accepts a file path and lists the docs whose globs match it."
+      },
+      "question": "What does candidate 2 expose on CLI (--json shape), and what is its TUI and web parity?",
+      "rev": 2,
+      "seq": 3,
+      "slug": "c2-surface",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c3-data-model": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Keeps Store::load pure and fast; only commands that show staleness pay the git cost. Principle 6: cache when two commands prove slow, not before.",
+        "rejected": [
+          {
+            "option": "compute at Store",
+            "why_not": ":load onto DocMeta: one git diff per pinned doc on every invocation including list, hot-path tax for a signal most commands do not show"
+          },
+          {
+            "option": "on-demand plus cache keyed on (reviewed, HEAD)",
+            "why_not": "HEAD moves every commit so hit rate is poor; premature"
+          }
+        ],
+        "text": "On demand, not on DocMeta: `engine::staleness::compute(store, doc, git) -> Staleness {band, driver, anchor, age_days, drift}`. Called by show and validate only. Git via the existing subprocess/git-ref seam, no new trait. Config:\n[staleness]\naging = \"90d\"\nstale = \"180d\"\nfinding = \"warning\"   # off | warning | error\nplus `[[types]] staleness = \"drift\" | \"age\"` (default age). Docs without governs get an age band only."
+      },
+      "blocked_by": [
+        "c2-drift-anchor",
+        "candidate-3"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8PV4CSZ930XCWKFX7NM",
+      "parent": "candidate-3",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Keeps Store::load pure and fast; only commands that show staleness pay the git cost. Principle 6: cache when two commands prove slow, not before.",
+        "rejected": [
+          {
+            "option": "compute at Store",
+            "why_not": ":load onto DocMeta: one git diff per pinned doc on every invocation including list, hot-path tax for a signal most commands do not show"
+          },
+          {
+            "option": "on-demand plus cache keyed on (reviewed, HEAD)",
+            "why_not": "HEAD moves every commit so hit rate is poor; premature"
+          }
+        ],
+        "text": "On demand, not on DocMeta: `engine::staleness::compute(store, doc, git) -> Staleness {band, driver, anchor, age_days, drift}`. Called by show and validate only. Git via the existing subprocess/git-ref seam, no new trait. Config:\n[staleness]\naging = \"90d\"\nstale = \"180d\"\nfinding = \"warning\"   # off | warning | error\nplus `[[types]] staleness = \"drift\" | \"age\"` (default age). Docs without governs get an age band only."
+      },
+      "question": "What does candidate 3 change in the engine data model and in .lazyspec.toml?",
+      "rev": 2,
+      "seq": 2,
+      "slug": "c3-data-model",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c3-evergreen": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "One bool-ish knob on the type, no author burden, maps onto how spec/convention/dictum vs rfc/adr are actually used. User: \"evergreen\" is not the right word; name the behaviour, not the doc.",
+        "rejected": [
+          {
+            "option": "per-doc frontmatter flag",
+            "why_not": "one more field authors forget, type-level covers the real cases"
+          },
+          {
+            "option": "derive from lifecycle terminal status",
+            "why_not": "couples staleness to whether someone modelled a terminal state, surprising"
+          },
+          {
+            "option": "no distinction",
+            "why_not": "six-month-old accepted ADR reads stale forever, undermines the label"
+          }
+        ],
+        "text": "Type-level. Proposed key names the driver, not the doc: `[[types]] staleness = \"drift\" | \"age\"` (default \"age\"). drift: any change under governs since reviewed -> stale, age irrelevant (spec, convention, dictum). age: band from age thresholds, drift reported alongside as a fact (rfc, adr). Final name settled in the RFC."
+      },
+      "blocked_by": [
+        "c2-drift-anchor"
+      ],
+      "created_at": "2026-09-04T01:01:39Z",
+      "id": "01M1MYZ188CTFYXPVKJ4KQ6WM6",
+      "parent": "candidate-3",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "One bool-ish knob on the type, no author burden, maps onto how spec/convention/dictum vs rfc/adr are actually used. User: \"evergreen\" is not the right word; name the behaviour, not the doc.",
+        "rejected": [
+          {
+            "option": "per-doc frontmatter flag",
+            "why_not": "one more field authors forget, type-level covers the real cases"
+          },
+          {
+            "option": "derive from lifecycle terminal status",
+            "why_not": "couples staleness to whether someone modelled a terminal state, surprising"
+          },
+          {
+            "option": "no distinction",
+            "why_not": "six-month-old accepted ADR reads stale forever, undermines the label"
+          }
+        ],
+        "text": "Type-level. Proposed key names the driver, not the doc: `[[types]] staleness = \"drift\" | \"age\"` (default \"age\"). drift: any change under governs since reviewed -> stale, age irrelevant (spec, convention, dictum). age: band from age thresholds, drift reported alongside as a fact (rfc, adr). Final name settled in the RFC."
+      },
+      "question": "Is \"evergreen\" a type-level flag (drift alone makes the doc stale, re-review expected on every governed change) versus point-in-time types (RFC, ADR) where drift is informational and age drives the band?",
+      "rev": 2,
+      "seq": 4,
+      "slug": "c3-evergreen",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c3-scope": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "A finding is the lazyspec-native way to say a doc needs attention, consistent with unowned-as-finding. CI can fail on a stale spec; status inherits the count by wrapping validate.",
+        "rejected": [
+          {
+            "option": "signals on show only",
+            "why_not": "agents only see it if they ask, no sweep"
+          },
+          {
+            "option": "list --stale and band column in the same RFC",
+            "why_not": "follow-up story, column machinery exists"
+          },
+          {
+            "option": "auto-demotion in pack",
+            "why_not": "belongs to the Pack RFC, which consumes the band"
+          }
+        ],
+        "text": "Two parts: (1) `show --json` gains `staleness: {band, driver, anchor, age_days, drift: {files, insertions, deletions}}`; (2) `validate` emits a `stale` finding for drift-driven docs with any drift and for age-driven docs past the stale threshold, severity configurable (default warning). Thresholds in a `[staleness]` config table with defaults.\nOut: per-citation validity, credibility scores, git plumbing beyond diff --stat and show -s, list filters, TUI columns, pack demotion."
+      },
+      "blocked_by": [
+        "candidate-3"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8PP18D1H3T2FKPKYE8P",
+      "parent": "candidate-3",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "A finding is the lazyspec-native way to say a doc needs attention, consistent with unowned-as-finding. CI can fail on a stale spec; status inherits the count by wrapping validate.",
+        "rejected": [
+          {
+            "option": "signals on show only",
+            "why_not": "agents only see it if they ask, no sweep"
+          },
+          {
+            "option": "list --stale and band column in the same RFC",
+            "why_not": "follow-up story, column machinery exists"
+          },
+          {
+            "option": "auto-demotion in pack",
+            "why_not": "belongs to the Pack RFC, which consumes the band"
+          }
+        ],
+        "text": "Two parts: (1) `show --json` gains `staleness: {band, driver, anchor, age_days, drift: {files, insertions, deletions}}`; (2) `validate` emits a `stale` finding for drift-driven docs with any drift and for age-driven docs past the stale threshold, severity configurable (default warning). Thresholds in a `[staleness]` config table with defaults.\nOut: per-citation validity, credibility scores, git plumbing beyond diff --stat and show -s, list filters, TUI columns, pack demotion."
+      },
+      "question": "What is the smallest shippable slice of candidate 3, and what is explicitly out of its first RFC?",
+      "rev": 2,
+      "seq": 1,
+      "slug": "c3-scope",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "c3-surface": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "One compute per selection matches show semantics exactly; band is a git subprocess so per-row rendering is unaffordable. Findings reuse the validation plumbing c2-surface already relies on.",
+        "rejected": [
+          {
+            "option": "band on list rows cached at startup",
+            "why_not": "N subprocesses at startup, seconds for hundreds of docs; c3-scope lists TUI columns as out"
+          },
+          {
+            "option": "findings only, no badge",
+            "why_not": "humans never see the band the agent gets from show, parity broken the wrong way"
+          }
+        ],
+        "text": "Detail-only badge, findings via existing panels. `show` human output adds one line in the frontmatter block, e.g. `staleness: stale (drift 12 files since abc1234, 140d)`. TUI: band badge beside status in the selected doc's detail panel, computed on selection. Web: same badge on the doc page. `stale` findings surface in the TUI validation panel and web validate view through existing plumbing. No band on list rows or relations-tab rows in this slice."
+      },
+      "blocked_by": [
+        "candidate-3"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8Q0R7DV4WTMFR66DAS7",
+      "parent": "candidate-3",
+      "prior": null,
+      "question": "What does candidate 3 expose on CLI (--json shape), and what is its TUI and web parity?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "c3-surface",
+      "status": "answered",
+      "updated_at": "2026-09-04T05:05:54Z"
+    },
+    "candidate-1": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "User: chain context is task-level information for agents. Highest leverage per agent call, RFC-064 §1 design survives the split, infra (resolve_chain, merge_declared_related, get_body_expanded) exists. The \"globals by tag intersection\" regime from the first cut was dropped: user does not want a global-doc concept; convention keeps arriving via the session hook.",
+        "rejected": [
+          {
+            "option": "globals regime (docs of a global-marked type selected by tag intersection, never walked)",
+            "why_not": "user rejects a global-doc concept as a new marker/class"
+          },
+          {
+            "option": "globals via governs-glob overlap with the chain",
+            "why_not": "same concept by another substrate, dropped with it"
+          },
+          {
+            "option": "globals as an implicit edge-table rule",
+            "why_not": "fakes links that do not exist in frontmatter"
+          },
+          {
+            "option": "reverse index as candidate-1",
+            "why_not": "high leverage only once pins are dense"
+          },
+          {
+            "option": "edge attributes",
+            "why_not": "foundation with zero direct agent leverage"
+          },
+          {
+            "option": "graph export",
+            "why_not": "leverage for humans, near zero for agents"
+          }
+        ],
+        "text": "Packed context: `context <id> --pack` = the chain bundle only, walked from the anchor and tiered by graph position (target full, chain full, 1-hop related summary, 2+ hops title). No second regime: convention and dictums are not selected by pack; the existing `convention --preamble` session hook keeps injecting them."
+      },
+      "blocked_by": [
+        "selection-criteria"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8MZHDGFR72CW1NNV4E9",
+      "parent": null,
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "User: chain context is task-level information for agents; global docs (principles, convention) must be applied unilaterally by tag. Highest leverage per agent call, RFC-064 §1 design survives the split, infra (resolve_chain, get_body_expanded, convention loader) exists.",
+        "rejected": [
+          {
+            "option": "reverse index as candidate-1",
+            "why_not": "high leverage only once pins are dense, so it follows pack rather than leads"
+          },
+          {
+            "option": "edge attributes",
+            "why_not": "foundation with zero direct agent leverage, fails criterion 1"
+          },
+          {
+            "option": "graph export",
+            "why_not": "leverage for humans, near zero for agents who already get --json"
+          }
+        ],
+        "text": "Packed context: `context <id> --pack` = chain bundle (task-local, walked from the anchor, tiered by graph position) + globals (convention, dictums, principles) selected unilaterally by tag intersection with the anchor, never walked, always full.\nTwo regimes, one call. Generalises the existing convention preamble hook from \"always inject convention\" to \"inject every global-tagged doc whose tags intersect the anchor's\"."
+      },
+      "question": "Which idea is candidate 1 (highest priority)?",
+      "rev": 2,
+      "seq": 4,
+      "slug": "candidate-1",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:14:30Z"
+    },
+    "candidate-2": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "User: refs are less useful than the reverse, pinning modules to specs. Coarse authored globs in frontmatter are cheap, lean, and give the code-to-doc edge substrate that RFC-060 failed to provide, without comments or derivation.",
+        "rejected": [
+          {
+            "option": "line-level @ref as the doc-to-code edge",
+            "why_not": "bloats docs, rots per line, density depends on prose authoring"
+          },
+          {
+            "option": "derived edges from git commit correlation",
+            "why_not": "heuristic, not authored, hard to validate"
+          },
+          {
+            "option": "citation comments (RFC-060)",
+            "why_not": "rejected substrate"
+          }
+        ],
+        "text": "Module pins: a spec declares the code it governs as coarse globs in frontmatter (`governs: [\"src/engine/context/**\"]`). `why <path>` answers \"which docs govern this file\" by lookup over that frontmatter. Validation: each glob matches at least one file. Later slice: drift = files under the glob changed since the doc's date."
+      },
+      "blocked_by": [
+        "candidate-1"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8NQZ7DNCNVXB2JXEHBA",
+      "parent": null,
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "User: refs are less useful than the reverse, pinning modules to specs. Coarse authored globs in frontmatter are cheap, lean, and give the code-to-doc edge substrate that RFC-060 failed to provide, without comments or derivation.",
+        "rejected": [
+          {
+            "option": "line-level @ref as the doc-to-code edge",
+            "why_not": "bloats docs, rots per line, density depends on prose authoring"
+          },
+          {
+            "option": "derived edges from git commit correlation",
+            "why_not": "heuristic, not authored, hard to validate"
+          },
+          {
+            "option": "citation comments (RFC-060)",
+            "why_not": "rejected substrate"
+          }
+        ],
+        "text": "Module pins: a spec declares the code it governs as coarse globs in frontmatter (`governs: [\"src/engine/context/**\"]`). `why <path>` answers \"which docs govern this file\" by lookup over that frontmatter. Validation: each glob matches at least one file. Later slice: drift = files under the glob changed since the doc's date."
+      },
+      "question": "Which idea is candidate 2?",
+      "rev": 2,
+      "seq": 5,
+      "slug": "candidate-2",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:56Z"
+    },
+    "candidate-3": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Only option where lazyspec knows something the agent cannot get from grep: whether the doc is lying. Pins (candidate-2) make drift computable with zero new authored data. Lineage folded into candidate-1 as a bundle rule rather than its own RFC.",
+        "rejected": [
+          {
+            "option": "decision lineage as its own candidate",
+            "why_not": "real win but small enough to be a tiering rule in pack (superseded/rejected never enter the bundle)"
+          },
+          {
+            "option": "section anchors",
+            "why_not": "optimisation of pack, not a new capability; adds a heading parser and ID grammar"
+          },
+          {
+            "option": "graph export",
+            "why_not": "pure serialiser, human value only, no agent leverage"
+          }
+        ],
+        "text": "Trust/staleness (RFC-064 §3 successor, redesigned without per-citation validity). Per-doc signals computed from what exists: files under the doc's `governs` globs changed since the doc's date, doc status, age; derived band `fresh | aging | stale`. Pack labels every record with its band and demotes `stale` one tier. Facts and a coarse band, never a score."
+      },
+      "blocked_by": [
+        "candidate-2"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8PH0KAQ2TJDQ4DXBA44",
+      "parent": null,
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Only option where lazyspec knows something the agent cannot get from grep: whether the doc is lying. Pins (candidate-2) make drift computable with zero new authored data. Lineage folded into candidate-1 as a bundle rule rather than its own RFC.",
+        "rejected": [
+          {
+            "option": "decision lineage as its own candidate",
+            "why_not": "real win but small enough to be a tiering rule in pack (superseded/rejected never enter the bundle)"
+          },
+          {
+            "option": "section anchors",
+            "why_not": "optimisation of pack, not a new capability; adds a heading parser and ID grammar"
+          },
+          {
+            "option": "graph export",
+            "why_not": "pure serialiser, human value only, no agent leverage"
+          }
+        ],
+        "text": "Trust/staleness (RFC-064 §3 successor, redesigned without per-citation validity). Per-doc signals computed from what exists: files under the doc's `governs` globs changed since the doc's date, doc status, age; derived band `fresh | aging | stale`. Pack labels every record with its band and demotes `stale` one tier. Facts and a coarse band, never a score."
+      },
+      "question": "Which idea is candidate 3 (a build, not a subtraction; cutting is deferred)?",
+      "rev": 2,
+      "seq": 6,
+      "slug": "candidate-3",
+      "status": "answered",
+      "updated_at": "2026-09-04T04:20:57Z"
+    },
+    "dead-ideas": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Judged against the goal statement (Unix philosophy, compose via pipes) and the three picks. Dead = the job belongs to another tool or to a killed design; deferred = fits principle 1 but has no second concrete use yet.",
+        "rejected": [
+          {
+            "option": "graph export as dead",
+            "why_not": "borderline, kept deferred since one output format is cheap when asked for"
+          }
+        ],
+        "text": "Dead (never re-propose): citation edges (RFC-064 §2, pins replace them); globals / tag-selected docs in pack (session hook is the mechanism); graph query (--json + jq is the query language); graph diff (git + validate cover it); section sub-nodes (multiplies graph and data model for no agent leverage over show sections); agent-session store (abandoned daemon vision).\nDeferred (revisit after Pins -> Trust -> Pack land): edge attributes (edge table exists since #99; add an attribute at two uses, context-tier override is the first candidate); status-gate invariants (validation rule; see whether stale-blocks-advance is the first gate); decision lineage (a supersedes walk over context); coverage projection (mostly covered by required edges; revisit if pins expose unowned code as the real question); graph export DOT/Mermaid (human leverage only, one output format when asked); reverse index beyond why <path> (waits for pin density)."
+      },
+      "blocked_by": [
+        "candidate-3"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8QCF9G98D6WPCY6FHDJ",
+      "parent": null,
+      "prior": null,
+      "question": "Which of the remaining ideas are dead (never re-propose) versus deferred (revisit after these three land)?",
+      "rev": 1,
+      "seq": 8,
+      "slug": "dead-ideas",
+      "status": "answered",
+      "updated_at": "2026-09-04T05:07:48Z"
+    },
+    "goal-statement": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "User answered \"unix philosophy\". Principle 1 stands as the tiebreaker; the graph is legitimate only as small composable primitives emitting text/JSON, never as an engine that owns the workflow. Rules out anything that turns lazyspec into a platform.",
+        "rejected": [
+          {
+            "option": "graph-first restatement replacing principle 1",
+            "why_not": "reopens the scope door closed in June 2026"
+          },
+          {
+            "option": "two unreconciled rulers (README tagline vs principle 1)",
+            "why_not": "produced RFC-064 accepted-but-unbuilt"
+          },
+          {
+            "option": "principle 1 with a graph clause bolted on",
+            "why_not": "unnecessary, unix framing already admits the graph as a composable output"
+          }
+        ],
+        "text": "Unix philosophy: lazyspec does one thing well (structured markdown and the typed graph its links form), emits text and JSON, and composes with other tools through pipes rather than absorbing their jobs.\nCandidates are judged by: does this add a small primitive that emits data other tools can consume, or does it pull a neighbour's job (query engine, orchestration, search index) inside the binary? Principle 1 remains the tiebreaker. README \"context engine\" tagline should be read as \"a source other tools pipe from\", not a platform."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8MA94K8JRHESG333WFY",
+      "parent": null,
+      "prior": null,
+      "question": "What is the one-sentence goal of lazyspec that the candidates are judged against — does the README \"context engine\" tagline win, convention principle 1 (\"produce, validate, serve structured markdown\") win, or a new graph-first statement replace both?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "goal-statement",
+      "status": "answered",
+      "updated_at": "2026-09-03T02:55:38Z"
+    },
+    "ordering": {
+      "answer": {
+        "cauterised_by": "bundle-coherence",
+        "rationale": "bundle-coherence fixed the build order (Pins -> Trust -> Pack, hard dependencies). The RFC-067 half is moot: STORY-260, 261 and 262 are all complete, so nothing here waits on RFC-067.",
+        "rejected": [],
+        "text": "cauterised"
+      },
+      "blocked_by": [
+        "bundle-coherence"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8QQ9RNADX6S57DF3AKB",
+      "parent": null,
+      "prior": null,
+      "question": "Build order across the three, and does anything land before RFC-067 completion (STORY-260/261/262)?",
+      "rev": 1,
+      "seq": 10,
+      "slug": "ordering",
+      "status": "answered",
+      "updated_at": "2026-09-04T05:43:34Z"
+    },
+    "rfc-shape": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "What rfc064-fate already committed to. Each RFC is small enough to read in one sitting; pins can be accepted while pack is still argued. supersedes and blocks exist in the relationship vocabulary.",
+        "rejected": [
+          {
+            "option": "one umbrella RFC with three story chains",
+            "why_not": "one status for three decisions, re-does the RFC-064 shape that just got split"
+          },
+          {
+            "option": "amend RFC-064 in place",
+            "why_not": "rejected at rfc064-fate"
+          }
+        ],
+        "text": "Three RFCs, one per candidate, linked by edges. RFC-068 pins. RFC-069 trust, supersedes RFC-064. RFC-070 pack, supersedes RFC-064. RFC-068 blocks 069, 069 blocks 070. Each carries its own story chain of two or three stories. RFC-064 moves to superseded."
+      },
+      "blocked_by": [
+        "bundle-coherence",
+        "rfc064-fate"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8QG0T6PK6BW3797380S",
+      "parent": null,
+      "prior": null,
+      "question": "Delivery vehicle: three RFCs, one umbrella RFC with three story chains, or amendments to RFC-064/067?",
+      "rev": 1,
+      "seq": 9,
+      "slug": "rfc-shape",
+      "status": "answered",
+      "updated_at": "2026-09-04T05:43:34Z"
+    },
+    "rfc064-fate": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Pack is unix-clean and self-contained; trust without citation edges is a different design and needs its own doc. Supersede edge keeps the lineage visible instead of silently editing an accepted RFC.",
+        "rejected": [
+          {
+            "option": "leave accepted untouched",
+            "why_not": "part 2 cites rejected RFC-060 as substrate, doc lies until noticed"
+          },
+          {
+            "option": "amend in place",
+            "why_not": "loses the record that citation-as-comment was the plan, and trust §3 has nothing to compute over without rewriting anyway"
+          },
+          {
+            "option": "reject wholesale",
+            "why_not": "pack section is good and unix-consistent, waste to discard"
+          }
+        ],
+        "text": "Split. RFC-064 becomes superseded by two RFCs: one for packed assembly (context --pack, tiering by graph position), one for trust/staleness redesigned without per-citation validity. Citation edges (part 2) get no successor from RFC-064; if a code-to-doc edge substrate is chosen as a candidate here it is its own new RFC."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8MR1KM2TNTNQHQG65PG",
+      "parent": null,
+      "prior": null,
+      "question": "RFC-064 is accepted, has zero stories, and its citation part depended on rejected RFC-060. Does it stay accepted as-is, get split into pack vs trust, or get superseded by whatever this interview picks?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "rfc064-fate",
+      "status": "answered",
+      "updated_at": "2026-09-04T00:12:04Z"
+    },
+    "selection-criteria": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Agents are the reader that makes a graph different from ls; leverage per agent call is what the context-graph claim is for. The <=3-iteration first-slice constraint prevents foundation-only picks from repeating RFC-064 accepted-but-unbuilt without ranking cost first.",
+        "rejected": [
+          {
+            "option": "unblocking first",
+            "why_not": "ships plumbing (edge attrs, RFC-067 finish) with delayed visible value, same fate as RFC-064"
+          },
+          {
+            "option": "cost first",
+            "why_not": "three quick wins (export, diff, lineage) that do not move the context-graph claim"
+          },
+          {
+            "option": "leverage/cost ratio",
+            "why_not": "both terms are judgement, two people disagree on both"
+          }
+        ],
+        "text": "Agent leverage first (tokens saved and decisions improved per agent call), then build cost, then unblocking of other ideas. Constraint: each candidate's first slice must ship in at most three iterations.\nPre-filter under the unix test before ranking: pass = reverse index, export, diff, edge attributes, lineage, section anchors, context --pack, RFC-067 completion; borderline = coverage, status-gate invariants, staleness/trust (own data, but computed); fail = query language (jq exists), agent-session store (another tool's private state), semantic search."
+      },
+      "blocked_by": [
+        "goal-statement"
+      ],
+      "created_at": "2026-09-03T02:10:27Z",
+      "id": "01M1JGG8MHJAA13S3VKR1B1D9G",
+      "parent": null,
+      "prior": null,
+      "question": "What ranks candidates: agent leverage per token, cost to build, unblocking of other ideas, or scope-fit against the goal statement — and in what tiebreak order?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "selection-criteria",
+      "status": "answered",
+      "updated_at": "2026-09-04T00:11:00Z"
+    }
+  },
+  "intent": "Prioritise and refine three candidates, drawn from the context-graph gap analysis and the ten follow-on ideas (code-to-doc reverse index, edge attributes, graph query, graph diff, decision lineage, status-gate invariants, section sub-nodes, coverage projection, agent-session store, graph export, plus RFC-064 pack/trust and RFC-067 completion), into a set ready to become RFC/story chains in this repo. The interview must decide what \"context graph\" means for lazyspec given convention principle 1, pick three, refine each to RFC-writable shape, and record which ideas are dead so they are not re-proposed.",
+  "slug": "context-graph-candidates",
+  "version": 1
+}
