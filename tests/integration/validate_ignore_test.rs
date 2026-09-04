@@ -1,16 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{starter_edges, Config};
 use lazyspec::engine::validation::ValidationIssue;
-
-/// The starter config with the chain stated in `[[edges]]`, which is where the
-/// `(parent type, child type)` pairs behind `AllChildrenAccepted` and
-/// `UpwardOrphanedAcceptance` are read from (ITERATION-380).
-fn config_with_hierarchy_edges() -> Config {
-    Config {
-        edges: starter_edges(),
-        ..Config::default()
-    }
-}
 
 #[test]
 fn ignored_document_with_broken_link_produces_no_error() {
@@ -29,31 +18,6 @@ fn ignored_document_with_broken_link_produces_no_error() {
             .any(|e| matches!(e, ValidationIssue::BrokenLink { .. })),
         "expected no BrokenLink error for ignored document, got: {:?}",
         result.errors
-    );
-}
-
-#[test]
-fn ignored_story_skips_upward_orphaned_acceptance() {
-    let fixture = TestFixture::new();
-    fixture.write_doc(
-        "docs/rfcs/RFC-001-feature.md",
-        "---\ntitle: \"Feature\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated: []\n---\n",
-    );
-    fixture.write_doc(
-        "docs/stories/STORY-001-impl.md",
-        "---\ntitle: \"Impl\"\ntype: story\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\nrelated:\n- implements: docs/rfcs/RFC-001-feature.md\n---\n",
-    );
-    let config = config_with_hierarchy_edges();
-    let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
-
-    assert!(
-        !result
-            .warnings
-            .iter()
-            .any(|w| matches!(w, ValidationIssue::UpwardOrphanedAcceptance { .. })),
-        "expected no UpwardOrphanedAcceptance warning for ignored story, got: {:?}",
-        result.warnings
     );
 }
 
@@ -90,43 +54,5 @@ fn non_ignored_documents_still_report_errors() {
         )),
         "expected no BrokenLink error for ignored document, got: {:?}",
         result.errors
-    );
-}
-
-#[test]
-fn ignored_children_excluded_from_all_children_accepted_check() {
-    let fixture = TestFixture::new();
-    fixture.write_doc(
-        "docs/rfcs/RFC-001-feature.md",
-        "---\ntitle: \"Feature\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated: []\n---\n",
-    );
-    // Accepted story, ignored
-    fixture.write_doc(
-        "docs/stories/STORY-001-impl.md",
-        "---\ntitle: \"Impl\"\ntype: story\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\nrelated:\n- implements: docs/rfcs/RFC-001-feature.md\n---\n",
-    );
-    // Accepted story, not ignored
-    fixture.write_story(
-        "STORY-002-impl.md",
-        "Impl2",
-        "accepted",
-        Some("docs/rfcs/RFC-001-feature.md"),
-    );
-    let config = config_with_hierarchy_edges();
-    let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
-
-    // The ignored child should be excluded. Only STORY-002 remains, which is accepted,
-    // so AllChildrenAccepted should fire (one non-ignored child, all accepted).
-    assert!(
-        result.warnings.iter().any(|w| matches!(
-            w,
-            ValidationIssue::AllChildrenAccepted { parent, children }
-                if parent.ends_with("RFC-001-feature.md")
-                && children.len() == 1
-                && children[0].ends_with("STORY-002-impl.md")
-        )),
-        "expected AllChildrenAccepted warning with only non-ignored children, got: {:?}",
-        result.warnings
     );
 }

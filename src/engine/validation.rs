@@ -27,18 +27,6 @@ pub enum ValidationIssue {
         path: PathBuf,
         parent: PathBuf,
     },
-    OrphanedAcceptance {
-        path: PathBuf,
-        parent: PathBuf,
-    },
-    AllChildrenAccepted {
-        parent: PathBuf,
-        children: Vec<PathBuf>,
-    },
-    UpwardOrphanedAcceptance {
-        path: PathBuf,
-        parent: PathBuf,
-    },
     DuplicateId {
         id: String,
         paths: Vec<PathBuf>,
@@ -193,30 +181,6 @@ impl std::fmt::Display for ValidationIssue {
                 write!(
                     f,
                     "implements rejected document: {} -> {}",
-                    path.display(),
-                    parent.display()
-                )
-            }
-            ValidationIssue::OrphanedAcceptance { path, parent } => {
-                write!(
-                    f,
-                    "accepted but parent not accepted: {} -> {}",
-                    path.display(),
-                    parent.display()
-                )
-            }
-            ValidationIssue::AllChildrenAccepted { parent, children } => {
-                write!(
-                    f,
-                    "all children accepted but parent not accepted: {} ({} children)",
-                    parent.display(),
-                    children.len()
-                )
-            }
-            ValidationIssue::UpwardOrphanedAcceptance { path, parent } => {
-                write!(
-                    f,
-                    "accepted child but parent not accepted: {} -> {}",
                     path.display(),
                     parent.display()
                 )
@@ -481,27 +445,6 @@ impl Checker for BrokenLinkRule {
                         },
                     ));
                 }
-
-                // No second lookup for "is this pair hierarchy": the row that
-                // admitted the triple above said both, so the type-pair test
-                // and the relationship test have collapsed into one call. Under
-                // a wildcard chain row that widens this finding to pairs the
-                // rules table never listed -- an accepted document hanging off
-                // a draft parent of any type -- and it should: the row says
-                // every such link is the chain, and the walk has always agreed.
-                // Exempting the unlisted pairs was the two-declarations defect
-                // RFC-067 §Problem.1 names, not a rule anyone wrote.
-                if meta.status == Status::new("accepted")
-                    && parent_doc.status != Status::new("accepted")
-                {
-                    issues.push((
-                        Severity::Warning,
-                        ValidationIssue::OrphanedAcceptance {
-                            path: path.clone(),
-                            parent: target.clone(),
-                        },
-                    ));
-                }
             }
         }
 
@@ -597,94 +540,6 @@ impl Checker for RequiredEdgeRule {
                             via: edge.via.clone(),
                         },
                     ));
-                }
-            }
-        }
-
-        issues
-    }
-}
-
-pub struct StatusConsistencyRule;
-
-impl Checker for StatusConsistencyRule {
-    fn check(
-        &self,
-        store: &super::store::Store,
-        _config: &Config,
-    ) -> Vec<(Severity, ValidationIssue)> {
-        let mut issues = Vec::new();
-
-        for (parent_path, meta) in &store.docs {
-            // One child type at a time, as the rules table's parent/child pairs
-            // made it: `AllChildrenAccepted` counts over a single type's
-            // children, so a parent whose stories are all accepted and whose
-            // bugs are not still carries the finding for its stories. The pairs
-            // now come from the edge table's reverse index (STORY-257), the same
-            // one the chain walk and the prompt context read.
-            for child_type in store.traversal_walk.child_types_for(meta.doc_type.as_str()) {
-                let children: Vec<PathBuf> = store
-                    .reverse_links
-                    .get(parent_path)
-                    .into_iter()
-                    .flatten()
-                    .filter(|link| {
-                        store.docs.get(&link.endpoint).is_some_and(|child| {
-                            child.doc_type.as_str() == child_type
-                                && !child.validate_ignore
-                                && store.traversal_walk.walks_chain(
-                                    child.doc_type.as_str(),
-                                    link.rel_type.as_str(),
-                                    meta.doc_type.as_str(),
-                                )
-                        })
-                    })
-                    .map(|link| link.endpoint.clone())
-                    .collect();
-
-                if children.is_empty() {
-                    continue;
-                }
-
-                let parent_is_draft_or_review =
-                    meta.status == Status::new("draft") || meta.status == Status::new("review");
-
-                if !parent_is_draft_or_review {
-                    continue;
-                }
-
-                let all_accepted = children.iter().all(|cp| {
-                    store
-                        .docs
-                        .get(cp)
-                        .map(|d| d.status == Status::new("accepted"))
-                        .unwrap_or(false)
-                });
-
-                if all_accepted {
-                    issues.push((
-                        Severity::Warning,
-                        ValidationIssue::AllChildrenAccepted {
-                            parent: parent_path.clone(),
-                            children,
-                        },
-                    ));
-                    continue;
-                }
-
-                for child_path in &children {
-                    let Some(child) = store.docs.get(child_path) else {
-                        continue;
-                    };
-                    if child.status == Status::new("accepted") {
-                        issues.push((
-                            Severity::Warning,
-                            ValidationIssue::UpwardOrphanedAcceptance {
-                                path: child_path.clone(),
-                                parent: parent_path.clone(),
-                            },
-                        ));
-                    }
                 }
             }
         }
@@ -1316,7 +1171,6 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(RequiredEdgeRule),
-        Box::new(StatusConsistencyRule),
         Box::new(DuplicateIdRule),
         Box::new(AcSlugFormatRule),
         Box::new(RefScopeRule),

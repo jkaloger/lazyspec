@@ -1444,8 +1444,8 @@ pub fn starter_types() -> Vec<TypeDef> {
 /// concrete rows alone would suppress them too and narrow the chain to the two
 /// pairs they name. The concrete rows carry the chain role as well, because a
 /// wildcard `from` enumerates no child types
-/// ([`TraversalWalk::child_types_for`]) and the two findings that walk
-/// `(parent type, child type)` pairs have nothing else to read.
+/// ([`TraversalWalk::child_types_for`]) and the prompt context's child-type
+/// listing has nothing else to read.
 ///
 /// `adrs-need-relations` demands a relationship without naming one, which is
 /// `to = "*"`, `via = "*"` -- the shape RFC-067 §Design gives a
