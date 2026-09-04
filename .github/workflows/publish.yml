@@ -67,6 +67,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  nix-cache:
+    name: Push ${{ matrix.runner }} closure to Cachix
+    needs: publish-release
+    if: needs.publish-release.outputs.releases_created == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.publish-release.outputs.tag }}
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: lazyspec
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: nix build .#default
+
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: publish-release

@@ -52,6 +52,23 @@ Release tarballs with SHA-256 checksums are on the [releases page](https://githu
 nix profile install github:jkaloger/lazyspec
 ```
 
+Or pin it as a flake input:
+
+```nix
+inputs.lazyspec.url = "github:jkaloger/lazyspec/v0.11.3";
+# then, in a devShell:
+packages = [ inputs.lazyspec.packages.${system}.default ];
+```
+
+Releases are pushed to a public binary cache at `https://lazyspec.cachix.org`. The flake advertises it through `nixConfig`, so Nix asks once whether to trust the substituter. To skip the prompt, add it to `nix.conf`:
+
+```
+extra-substituters = https://lazyspec.cachix.org
+extra-trusted-public-keys = lazyspec.cachix.org-1:vPXwfgzSiLee3OEYP+a9Y/3Xlwpzs6WnpLuQjQZlvZ8=
+```
+
+Cache hits require the same derivation CI built. Setting `inputs.nixpkgs.follows` on the `lazyspec` input changes the derivation and falls back to a source build.
+
 ### From source
 
 ```sh

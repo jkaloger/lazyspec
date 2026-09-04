@@ -1,6 +1,13 @@
 {
   description = "lazyspec - specification management tool";
 
+  nixConfig = {
+    extra-substituters = [ "https://lazyspec.cachix.org" ];
+    extra-trusted-public-keys = [
+      "lazyspec.cachix.org-1:vPXwfgzSiLee3OEYP+a9Y/3Xlwpzs6WnpLuQjQZlvZ8="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
