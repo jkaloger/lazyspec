@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/jkaloger/lazyspec/compare/v0.11.3...v0.12.0) - 2026-09-04
+
+### Added
+
+- *(engine)* [**breaking**] remove the acceptance-gating validation findings
+- [**breaking**] consolidate document DAG config into an edge table ([#99](https://github.com/jkaloger/lazyspec/pull/99))
+
+### Fixed
+
+- *(engine)* restore frontmatter separator on body substitution
+
+### Other
+
+- hydra interview, context-graph candidates
+- push release closures to a Cachix binary cache
+- RFC 67
+- *(engine)* consolidate body normalisation, cover it end to end
+
 ## [0.11.3](https://github.com/jkaloger/lazyspec/compare/v0.11.2...v0.11.3) - 2026-08-24
 
 ### Fixed
