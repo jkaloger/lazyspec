@@ -108,22 +108,6 @@ kind = "int"
 name = "due"
 kind = "date"
 
-[[types]]
-name = "milestone"
-plural = "milestones"
-dir = "docs/milestones"
-prefix = "MILESTONE"
-icon = "🏁"
-store = "github-milestones"
-intent = "A GitHub milestone authored as structured markdown"
-
-[[types]]
-name = "clickup"
-plural = "clickups"
-dir = "docs/clickups"
-prefix = "CLICKUP"
-store = "clickup-tasks"
-clickup_list_id = "901615772121"
 
 [[relationships]]
 name = "implements"
