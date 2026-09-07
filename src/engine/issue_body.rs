@@ -162,6 +162,8 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         date: parsed.date,
         tags,
         provenance: parsed.provenance.unwrap_or_default(),
+        governs: vec![],
+        reviewed: None,
         related,
         validate_ignore: false,
         virtual_doc: false,
@@ -373,6 +375,8 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             tags: vec!["performance".to_string()],
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![Relation {
                 rel_type: RelationType::new("implements"),
                 target: "STORY-075".to_string(),

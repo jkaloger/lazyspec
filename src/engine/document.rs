@@ -321,6 +321,12 @@ pub struct DocMeta {
     /// `tags` which always emits `tags: []`.
     pub assignee: Option<String>,
     pub provenance: Vec<String>,
+    /// Coarse globs naming the source files this document governs (RFC-068).
+    /// Matched relative to `[governs] root`. Empty when unset.
+    pub governs: Vec<String>,
+    /// The commit this document was last reviewed against. Parsed here, judged
+    /// by RFC-069.
+    pub reviewed: Option<String>,
     pub related: Vec<Relation>,
     pub validate_ignore: bool,
     pub virtual_doc: bool,
@@ -345,6 +351,10 @@ struct RawFrontmatter {
     assignee: Option<String>,
     #[serde(default)]
     provenance: Vec<String>,
+    #[serde(default)]
+    governs: Vec<String>,
+    #[serde(default)]
+    reviewed: Option<String>,
     #[serde(default)]
     related: Vec<serde_yaml::Value>,
     #[serde(default, rename = "validate-ignore")]
@@ -489,6 +499,8 @@ impl DocMeta {
             tags: raw.tags,
             assignee: raw.assignee,
             provenance: raw.provenance,
+            governs: raw.governs,
+            reviewed: raw.reviewed,
             related,
             validate_ignore: raw.validate_ignore,
             virtual_doc: false,
@@ -527,6 +539,8 @@ mod tests {
             tags: vec![],
             assignee: None,
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
@@ -627,6 +641,54 @@ Body.
 "#;
         let meta = DocMeta::parse(content).unwrap();
         assert!(meta.provenance.is_empty());
+    }
+
+    #[test]
+    fn governs_loads_in_order() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+governs:
+  - "src/engine/context/**"
+  - "src/cli/**"
+reviewed: 0123456789abcdef
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert_eq!(
+            meta.governs,
+            vec![
+                "src/engine/context/**".to_string(),
+                "src/cli/**".to_string(),
+            ]
+        );
+        assert_eq!(meta.reviewed.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn governs_and_reviewed_missing_default_to_empty() {
+        let content = r#"---
+title: "Doc"
+type: rfc
+status: draft
+author: a
+date: 2026-01-01
+tags: []
+---
+
+Body.
+"#;
+        let meta = DocMeta::parse(content).unwrap();
+        assert!(meta.governs.is_empty());
+        assert_eq!(meta.reviewed, None);
+        assert!(!meta.attributes.contains_key("governs"));
+        assert!(!meta.attributes.contains_key("reviewed"));
     }
 
     #[test]
@@ -990,6 +1052,8 @@ Body.
             tags: vec![],
             assignee: None,
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,

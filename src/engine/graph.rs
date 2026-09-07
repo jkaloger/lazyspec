@@ -1691,6 +1691,8 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             tags: Vec::new(),
             provenance: Vec::new(),
+            governs: vec![],
+            reviewed: None,
             related: Vec::new(),
             validate_ignore: false,
             virtual_doc: false,

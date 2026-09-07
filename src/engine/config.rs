@@ -1130,6 +1130,11 @@ pub struct Config {
     /// but parsed via `RawConfig`.
     #[serde(rename = "git-ref", default, skip_deserializing)]
     pub git_ref: GitRefConfig,
+    /// The `[governs]` table: which files must be owned by a document, how
+    /// loudly to report the ones that are not, and the code root globs resolve
+    /// against. Serialized into `config --json` but parsed via `RawConfig`.
+    #[serde(default, skip_deserializing)]
+    pub governs: GovernsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1231,6 +1236,35 @@ impl Default for GitRefConfig {
     }
 }
 
+/// The `[governs]` table (RFC-068). `scope` selects the files that must be
+/// governed by some document; `unowned` is the severity for one that is not,
+/// absent meaning the check is off; `root` is the code root that `governs`
+/// globs resolve against, for a docs-repo split.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct GovernsConfig {
+    #[serde(default)]
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub unowned: Option<Severity>,
+    #[serde(default = "default_governs_root")]
+    #[schemars(with = "String")]
+    pub root: std::path::PathBuf,
+}
+
+pub fn default_governs_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(".")
+}
+
+impl Default for GovernsConfig {
+    fn default() -> Self {
+        GovernsConfig {
+            scope: Vec::new(),
+            unowned: None,
+            root: default_governs_root(),
+        }
+    }
+}
+
 /// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
 /// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
 /// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
@@ -1322,6 +1356,10 @@ struct RawConfig {
     /// `origin`).
     #[serde(rename = "git-ref", default)]
     git_ref: Option<GitRefConfig>,
+    /// The `[governs]` block: the files that must be governed, the severity of
+    /// an ungoverned one, and the code root globs resolve against.
+    #[serde(default)]
+    governs: Option<GovernsConfig>,
 }
 
 /// The JSON Schema for `.lazyspec.toml`, derived from the private `RawConfig`
@@ -1549,6 +1587,7 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             web: None,
             git_ref: GitRefConfig::default(),
+            governs: GovernsConfig::default(),
         }
     }
 }
@@ -1860,6 +1899,7 @@ impl Config {
             skills: raw.skills.unwrap_or_default(),
             web: raw.web,
             git_ref: raw.git_ref.unwrap_or_default(),
+            governs: raw.governs.unwrap_or_default(),
         })
     }
 
@@ -3861,6 +3901,32 @@ remote = "upstream"
         );
         let config = Config::parse(&toml_str).unwrap();
         assert_eq!(config.git_ref.remote, "upstream");
+    }
+
+    // RFC-068: an absent [governs] table leaves pinning off with a `.` code root.
+    #[test]
+    fn governs_defaults_to_off() {
+        let config = Config::parse(TYPES).unwrap();
+        assert!(config.governs.scope.is_empty());
+        assert_eq!(config.governs.unowned, None);
+        assert_eq!(config.governs.root, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn governs_table_is_parsed() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[governs]
+scope = ["src/**"]
+unowned = "warning"
+root = "../app"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(config.governs.scope, vec!["src/**".to_string()]);
+        assert_eq!(config.governs.unowned, Some(Severity::Warning));
+        assert_eq!(config.governs.root, std::path::PathBuf::from("../app"));
     }
 
     #[test]

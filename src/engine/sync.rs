@@ -1406,6 +1406,8 @@ mod tests {
             date: chrono::Utc::now().date_naive(),
             tags: vec![],
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![Relation {
                 rel_type: RelationType::new("member-of"),
                 target: "PROJECT-1".to_string(),

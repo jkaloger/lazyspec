@@ -270,6 +270,8 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         date,
         tags: task.tags.iter().map(|t| t.name.clone()).collect(),
         provenance: vec![],
+        governs: vec![],
+        reviewed: None,
         related,
         validate_ignore: false,
         virtual_doc: false,

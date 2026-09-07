@@ -120,6 +120,8 @@ mod tests {
             date: chrono::NaiveDate::from_ymd_opt(2026, 6, 25).unwrap(),
             tags: vec![],
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,

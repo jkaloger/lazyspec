@@ -2418,6 +2418,8 @@ mod tests {
                 date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 tags: vec![],
                 provenance: vec![],
+                governs: vec![],
+                reviewed: None,
                 related: vec![crate::engine::document::Relation {
                     rel_type: RelationType::new("implements"),
                     target: "STORY-001".to_string(),
@@ -2543,6 +2545,8 @@ mod tests {
                 date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 tags: vec![],
                 provenance: vec![],
+                governs: vec![],
+                reviewed: None,
                 related: vec![crate::engine::document::Relation {
                     rel_type: RelationType::new("implements"),
                     target: "STORY-001".to_string(),

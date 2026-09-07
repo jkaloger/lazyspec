@@ -3179,6 +3179,8 @@ mod tests {
             tags: vec![],
             related: vec![],
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             validate_ignore: false,
             path: PathBuf::from("docs/rfcs/RFC-001.md"),
             virtual_doc: false,

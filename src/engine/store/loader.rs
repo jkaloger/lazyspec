@@ -181,6 +181,8 @@ fn load_subdirectory(
         date: Utc::now().date_naive(),
         tags: vec![],
         provenance: vec![],
+        governs: vec![],
+        reviewed: None,
         related: vec![],
         validate_ignore: false,
         virtual_doc: true,

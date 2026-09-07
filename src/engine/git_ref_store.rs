@@ -168,6 +168,8 @@ impl GitRefStore {
             date: Local::now().date_naive(),
             tags: vec![],
             provenance: vec![],
+            governs: vec![],
+            reviewed: None,
             related: vec![],
             validate_ignore: false,
             virtual_doc: false,
@@ -586,6 +588,7 @@ mod tests {
             certification: Default::default(),
             agents: Default::default(),
             skills: Default::default(),
+            governs: Default::default(),
             web: None,
             git_ref: Default::default(),
         }
