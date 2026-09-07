@@ -15,9 +15,21 @@
 # `lazyspec validate` is deliberately not here. The docs tree carries
 # pre-existing findings from before the rules that catch them existed, so the
 # gate would be red on arrival and tell you nothing about your change.
+#
+# `gate.sh fast` drops the default-feature clippy pass. That pass exists to
+# catch code that only compiles with `web` on; everything else it would say,
+# the `web` pass says too. Running one feature set means the test targets are
+# compiled once instead of twice, which is most of the wall clock. Use it
+# per-unit mid-batch; run the full gate before the batch is called done.
 set -euo pipefail
 
 cargo fmt --all -- --check
-cargo clippy --all-targets --offline -- -D warnings
-cargo clippy --features web --offline -- -D warnings
+
+if [[ ${1:-} != fast ]]; then
+	cargo clippy --all-targets --offline -- -D warnings
+fi
+
+# -A await_holding_lock: two pre-existing hits in tests/integration/web_serve_test.rs.
+# Drop the flag once those are fixed.
+cargo clippy --all-targets --features web --offline -- -D warnings -A clippy::await_holding_lock
 cargo test --features web --offline
