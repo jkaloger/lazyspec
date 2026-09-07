@@ -2,11 +2,13 @@ mod cascade;
 mod config;
 mod conflicts;
 mod fields;
+mod governs;
 mod relations;
 mod status;
 
 pub use cascade::cascade_references;
 pub use config::collect_config_fixes;
+pub use governs::collect_governs_fixes;
 
 use std::path::Path;
 
@@ -20,6 +22,25 @@ use conflicts::collect_conflict_fixes;
 use fields::collect_field_fixes;
 use relations::collect_relation_fixes;
 use status::collect_status_fixes;
+
+/// Run one document write and report it as the pair every `*FixResult` carries:
+/// whether the document changed, and, when it did not, why. The error survives
+/// instead of collapsing into a bare `written: false`, which a reader cannot
+/// tell apart from a dry run (DICTUM-006).
+///
+/// A dry run neither writes nor fails, so it is `(false, None)`.
+fn record_write(
+    dry_run: bool,
+    write: impl FnOnce() -> anyhow::Result<()>,
+) -> (bool, Option<String>) {
+    if dry_run {
+        return (false, None);
+    }
+    match write() {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(format!("{e:#}"))),
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct FixOutput {
@@ -49,6 +70,9 @@ pub struct RelationFixResult {
     /// `--json` output surfaces path->id migrations and dedup separately.
     pub deduped: Vec<(String, String)>,
     pub written: bool,
+    /// Why the rewrite did not reach the document, when it failed. `None` for a
+    /// dry run and for a write that landed.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,6 +158,21 @@ pub struct ConflictFixResult {
     pub new_id: String,
     pub references_updated: Vec<ReferenceUpdate>,
     pub written: bool,
+}
+
+/// One rotted `governs` glob rewritten to the suggestion its
+/// `governs-no-match` finding carried. No `reviewed` field, deliberately: the
+/// repair leaves the anchor alone (RFC-068 §Decisions 5), so there is nothing
+/// about it to report.
+#[derive(Debug, Serialize)]
+pub struct GovernsFixResult {
+    pub path: String,
+    pub old_glob: String,
+    pub new_glob: String,
+    pub written: bool,
+    /// Why the rewrite did not reach the document, when it failed. `None` for a
+    /// dry run and for a write that landed.
+    pub error: Option<String>,
 }
 
 pub fn plan_field_and_conflict_fixes(

@@ -12,6 +12,7 @@ mod cli_edges_test;
 mod cli_expanded_validate_test;
 mod cli_fix_cascade_test;
 mod cli_fix_config_test;
+mod cli_fix_governs_test;
 mod cli_fix_renumber_test;
 mod cli_fix_test;
 mod cli_git_ref_context_test;

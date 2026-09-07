@@ -1,4 +1,4 @@
-use crate::engine::ops::fix::{ConfigFixResult, FixOutput};
+use crate::engine::ops::fix::{ConfigFixResult, FixOutput, GovernsFixResult};
 
 pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     let mut result = String::new();
@@ -38,6 +38,15 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     }
 
     for r in &output.relation_fixes {
+        // A failed write changed nothing, so every "Migrated"/"Dropped" line
+        // below it would be a lie. Report why instead.
+        if let Some(e) = &r.error {
+            result.push_str(&format!(
+                "error: could not update relations in {}: {}\n",
+                r.path, e
+            ));
+            continue;
+        }
         for (old_target, new_target) in &r.replacements {
             if dry_run {
                 result.push_str(&format!(
@@ -67,6 +76,23 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     }
 
     result
+}
+
+/// One line per rotted pin. The verb comes from whether the write landed, not
+/// from `dry_run`: a rewrite that could not reach the document must not read as
+/// one that did, and the reason it failed is the only thing that tells the
+/// reader what to do next (DICTUM-006).
+pub(super) fn format_governs_human(rewrites: &[GovernsFixResult], dry_run: bool) -> String {
+    rewrites
+        .iter()
+        .map(|r| match &r.error {
+            Some(e) => format!("error: could not repin {}: {}\n", r.path, e),
+            None => {
+                let verb = if dry_run { "Would repin" } else { "Repinned" };
+                format!("{} {}: {} -> {}\n", verb, r.path, r.old_glob, r.new_glob)
+            }
+        })
+        .collect()
 }
 
 pub(super) fn format_config_human(result: &ConfigFixResult, dry_run: bool) -> String {

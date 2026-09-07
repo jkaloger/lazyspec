@@ -10,10 +10,13 @@ use crate::engine::config::Config;
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
-use crate::engine::ops::fix::{collect_config_fixes, plan_field_and_conflict_fixes};
-pub use crate::engine::ops::fix::{ConfigFixResult, ReferenceUpdate};
+use crate::engine::git_ref::GitRefOps;
+use crate::engine::ops::fix::{
+    collect_config_fixes, collect_governs_fixes, plan_field_and_conflict_fixes,
+};
+pub use crate::engine::ops::fix::{ConfigFixResult, GovernsFixResult, ReferenceUpdate};
 
-use output::{format_config_human, format_human};
+use output::{format_config_human, format_governs_human, format_human};
 use renumber::collect_renumber_output;
 
 #[derive(Debug, Serialize, Clone)]
@@ -67,7 +70,11 @@ pub fn run(
         }
     }
 
-    if has_fixes {
+    // A rewrite that could not reach its document is not a successful run, even
+    // though the plan named fixes to make.
+    let failed = output.relation_fixes.iter().any(|r| r.error.is_some());
+
+    if has_fixes && !failed {
         0
     } else {
         1
@@ -107,6 +114,71 @@ pub fn run_config_json(root: &Path, dry_run: bool, fs: &dyn FileSystem) -> Strin
 pub fn run_config_human(root: &Path, dry_run: bool, fs: &dyn FileSystem) -> String {
     let result = collect_config_fixes(root, dry_run, fs).unwrap();
     format_config_human(&result, dry_run)
+}
+
+/// Entry point for `fix --governs`: rewrite every rotted `governs` glob to the
+/// `suggested_glob` its `governs-no-match` finding carried. Returns the process
+/// exit code.
+///
+/// 0 when nothing needed repairing -- a repo with no rotted pin is the healthy
+/// case, not a failure. Bare `fix` reports "nothing to fix" as 1; this sub-mode
+/// is what a repair script runs unconditionally, so it does not. 1 when a
+/// rewrite could not reach its document, matching `run_config`: the caller asked
+/// for a repair and did not get one.
+pub fn run_governs(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: Box<dyn GitRefOps>,
+    dry_run: bool,
+    json: bool,
+    fs: &dyn FileSystem,
+) -> i32 {
+    let rewrites = collect_governs_fixes(root, store, config, git, dry_run, fs);
+
+    if json {
+        println!("{}", governs_json(&rewrites));
+    } else {
+        let human = format_governs_human(&rewrites, dry_run);
+        if !human.is_empty() {
+            print!("{}", human);
+        }
+    }
+
+    if rewrites.iter().any(|r| r.error.is_some()) {
+        1
+    } else {
+        0
+    }
+}
+
+fn governs_json(rewrites: &[GovernsFixResult]) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({ "governs": rewrites })).unwrap()
+}
+
+pub fn run_governs_json(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: Box<dyn GitRefOps>,
+    dry_run: bool,
+    fs: &dyn FileSystem,
+) -> String {
+    governs_json(&collect_governs_fixes(
+        root, store, config, git, dry_run, fs,
+    ))
+}
+
+pub fn run_governs_human(
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: Box<dyn GitRefOps>,
+    dry_run: bool,
+    fs: &dyn FileSystem,
+) -> String {
+    let rewrites = collect_governs_fixes(root, store, config, git, dry_run, fs);
+    format_governs_human(&rewrites, dry_run)
 }
 
 #[allow(clippy::too_many_arguments)]

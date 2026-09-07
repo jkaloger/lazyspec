@@ -340,6 +340,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | `fix [paths] [--dry-run] [--type X]`                                                              | Fix documents with broken or incomplete frontmatter; `--type` filters to a single document type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `fix --renumber <sqids\|incremental> [--type X] [--dry-run]`                                      | Renumber all documents to the given format; `--type` filters to a single document type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `fix --config [--dry-run]`                                                                        | Repair `.lazyspec.toml`: add the missing standard relationships and lifecycles, and translate `[[rules]]` into `[[edges]]` (destructive — see _Migrating an existing config_)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `fix --governs [--dry-run]`                                                                       | Rewrite every `governs` glob that matches nothing to the `suggested_glob` its finding carried; leaves `reviewed` alone (see _Governed files_)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `completions <shell>`                                                                             | Generate a shell completion script (bash, elvish, fish, powershell, zsh)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `pin <id>`                                                                                        | Pin blob hashes onto `@ref` directives and stamp `reviewed` with the current `HEAD`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `fetch [--type X]`                                                                                | Fetch remote documents into the cache (`github-issues`, `github-milestones`, `git-ref`, `clickup-tasks` types)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -936,6 +937,33 @@ Both fields are empty and `null` when the document declares no `reviewed` — th
 ```sh
 lazyspec validate --json | jq '.warnings | map(select(.rule == "governs-no-match") | {glob, suggested_glob, renamed})'
 ```
+
+`lazyspec fix --governs` applies those suggestions. Each rotted glob carrying a `suggested_glob` is replaced by it in the document's frontmatter; the document's other pins, its `reviewed` anchor, and every other field are left exactly as they were. `reviewed` staying put is deliberate: the repair moves the pin, not the claim that the document was checked against the code, so a staleness check still sees the drift. A finding with no suggestion — no `reviewed` anchor, a deletion rather than a move, a `reviewed` commit git cannot read — is skipped, not an error, and `governs-unowned` findings are not its business. Nothing is chosen interactively: the whole repair lands in one reviewable diff, and a suggestion that over-widened is narrowed by editing that diff.
+
+```sh
+lazyspec fix --governs --dry-run  # print each rewrite without writing
+lazyspec fix --governs            # apply them
+```
+
+`fix --governs --json` prints one object with a `governs` array, one entry per rewrite:
+
+```json
+{
+  "governs": [
+    {
+      "path": "docs/specs/SPEC-001-context.md",
+      "old_glob": "src/engine/ctx/**",
+      "new_glob": "src/engine/context/**",
+      "written": true,
+      "error": null
+    }
+  ]
+}
+```
+
+`written` is `false` under `--dry-run`, and for a document whose frontmatter could not be rewritten; `error` tells the two apart, carrying the reason for a failed write and `null` otherwise. Human output says `Would repin` for a dry run, `Repinned` for a write that landed, and `error: could not repin <path>: <reason>` for one that did not.
+
+A run with nothing to repair prints an empty array and exits 0; unlike bare `fix`, no rotted pin is a healthy repo rather than a failure. A run where any rewrite failed to reach its document exits 1.
 
 The optional `[governs]` table configures the code root and the unowned-file check:
 

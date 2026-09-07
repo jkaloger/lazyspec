@@ -306,6 +306,9 @@ pub enum Commands {
         /// Repair `.lazyspec.toml` instead of documents (injects missing standard relationships/edges)
         #[arg(long)]
         config: bool,
+        /// Rewrite every `governs` glob that matches nothing to its suggested replacement
+        #[arg(long)]
+        governs: bool,
     },
     /// Generate shell completion scripts
     Completions {

@@ -595,10 +595,24 @@ fn main() -> anyhow::Result<()> {
             renumber,
             doc_type,
             config: _,
+            governs,
         }) => {
             let store = Store::load(&cwd, &config)?;
             let fs = lazyspec::engine::fs::RealFileSystem;
-            if let Some(format) = renumber {
+            if governs {
+                let exit_code = lazyspec::cli::fix::run_governs(
+                    &cwd,
+                    &store,
+                    &config,
+                    Box::new(lazyspec::engine::git_ref::GitCli),
+                    dry_run,
+                    json,
+                    &fs,
+                );
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            } else if let Some(format) = renumber {
                 let exit_code = lazyspec::cli::fix::run_renumber(
                     &cwd,
                     &store,

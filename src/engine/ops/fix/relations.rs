@@ -6,7 +6,7 @@ use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
-use super::RelationFixResult;
+use super::{record_write, RelationFixResult};
 
 fn is_path_target(target: &str) -> bool {
     target.contains('/') || target.ends_with(".md")
@@ -65,9 +65,9 @@ pub(super) fn collect_relation_fixes(
         }
 
         let full_path = root.join(&doc.path);
-        let written = if !dry_run {
-            let targets = path_targets.clone();
-            let res = rewrite_frontmatter(&full_path, fs, |value| {
+        let targets = path_targets.clone();
+        let (written, error) = record_write(dry_run, || {
+            rewrite_frontmatter(&full_path, fs, |value| {
                 if let Some(related_seq) =
                     value.get_mut("related").and_then(|v| v.as_sequence_mut())
                 {
@@ -107,19 +107,15 @@ pub(super) fn collect_relation_fixes(
                     });
                 }
                 Ok(())
-            });
-            res.is_ok()
-        } else {
-            false
-        };
-
-        let replacements: Vec<(String, String)> = path_targets;
+            })
+        });
 
         results.push(RelationFixResult {
             path: doc.path.display().to_string(),
-            replacements,
+            replacements: path_targets,
             deduped,
             written,
+            error,
         });
     }
 
@@ -198,6 +194,66 @@ mod tests {
         )
         .unwrap();
         rfc_path
+    }
+
+    /// A filesystem whose writes always fail: a read-only checkout, a
+    /// permission the process does not have. Reads pass through, so the
+    /// document still loads and still plans its fix.
+    struct UnwritableFs;
+
+    impl crate::engine::fs::FileSystem for UnwritableFs {
+        fn write(&self, path: &std::path::Path, _contents: &str) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("permission denied: {}", path.display()))
+        }
+        fn read_to_string(&self, path: &std::path::Path) -> anyhow::Result<String> {
+            RealFileSystem.read_to_string(path)
+        }
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+            RealFileSystem.rename(from, to)
+        }
+        fn read_dir(&self, path: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            RealFileSystem.read_dir(path)
+        }
+        fn exists(&self, path: &std::path::Path) -> bool {
+            RealFileSystem.exists(path)
+        }
+        fn create_dir_all(&self, path: &std::path::Path) -> anyhow::Result<()> {
+            RealFileSystem.create_dir_all(path)
+        }
+        fn is_dir(&self, path: &std::path::Path) -> bool {
+            RealFileSystem.is_dir(path)
+        }
+    }
+
+    /// A write that failed must say so. `written: false` alone is what a dry run
+    /// reports too, and the caller cannot tell the two apart from it
+    /// (DICTUM-006).
+    #[test]
+    fn a_failed_write_carries_its_reason() {
+        let root = tmp_root("failed_write");
+        let config = gh_config_with_rfc_type();
+        seed_cache(
+            &root,
+            "related:\n- implements: STORY-001\n- implements: STORY-001\n",
+        );
+
+        let store = Store::load(&root, &config).unwrap();
+
+        let results = super::collect_relation_fixes(&root, &store, false, &UnwritableFs);
+
+        let result = results
+            .iter()
+            .find(|r| r.path.contains("RFC-001"))
+            .expect("expected a RelationFixResult for the seeded RFC");
+        assert!(!result.written);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("permission denied")),
+            "the reason must survive, got: {:?}",
+            result.error
+        );
     }
 
     fn count_implements_story_001(content: &str) -> usize {
