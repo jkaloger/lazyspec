@@ -1,7 +1,7 @@
 ---
 title: Find the documents that govern a file
 type: story
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

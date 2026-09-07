@@ -1,7 +1,7 @@
 ---
 title: Repair a pin after a module rename
 type: story
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
