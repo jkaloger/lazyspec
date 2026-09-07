@@ -78,6 +78,34 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// `path` expressed relative to the code root that `governs` globs are matched
+/// against, or `None` when it falls outside that root. A relative `path` is
+/// taken as relative to the docs root.
+///
+/// Free rather than a method so [`SearchCorpus`], which owns a snapshot of the
+/// governs data instead of borrowing the store, matches paths through exactly
+/// the same arithmetic as [`Store::governing`].
+fn relative_to_governs_root(root: &Path, governs_root: &Path, path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        normalize(path)
+    } else {
+        normalize(&root.join(path))
+    };
+    absolute
+        .strip_prefix(governs_root)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+/// The first declared glob of `globs` matching `relative`. Search wants one
+/// result per document, where [`Store::governing`] reports a row per glob.
+fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Option<&'a str> {
+    globs
+        .iter()
+        .find(|(_, matcher)| matcher.is_match(relative))
+        .map(|(entry, _)| entry.as_str())
+}
+
 impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
         let git_cli = crate::engine::git_ref::GitCli;
@@ -185,7 +213,7 @@ impl Store {
     /// A linear walk over the pinned documents. There is no index until there is
     /// a measurement saying one is needed (convention principle 6).
     pub fn governing(&self, path: &Path) -> Vec<(&DocMeta, &str)> {
-        let Some(relative) = self.relative_to_governs_root(path) else {
+        let Some(relative) = relative_to_governs_root(&self.root, &self.governs_root, path) else {
             return Vec::new();
         };
 
@@ -202,18 +230,6 @@ impl Store {
             .collect();
         matches.sort_by(|(a, ag), (b, bg)| (&a.path, ag).cmp(&(&b.path, bg)));
         matches
-    }
-
-    fn relative_to_governs_root(&self, path: &Path) -> Option<PathBuf> {
-        let absolute = if path.is_absolute() {
-            normalize(path)
-        } else {
-            normalize(&self.root.join(path))
-        };
-        absolute
-            .strip_prefix(&self.governs_root)
-            .ok()
-            .map(Path::to_path_buf)
     }
 
     pub fn list(&self, filter: &Filter) -> Vec<&DocMeta> {
@@ -444,6 +460,7 @@ impl Store {
         let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
         let mut buf: Vec<char> = Vec::new();
         let mut results = Vec::new();
+        let as_path = relative_to_governs_root(&self.root, &self.governs_root, Path::new(query));
 
         for meta in self.docs.values() {
             let body = self.cached_or_read_body(&meta.path, fs);
@@ -456,6 +473,9 @@ impl Store {
                 &meta.tags,
                 &meta.path,
                 body.as_deref(),
+                as_path
+                    .as_deref()
+                    .and_then(|rel| matching_glob(self.governs_globs.get(&meta.path)?, rel)),
             ) {
                 results.push(SearchResult {
                     doc: meta,
@@ -489,7 +509,12 @@ impl Store {
                 body: self.cached_or_read_body(&meta.path, fs),
             })
             .collect();
-        SearchCorpus { docs }
+        SearchCorpus {
+            docs,
+            root: self.root.clone(),
+            governs_root: self.governs_root.clone(),
+            governs_globs: self.governs_globs.clone(),
+        }
     }
 
     /// Body text for `path`, served from the in-memory body cache when present
@@ -513,6 +538,11 @@ impl Store {
 /// score floor). Strict `>` keeps the earliest field on ties, so field
 /// selection is deterministic. Shared by [`Store::search`] and
 /// [`SearchCorpus::search`] so both paths rank identically.
+///
+/// `governs_glob` is the document's `governs` entry that matches the query read
+/// as a file path (RFC-068). It is a glob match, not a fuzzy one, so it takes
+/// the maximum score: an exact answer outranks any text match, and a document
+/// matching both a title and a path still yields one result.
 #[allow(clippy::too_many_arguments)]
 fn score_doc_fields(
     pattern: &Pattern,
@@ -523,6 +553,7 @@ fn score_doc_fields(
     tags: &[String],
     path: &Path,
     body: Option<&str>,
+    governs_glob: Option<&str>,
 ) -> Option<(u32, &'static str, String)> {
     let mut best: Option<(u32, &'static str, String)> = None;
 
@@ -531,6 +562,10 @@ fn score_doc_fields(
             best = Some((score, field, snippet()));
         }
     };
+
+    if let Some(glob) = governs_glob {
+        consider(u32::MAX, "governs", &|| glob.to_string());
+    }
 
     if let Some(score) = pattern.score(Utf32Str::new(title, buf), matcher) {
         consider(score, "title", &|| title.to_string());
@@ -572,6 +607,12 @@ struct CorpusDoc {
 #[derive(Clone)]
 pub struct SearchCorpus {
     docs: Vec<CorpusDoc>,
+    /// The docs root and code root, plus every document's compiled `governs`
+    /// globs: what [`Store::governing`] needs, owned rather than borrowed, so a
+    /// query read as a file path resolves the same way off the UI thread.
+    root: PathBuf,
+    governs_root: PathBuf,
+    governs_globs: HashMap<PathBuf, Vec<(String, GlobMatcher)>>,
 }
 
 /// [`SearchResult`] without the `&DocMeta` borrow: what a corpus search can
@@ -592,6 +633,7 @@ impl SearchCorpus {
         let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
         let mut buf: Vec<char> = Vec::new();
         let mut results = Vec::new();
+        let as_path = relative_to_governs_root(&self.root, &self.governs_root, Path::new(query));
 
         for doc in &self.docs {
             if let Some((score, match_field, snippet)) = score_doc_fields(
@@ -603,6 +645,9 @@ impl SearchCorpus {
                 &doc.tags,
                 &doc.path,
                 doc.body.as_deref(),
+                as_path
+                    .as_deref()
+                    .and_then(|rel| matching_glob(self.governs_globs.get(&doc.path)?, rel)),
             ) {
                 results.push(CorpusSearchResult {
                     path: doc.path.clone(),
@@ -1895,6 +1940,104 @@ mod tests {
                 store.governing(Path::new("src/engine/store.rs")).is_empty(),
                 "the same relative path under the docs repo is outside the code root"
             );
+        }
+
+        /// ITERATION-417: search reads its query as a file path too, so a path
+        /// typed into the TUI or web search box lists its governing documents.
+        /// `Store::search` is the seam the CLI and web share; `SearchCorpus`
+        /// (the TUI's) is covered by its own test below.
+        mod search {
+            use super::*;
+
+            /// The only doc's title, path and body are chosen so this query
+            /// cannot fuzzy-match anything: the sole result is the glob match.
+            #[test]
+            fn a_query_that_is_a_governed_path_returns_the_governing_document() {
+                let (_tmp, store) = load(
+                    &[(
+                        "docs/rfcs/RFC-001-engine.md",
+                        &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                    )],
+                    "",
+                    &Config::default(),
+                );
+
+                let results = store.search("src/engine/store.rs", &RealFileSystem);
+
+                assert_eq!(results.len(), 1, "got {results:?}");
+                assert_eq!(results[0].doc.id, "RFC-001");
+                assert_eq!(results[0].match_field, "governs");
+                assert_eq!(results[0].snippet, "src/engine/**");
+            }
+
+            #[test]
+            fn path_matches_are_additive_to_text_matches() {
+                let (_tmp, store) = load(
+                    &[
+                        (
+                            "docs/rfcs/RFC-001-engine.md",
+                            &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                        ),
+                        (
+                            "docs/rfcs/RFC-002-notes.md",
+                            &pinned_doc("src/engine/store.rs notes", ""),
+                        ),
+                    ],
+                    "",
+                    &Config::default(),
+                );
+
+                let results = store.search("src/engine/store.rs", &RealFileSystem);
+                let hits: Vec<(&str, &str)> = results
+                    .iter()
+                    .map(|r| (r.doc.id.as_str(), r.match_field))
+                    .collect();
+
+                assert_eq!(hits, vec![("RFC-001", "governs"), ("RFC-002", "title")]);
+            }
+
+            #[test]
+            fn a_document_matching_both_a_title_and_a_path_appears_once() {
+                let (_tmp, store) = load(
+                    &[(
+                        "docs/rfcs/RFC-001-engine.md",
+                        &pinned_doc("src/engine/store.rs", "governs:\n  - src/engine/**"),
+                    )],
+                    "",
+                    &Config::default(),
+                );
+
+                let results = store.search("src/engine/store.rs", &RealFileSystem);
+
+                assert_eq!(results.len(), 1, "got {results:?}");
+                assert_eq!(results[0].match_field, "governs");
+            }
+
+            /// The TUI searches an owned [`SearchCorpus`] snapshot rather than
+            /// the borrowed store, so it needs its own proof that the snapshot
+            /// carries the pins.
+            #[test]
+            fn the_corpus_snapshot_matches_paths_like_the_store() {
+                let (_tmp, store) = load(
+                    &[(
+                        "docs/rfcs/RFC-001-engine.md",
+                        &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                    )],
+                    "",
+                    &Config::default(),
+                );
+
+                let results = store
+                    .search_corpus(&RealFileSystem)
+                    .search("src/engine/store.rs");
+
+                assert_eq!(results.len(), 1, "got {results:?}");
+                assert_eq!(
+                    results[0].path,
+                    PathBuf::from("docs/rfcs/RFC-001-engine.md")
+                );
+                assert_eq!(results[0].match_field, "governs");
+            }
         }
     }
 }

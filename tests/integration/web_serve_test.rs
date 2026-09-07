@@ -484,6 +484,62 @@ async fn search_no_match_renders_empty_state() {
     );
 }
 
+/// An rfc doc carrying `governs_block` verbatim, so a search test can pin the
+/// code a document claims (RFC-068).
+fn pinned_rfc(title: &str, governs_block: &str) -> String {
+    format!(
+        "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: \"t\"\ndate: 2026-04-01\ntags: []\n{governs_block}\n---\n\nunrelated body\n"
+    )
+}
+
+// AC (STORY-269): a file path typed into the web search box lists every
+// document whose `governs` globs match it, additive to the text matches.
+#[tokio::test]
+async fn search_lists_documents_governing_a_queried_file_path() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-engine.md",
+        &pinned_rfc("Engine", "governs:\n  - src/engine/**"),
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-002-store.md",
+        &pinned_rfc("Store", "governs:\n  - src/**/store.rs"),
+    );
+    fixture.write_doc(
+        "docs/rfcs/RFC-003-notes.md",
+        &pinned_rfc("src/engine/store.rs notes", ""),
+    );
+    fixture.write_rfc("RFC-004-other.md", "Unrelated title", "draft");
+
+    let (status, body) = get(store(&fixture), "/search?q=src/engine/store.rs").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ids_in_order(&body),
+        vec!["RFC-001", "RFC-002", "RFC-003"],
+        "expected both governing docs plus the title match:\n{body}"
+    );
+}
+
+// AC (STORY-269): a path no glob matches stays an ordinary query -- a pinned
+// document is not offered as a consolation match.
+#[tokio::test]
+async fn search_no_glob_match_for_a_path_renders_empty_state() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-001-engine.md",
+        &pinned_rfc("Engine", "governs:\n  - src/engine/**"),
+    );
+
+    let (status, body) = get(store(&fixture), "/search?q=src/cli/show.rs").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.to_lowercase().contains("no results"),
+        "expected an empty-result state:\n{body}"
+    );
+}
+
 #[tokio::test]
 async fn list_page_has_search_input_targeting_search_route() {
     let fixture = TestFixture::new();

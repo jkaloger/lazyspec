@@ -5609,6 +5609,14 @@ mod tests {
         )
     }
 
+    /// An rfc doc carrying `governs_block` verbatim in its frontmatter, so a
+    /// search test can pin the code a document claims (RFC-068).
+    fn pinned_doc(title: &str, governs_block: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{governs_block}\n---\n\nunrelated body\n"
+        )
+    }
+
     /// Titles of the current `search_results`, in result order.
     fn result_titles(app: &App) -> Vec<String> {
         app.search_results
@@ -5675,6 +5683,54 @@ mod tests {
             app_with_store(&[("docs/rfcs/RFC-001-a.md", &titled_doc("hello", "world body"))]);
 
         app.search_query = "zzqqww".to_string();
+        app.run_search_now();
+
+        assert!(app.search_results.is_empty());
+    }
+
+    // AC (STORY-269): a file path typed into `/` lists every document whose
+    // `governs` globs match it, additive to the ordinary text matches -- the
+    // lookup `why <path>` gives the CLI, without leaving the TUI.
+    #[test]
+    fn update_search_lists_documents_governing_a_typed_file_path() {
+        let (_tmp, mut app) = app_with_store(&[
+            (
+                "docs/rfcs/RFC-001-a.md",
+                &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+            ),
+            (
+                "docs/rfcs/RFC-002-b.md",
+                &pinned_doc("Store", "governs:\n  - src/**/store.rs"),
+            ),
+            (
+                "docs/rfcs/RFC-003-c.md",
+                &pinned_doc("src/engine/store.rs notes", ""),
+            ),
+        ]);
+
+        app.search_query = "src/engine/store.rs".to_string();
+        app.run_search_now();
+
+        assert_eq!(
+            result_titles(&app),
+            vec![
+                "Engine".to_string(),
+                "Store".to_string(),
+                "src/engine/store.rs notes".to_string(),
+            ]
+        );
+    }
+
+    // AC (STORY-269): a path no glob matches is just an ordinary query -- the
+    // pinned document is not offered as a consolation match.
+    #[test]
+    fn update_search_lists_nothing_for_a_path_no_glob_governs() {
+        let (_tmp, mut app) = app_with_store(&[(
+            "docs/rfcs/RFC-001-a.md",
+            &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+        )]);
+
+        app.search_query = "src/cli/show.rs".to_string();
         app.run_search_now();
 
         assert!(app.search_results.is_empty());
