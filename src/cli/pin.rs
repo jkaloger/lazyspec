@@ -2,6 +2,7 @@ use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::engine::certification::compute_blob_hash_for_spec;
 use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::{parse_refs, Ref};
 use crate::engine::store::{ResolveError, Store};
 use anyhow::{Context, Result};
@@ -27,6 +28,8 @@ pub struct PinResult {
     pub pinned: Vec<PinnedRef>,
     pub errors: Vec<PinError>,
     pub new_body: String,
+    /// The commit the document was stamped as reviewed against.
+    pub reviewed: String,
 }
 
 fn ref_target(r: &Ref) -> String {
@@ -36,8 +39,16 @@ fn ref_target(r: &Ref) -> String {
     }
 }
 
-/// Core pin logic: parse refs, compute hashes, rewrite body.
-pub fn pin_document(root: &Path, config: &Config, spec_path: &str, body: &str) -> PinResult {
+/// Core pin logic: parse refs, compute hashes, rewrite body. `reviewed` is the
+/// commit the caller read from `HEAD`; it rides on the result so one record
+/// describes the whole run.
+pub fn pin_document(
+    root: &Path,
+    config: &Config,
+    spec_path: &str,
+    body: &str,
+    reviewed: &str,
+) -> PinResult {
     let refs = parse_refs(body);
     let mut pinned = Vec::new();
     let mut errors = Vec::new();
@@ -75,10 +86,51 @@ pub fn pin_document(root: &Path, config: &Config, spec_path: &str, body: &str) -
         pinned,
         errors,
         new_body,
+        reviewed: reviewed.to_string(),
     }
 }
 
-pub fn run(store: &Store, config: &Config, id: &str, json: bool) -> Result<()> {
+fn json_output(result: &PinResult) -> serde_json::Value {
+    serde_json::json!({
+        "pinned": result.pinned.iter().map(|p| serde_json::json!({
+            "target": p.target,
+            "hash": p.hash,
+        })).collect::<Vec<_>>(),
+        "errors": result.errors.iter().map(|e| serde_json::json!({
+            "target": e.target,
+            "message": e.message,
+        })).collect::<Vec<_>>(),
+        "reviewed": result.reviewed,
+    })
+}
+
+/// Stamp `reviewed: <sha>` onto the document's frontmatter, through the YAML
+/// writer `update` and `set_provenance` use rather than a textual edit.
+fn stamp_reviewed(full_path: &Path, sha: &str) -> Result<()> {
+    crate::engine::document::rewrite_frontmatter(
+        full_path,
+        &crate::engine::fs::RealFileSystem,
+        |val| {
+            let map = val
+                .as_mapping_mut()
+                .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+            map.insert(
+                serde_yaml::Value::String("reviewed".to_string()),
+                serde_yaml::Value::String(sha.to_string()),
+            );
+            Ok(())
+        },
+    )
+    .with_context(|| format!("failed to stamp reviewed in {}", full_path.display()))
+}
+
+pub fn run(
+    store: &Store,
+    config: &Config,
+    git: &dyn GitRefOps,
+    id: &str,
+    json: bool,
+) -> Result<()> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -107,6 +159,11 @@ pub fn run(store: &Store, config: &Config, id: &str, json: bool) -> Result<()> {
     };
 
     let root = store.root();
+
+    // Read HEAD before anything is written, so a repo whose HEAD cannot be read
+    // fails with the document byte-identical.
+    let reviewed = git.head(root).context("failed to read HEAD")?;
+
     let full_path = root.join(&doc.path);
     let spec_path = doc.path.to_string_lossy();
 
@@ -119,7 +176,7 @@ pub fn run(store: &Store, config: &Config, id: &str, json: bool) -> Result<()> {
         .with_context(|| format!("failed to parse frontmatter in {}", full_path.display()))?;
 
     // Pin the refs in the body
-    let result = pin_document(root, config, &spec_path, &body);
+    let result = pin_document(root, config, &spec_path, &body, &reviewed);
 
     // Rewrite the file: replace the body portion in the original content
     if !result.pinned.is_empty() {
@@ -130,20 +187,13 @@ pub fn run(store: &Store, config: &Config, id: &str, json: bool) -> Result<()> {
             .with_context(|| format!("failed to write {}", full_path.display()))?;
     }
 
+    stamp_reviewed(&full_path, &result.reviewed)?;
+
     // Output results
     if json {
-        let output = serde_json::json!({
-            "pinned": result.pinned.iter().map(|p| serde_json::json!({
-                "target": p.target,
-                "hash": p.hash,
-            })).collect::<Vec<_>>(),
-            "errors": result.errors.iter().map(|e| serde_json::json!({
-                "target": e.target,
-                "message": e.message,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", serde_json::to_string_pretty(&json_output(&result))?);
     } else {
+        eprintln!("Reviewed at {}", result.reviewed);
         let pinned_count = result.pinned.len();
         let error_count = result.errors.len();
         if pinned_count > 0 || error_count > 0 {
@@ -190,6 +240,7 @@ fn find_body_start(content: &str) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::engine::config::Config;
+    use crate::engine::git_ref::test_support::{MockGitRefClient, FAKE_HEAD};
     use crate::engine::hashing;
     use std::fs;
     use std::process::Command;
@@ -234,7 +285,7 @@ mod tests {
         fs::write(root.join("hello.txt"), file_content).unwrap();
 
         let body = "Some text\n\n@ref hello.txt\n\nMore text\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 1);
         assert_eq!(result.errors.len(), 0);
@@ -264,7 +315,7 @@ mod tests {
         fs::write(root.join("foo.rs"), rust_source).unwrap();
 
         let body = "Spec body\n\n@ref foo.rs#MyStruct\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 1);
         assert_eq!(result.errors.len(), 0);
@@ -290,7 +341,7 @@ mod tests {
         fs::write(root.join("data.txt"), file_content).unwrap();
 
         let body = "Text before\n\n@ref data.txt@{blob:aabb0011}\n\nText after\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 1);
         assert_eq!(result.errors.len(), 0);
@@ -313,7 +364,7 @@ mod tests {
         let config = Config::default();
 
         let body = "See @ref nonexistent.rs for details\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 0);
         assert_eq!(result.errors.len(), 1);
@@ -333,7 +384,7 @@ mod tests {
         fs::write(root.join("real_file.rs"), rust_source).unwrap();
 
         let body = "See @ref real_file.rs#NoSuchSymbol\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 0);
         assert_eq!(result.errors.len(), 1);
@@ -353,7 +404,7 @@ mod tests {
         fs::write(root.join("valid.txt"), file_content).unwrap();
 
         let body = "First: @ref valid.txt\nSecond: @ref missing.txt\n";
-        let result = pin_document(root, &config, "docs/specs/SPEC-001", body);
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
 
         assert_eq!(result.pinned.len(), 1);
         assert_eq!(result.errors.len(), 1);
@@ -368,5 +419,124 @@ mod tests {
 
         // Invalid ref should be unchanged
         assert!(result.new_body.contains("@ref missing.txt"));
+    }
+
+    fn write_rfc(
+        root: &Path,
+        filename: &str,
+        frontmatter_extra: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let dir = root.join("docs/rfcs");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(filename);
+        fs::write(
+            &path,
+            format!(
+                "---\ntitle: \"Pinned\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n{}---\n{}",
+                frontmatter_extra, body
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn reviewed_of(root: &Path) -> Option<String> {
+        let config = Config::default();
+        let store = Store::load(root, &config).unwrap();
+        store.resolve_shorthand("RFC-001").unwrap().reviewed.clone()
+    }
+
+    fn pin_rfc(root: &Path, git: &dyn GitRefOps) -> Result<()> {
+        let config = Config::default();
+        let store = Store::load(root, &config).unwrap();
+        run(&store, &config, git, "RFC-001", false)
+    }
+
+    // AC1: a document with no `reviewed` gains the sha HEAD resolves to.
+    #[test]
+    fn run_stamps_reviewed_on_a_document_that_had_none() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        write_rfc(root, "RFC-001-pinned.md", "", "No refs here.\n");
+
+        pin_rfc(root, &MockGitRefClient::new()).unwrap();
+
+        assert_eq!(reviewed_of(root).as_deref(), Some(FAKE_HEAD));
+    }
+
+    // AC2: an existing `reviewed` is replaced, not appended to.
+    #[test]
+    fn run_replaces_a_stale_reviewed() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        let path = write_rfc(
+            root,
+            "RFC-001-pinned.md",
+            "reviewed: deadbeefdeadbeef\n",
+            "No refs here.\n",
+        );
+
+        pin_rfc(root, &MockGitRefClient::new()).unwrap();
+
+        assert_eq!(reviewed_of(root).as_deref(), Some(FAKE_HEAD));
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(
+            !updated.contains("deadbeefdeadbeef"),
+            "stale sha should be gone: {}",
+            updated
+        );
+    }
+
+    // AC3: blob hashes and `reviewed` land in the same run.
+    #[test]
+    fn run_pins_blob_hashes_and_stamps_reviewed_together() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        fs::write(root.join("hello.txt"), "hello world\n").unwrap();
+        let path = write_rfc(root, "RFC-001-pinned.md", "", "See @ref hello.txt\n");
+
+        pin_rfc(root, &MockGitRefClient::new()).unwrap();
+
+        let expected_hash = hashing::hash_file(&root.join("hello.txt")).unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(
+            updated.contains(&format!("@ref hello.txt@{{blob:{}}}", expected_hash)),
+            "body should carry the blob hash: {}",
+            updated
+        );
+        assert_eq!(reviewed_of(root).as_deref(), Some(FAKE_HEAD));
+    }
+
+    // AC4: the sha is on the result, so `--json` reports it rather than re-deriving it.
+    #[test]
+    fn json_output_carries_the_reviewed_sha() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        let result = pin_document(
+            root,
+            &Config::default(),
+            "docs/rfcs/RFC-001-pinned.md",
+            "No refs here.\n",
+            FAKE_HEAD,
+        );
+
+        assert_eq!(json_output(&result)["reviewed"], FAKE_HEAD);
+    }
+
+    // AC5: an unreadable HEAD is reported and nothing is written.
+    #[test]
+    fn run_reports_an_unreadable_head_and_leaves_the_file_untouched() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        fs::write(root.join("hello.txt"), "hello world\n").unwrap();
+        let path = write_rfc(root, "RFC-001-pinned.md", "", "See @ref hello.txt\n");
+        let before = fs::read_to_string(&path).unwrap();
+
+        let git = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
+        let err = pin_rfc(root, &git).unwrap_err();
+
+        assert!(format!("{:#}", err).contains("no HEAD"), "got: {:#}", err);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 }

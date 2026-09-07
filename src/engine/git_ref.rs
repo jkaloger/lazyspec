@@ -46,6 +46,9 @@ pub trait GitRefOps {
         expected_old: Option<&str>,
     ) -> Result<()>;
     fn read_commit_timestamp(&self, root: &Path, sha: &str) -> Result<DateTime<Utc>>;
+    /// The commit `HEAD` points at. Errors where `HEAD` cannot be read at all --
+    /// a repository with no commits, or a directory that is not one.
+    fn head(&self, root: &Path) -> Result<String>;
 }
 
 /// The git-ref client seam as an object-safe trait for `GitRefStore`'s boxed
@@ -327,6 +330,13 @@ impl GitRefOps for GitCli {
         }
         bail!("no committer line found in commit {}", sha)
     }
+
+    fn head(&self, root: &Path) -> Result<String> {
+        let Some(sha) = self.resolve_ref(root, "HEAD")? else {
+            bail!("could not read HEAD in {}", root.display());
+        };
+        Ok(sha)
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +346,9 @@ pub mod test_support {
     use std::cell::RefCell;
 
     type RefList = Vec<(String, String)>;
+
+    /// What the fake's `head` returns when no result was queued.
+    pub const FAKE_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
     pub struct MockGitRefClient {
         pub resolve_results: RefCell<Vec<Result<Option<String>>>>,
@@ -351,6 +364,7 @@ pub mod test_support {
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
         pub push_with_lease_results: RefCell<Vec<Result<()>>>,
         pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
+        pub head_results: RefCell<Vec<Result<String>>>,
         pub calls: RefCell<Vec<String>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
@@ -380,6 +394,7 @@ pub mod test_support {
                 delete_remote_results: RefCell::new(vec![]),
                 push_with_lease_results: RefCell::new(vec![]),
                 read_commit_timestamp_results: RefCell::new(vec![]),
+                head_results: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
                 committed_blobs: RefCell::new(vec![]),
             }
@@ -447,6 +462,11 @@ pub mod test_support {
 
         pub fn with_read_commit_timestamp_result(self, result: Result<DateTime<Utc>>) -> Self {
             self.read_commit_timestamp_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_head_result(self, result: Result<String>) -> Self {
+            self.head_results.borrow_mut().push(result);
             self
         }
 
@@ -594,6 +614,16 @@ pub mod test_support {
             let mut q = self.read_commit_timestamp_results.borrow_mut();
             if q.is_empty() {
                 bail!("no read_commit_timestamp result configured")
+            } else {
+                q.remove(0)
+            }
+        }
+
+        fn head(&self, _root: &Path) -> Result<String> {
+            self.calls.borrow_mut().push("head".to_string());
+            let mut q = self.head_results.borrow_mut();
+            if q.is_empty() {
+                Ok(FAKE_HEAD.to_string())
             } else {
                 q.remove(0)
             }
@@ -781,5 +811,15 @@ mod tests {
         let result = mock.read_commit_timestamp(&dummy_root(), "abc123").unwrap();
         assert_eq!(result, ts);
         assert_eq!(mock.calls.borrow()[0], "read_commit_timestamp:abc123");
+    }
+
+    #[test]
+    fn mock_head_returns_a_fixed_sha_then_the_queued_result() {
+        use super::test_support::FAKE_HEAD;
+        let mock = MockGitRefClient::new();
+        assert_eq!(mock.head(&dummy_root()).unwrap(), FAKE_HEAD);
+
+        let mock = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
+        assert!(mock.head(&dummy_root()).is_err());
     }
 }

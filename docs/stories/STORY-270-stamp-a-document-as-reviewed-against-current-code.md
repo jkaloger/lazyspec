@@ -1,7 +1,7 @@
 ---
 title: Stamp a document as reviewed against current code
 type: story
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

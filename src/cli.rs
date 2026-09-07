@@ -322,7 +322,7 @@ pub enum Commands {
         #[arg(long)]
         warnings: bool,
     },
-    /// Pin blob hashes onto @ref directives in a document
+    /// Pin blob hashes onto @ref directives and stamp reviewed with the current HEAD
     Pin {
         /// Document path or shorthand ID (e.g. ITERATION-114)
         #[arg(add = ArgValueCompleter::new(completions::complete_doc_id))]

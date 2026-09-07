@@ -1,7 +1,7 @@
 ---
 title: Stamp reviewed with HEAD when pinning
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
