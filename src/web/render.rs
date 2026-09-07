@@ -153,6 +153,12 @@ pub struct DocPage {
     pub tags: Vec<TagChip>,
     /// The single assignee, omitted from the frontmatter list when unset.
     pub assignee: Option<String>,
+    /// The globs this document claims, omitted from the frontmatter list when
+    /// empty. Rendered as authored -- no matching, no file counts.
+    pub governs: Vec<String>,
+    /// The commit the document was last reviewed against, rendered as authored:
+    /// no shortening, no age. Anything derived from it is RFC-069.
+    pub reviewed: Option<String>,
     pub relations: Vec<RelationLink>,
     pub parent: Option<RelativeLink>,
     pub children: Vec<RelativeLink>,
@@ -257,6 +263,8 @@ impl DocPage {
                 })
                 .collect(),
             assignee: doc.assignee.clone(),
+            governs: doc.governs.clone(),
+            reviewed: doc.reviewed.clone(),
             relations,
             parent,
             children,

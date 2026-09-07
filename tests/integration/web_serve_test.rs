@@ -140,6 +140,41 @@ async fn doc_page_renders_frontmatter_header_and_body_html() {
     );
 }
 
+// AC2: a pinned document's page renders both pin rows, every glob and the sha.
+#[tokio::test]
+async fn doc_page_renders_governs_and_reviewed_when_set() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/rfcs/RFC-042-page.md",
+        "---\ntitle: \"Page RFC\"\ntype: rfc\nstatus: accepted\nauthor: \"alice\"\ndate: 2026-02-03\ntags: []\ngoverns:\n  - src/engine/**\n  - src/cli/**\nreviewed: 0123456789abcdef\n---\n\nbody\n",
+    );
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-042").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<dt>governs</dt>"), "no governs row:\n{body}");
+    assert!(body.contains("src/engine/**"), "glob missing:\n{body}");
+    assert!(body.contains("src/cli/**"), "second glob missing:\n{body}");
+    assert!(
+        body.contains("<dt>reviewed</dt>"),
+        "no reviewed row:\n{body}"
+    );
+    assert!(body.contains("0123456789abcdef"), "sha missing:\n{body}");
+}
+
+// AC6: an unpinned document's page shows no empty pin rows.
+#[tokio::test]
+async fn doc_page_omits_governs_and_reviewed_when_unset() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-001-alpha.md", "Alpha RFC", "draft");
+
+    let (status, body) = get(store(&fixture), "/doc/RFC-001").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("<dt>governs</dt>"), "governs row:\n{body}");
+    assert!(!body.contains("<dt>reviewed</dt>"), "reviewed row:\n{body}");
+}
+
 #[tokio::test]
 async fn doc_page_emits_grid_container_and_status_swatch_hooks() {
     // ITERATION-243: the document-page CSS styles existing class hooks, so the

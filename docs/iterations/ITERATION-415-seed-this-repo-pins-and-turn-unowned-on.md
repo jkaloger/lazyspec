@@ -1,7 +1,7 @@
 ---
 title: Seed this repo pins and turn unowned on
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

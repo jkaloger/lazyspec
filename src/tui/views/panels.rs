@@ -1122,6 +1122,23 @@ pub(super) fn build_preview_header_lines(
         ]));
     }
 
+    // The pin rows, absent when their field is empty the way Tags and Assignee
+    // are, so an unpinned document's header is unchanged. `reviewed` renders as
+    // authored -- no shortening, no age; anything derived from it is RFC-069.
+    if !doc.governs.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw(" Governs: "),
+            Span::raw(doc.governs.join(", ")),
+        ]));
+    }
+
+    if let Some(reviewed) = &doc.reviewed {
+        lines.push(Line::from(vec![
+            Span::raw(" Reviewed: "),
+            Span::raw(reviewed.clone()),
+        ]));
+    }
+
     if !doc.provenance.is_empty() {
         let mut spans: Vec<Span<'static>> = vec![Span::raw(" Provenance: ")];
         for (idx, entry) in doc.provenance.iter().enumerate() {
@@ -3201,6 +3218,37 @@ mod tests {
         let text = line_text(prov_line);
         assert!(text.contains('X'), "should contain X, got: {}", text);
         assert!(text.contains('Y'), "should contain Y, got: {}", text);
+    }
+
+    // AC1: a pinned document's preview header carries every glob and the sha.
+    #[test]
+    fn preview_header_includes_governs_and_reviewed_when_set() {
+        let mut doc = fixture_doc_meta();
+        doc.governs = vec!["src/engine/**".to_string(), "src/cli/**".to_string()];
+        doc.reviewed = Some("0123456789abcdef".to_string());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let governs = lines
+            .iter()
+            .find(|l| line_text(l).contains("Governs:"))
+            .map(line_text)
+            .expect("governs line should be present");
+        assert!(governs.contains("src/engine/**"), "got: {}", governs);
+        assert!(governs.contains("src/cli/**"), "got: {}", governs);
+        let reviewed = lines
+            .iter()
+            .find(|l| line_text(l).contains("Reviewed:"))
+            .map(line_text)
+            .expect("reviewed line should be present");
+        assert!(reviewed.contains("0123456789abcdef"), "got: {}", reviewed);
+    }
+
+    // AC6: an unpinned document's header reads as it did before pins existed.
+    #[test]
+    fn preview_header_omits_governs_and_reviewed_when_unset() {
+        let doc = fixture_doc_meta();
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        assert!(!lines.iter().any(|l| line_text(l).contains("Governs:")));
+        assert!(!lines.iter().any(|l| line_text(l).contains("Reviewed:")));
     }
 
     #[test]
