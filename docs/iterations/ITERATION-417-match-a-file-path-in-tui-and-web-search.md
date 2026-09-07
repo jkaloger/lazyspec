@@ -1,7 +1,7 @@
 ---
 title: Match a file path in TUI and web search
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

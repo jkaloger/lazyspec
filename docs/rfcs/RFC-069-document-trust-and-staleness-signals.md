@@ -1,7 +1,7 @@
 ---
 title: Document trust and staleness signals
 type: rfc
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-04
 tags: []
