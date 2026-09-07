@@ -925,6 +925,8 @@ reviewed: 662d5533f0b1c9e4a7d2
 
 Globs are compiled when the store loads. An entry that is not a valid glob is reported as a parse error naming the document and the entry, and that document then governs nothing until the entry is fixed.
 
+A glob that compiles but matches no file under the code root is a pin the code moved out from under, and `validate` reports it as a `governs-no-match` warning naming the document and the glob. The finding is per glob rather than per document, so a document with three pins of which one is dead is reported once. It carries `path`, `glob`, and the repair fields `renamed` and `suggested_glob`, which are empty and `null`; nothing fills them yet. Its severity is fixed at warning, so it appears in `warnings` and never in `errors`. See [`validate` findings](#validate-findings).
+
 The optional `[governs]` table configures the code root and the unowned-file check:
 
 ```toml

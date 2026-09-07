@@ -2,9 +2,10 @@ use crate::engine::config::{
     AttrKind, Config, EdgeDef, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+use globset::GlobMatcher;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// The derived `Serialize` is the variant's own fields and nothing else; the
@@ -108,6 +109,15 @@ pub enum ValidationIssue {
         type_name: String,
         status_authority: String,
     },
+    /// A `governs` glob that matches no file under `[governs] root` (RFC-068):
+    /// a pin the code moved out from under. `renamed` and `suggested_glob` are
+    /// the repair data STORY-271 fills from git; empty until then.
+    GovernsNoMatch {
+        path: PathBuf,
+        glob: String,
+        renamed: Vec<(String, String)>,
+        suggested_glob: Option<String>,
+    },
 }
 
 impl ValidationIssue {
@@ -140,6 +150,7 @@ impl ValidationIssue {
             }
             ValidationIssue::StatusAuthorityWrongStore { .. } => "status-authority-wrong-store",
             ValidationIssue::StatusAuthorityNotABoard { .. } => "status-authority-not-a-board",
+            ValidationIssue::GovernsNoMatch { .. } => "governs-no-match",
         }
     }
 
@@ -399,6 +410,14 @@ impl std::fmt::Display for ValidationIssue {
                     f,
                     "status_authority = \"{}\" on type \"{}\" names no Projects v2 board; the key takes a board number (e.g. \"PROJECT-7\"), and a value that does not silently behaves as no authority at all",
                     status_authority, type_name
+                )
+            }
+            ValidationIssue::GovernsNoMatch { path, glob, .. } => {
+                write!(
+                    f,
+                    "governs glob in {}: \"{}\" matches no file",
+                    path.display(),
+                    glob
                 )
             }
         }
@@ -852,6 +871,89 @@ impl Checker for OrphanRefRule {
     }
 }
 
+pub struct GovernsNoMatchRule;
+
+/// The deepest directory the glob names literally: every leading component up
+/// to the first one carrying a metacharacter, and never the glob's last
+/// component, which may be a literal filename rather than a directory. It is
+/// where a walk looking for a match can start -- `src/engine/**` cannot match
+/// anything outside `src/engine`.
+fn literal_dir_prefix(glob: &str) -> PathBuf {
+    let components: Vec<&str> = glob.split('/').collect();
+    components[..components.len().saturating_sub(1)]
+        .iter()
+        .take_while(|c| !c.contains(['*', '?', '[', '{']))
+        .collect()
+}
+
+/// Whether any file under `root` matches `matcher`, matched on the path
+/// relative to `root` exactly as [`Store::governing`](super::store::Store::governing)
+/// does. Bounded by [`literal_dir_prefix`] and stopping at the first match, so
+/// the usual module-depth pin reads one subtree; only a glob whose very first
+/// component is a wildcard walks the whole tree. `read_dir` failing (the pin
+/// names a directory that is gone, the common case) is no match.
+///
+/// Directories are recognised by `file_type`, which does not follow symlinks,
+/// so a link cycle under `root` cannot spin the walk forever.
+fn matches_a_file(root: &Path, glob: &str, matcher: &GlobMatcher) -> bool {
+    let mut pending = vec![root.join(literal_dir_prefix(glob))];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                pending.push(entry.path());
+                continue;
+            }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            if matcher.is_match(relative) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+impl Checker for GovernsNoMatchRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        _config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        // Per glob, not per document: a document with three pins and one miss
+        // is one finding. Sorted, because `governs_globs` is a `HashMap` and
+        // the order findings print in should not be its iteration order.
+        let mut unmatched: Vec<(&PathBuf, &String)> = store
+            .governs_globs
+            .iter()
+            .filter(|(path, _)| store.docs.get(*path).is_some_and(|m| !m.validate_ignore))
+            .flat_map(|(path, globs)| globs.iter().map(move |glob| (path, glob)))
+            .filter(|(_, (glob, matcher))| !matches_a_file(&store.governs_root, glob, matcher))
+            .map(|(path, (glob, _))| (path, glob))
+            .collect();
+        unmatched.sort();
+
+        unmatched
+            .into_iter()
+            .map(|(path, glob)| {
+                (
+                    Severity::Warning,
+                    ValidationIssue::GovernsNoMatch {
+                        path: path.clone(),
+                        glob: glob.clone(),
+                        renamed: Vec::new(),
+                        suggested_glob: None,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 pub struct TypeConstraintChecker;
 
 impl Checker for TypeConstraintChecker {
@@ -1228,6 +1330,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(TypeConstraintChecker),
         Box::new(UnknownRelationshipRule),
         Box::new(AttributeSchemaChecker),
+        Box::new(GovernsNoMatchRule),
     ]
 }
 
@@ -2682,6 +2785,99 @@ mod hierarchy_from_edges_tests {
     }
 }
 
+// RFC-068: a `governs` glob that matches nothing is a rotted pin.
+#[cfg(test)]
+mod governs_no_match_tests {
+    use super::*;
+    use crate::engine::store::test_support::store_from_with_config;
+    use crate::engine::store::Store;
+
+    /// An rfc pinning `globs`, beside one real source file for a pin to hit.
+    fn store_pinning(globs: &[&str]) -> (tempfile::TempDir, Store) {
+        let entries: String = globs.iter().map(|g| format!("  - {g}\n")).collect();
+        let doc = format!(
+            "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n{entries}related: []\n---\n\nbody\n"
+        );
+        store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-engine.md", doc.as_str()),
+                ("src/engine/store.rs", "fn main() {}\n"),
+            ],
+            &Config::default(),
+        )
+    }
+
+    fn no_match_findings(globs: &[&str]) -> Vec<(String, String)> {
+        let (_tmp, store) = store_pinning(globs);
+        GovernsNoMatchRule
+            .check(&store, &Config::default())
+            .into_iter()
+            .map(|(severity, issue)| match issue {
+                ValidationIssue::GovernsNoMatch { path, glob, .. } => {
+                    assert_eq!(severity, Severity::Warning, "severity is fixed at warning");
+                    (path.display().to_string(), glob)
+                }
+                other => panic!("unexpected finding {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_glob_matching_no_file_names_the_document_and_the_glob() {
+        assert_eq!(
+            no_match_findings(&["src/nope/**"]),
+            vec![(
+                "docs/rfcs/RFC-001-engine.md".to_string(),
+                "src/nope/**".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_glob_with_a_match_is_not_reported() {
+        assert_eq!(no_match_findings(&["src/engine/**"]), Vec::new());
+    }
+
+    /// The prefix a walk starts from is never the glob's own last component,
+    /// so a pin naming one file exactly still finds it.
+    #[test]
+    fn a_glob_naming_a_single_existing_file_is_not_reported() {
+        assert_eq!(no_match_findings(&["src/engine/store.rs"]), Vec::new());
+    }
+
+    #[test]
+    fn only_the_glob_that_matches_nothing_is_reported() {
+        assert_eq!(
+            no_match_findings(&["src/engine/**", "src/gone/**", "src/**/store.rs"]),
+            vec![(
+                "docs/rfcs/RFC-001-engine.md".to_string(),
+                "src/gone/**".to_string()
+            )]
+        );
+    }
+
+    /// Registered, and in the array that carries warning severity.
+    #[test]
+    fn the_finding_reaches_validate_full_as_a_warning() {
+        let (_tmp, store) = store_pinning(&["src/nope/**"]);
+
+        let result = validate_full(&store, &Config::default());
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.rule() == "governs-no-match"),
+            "expected a governs-no-match warning, got warnings {:?}",
+            result.warnings
+        );
+        assert!(
+            !result.errors.iter().any(|e| e.rule() == "governs-no-match"),
+            "the finding is a warning, never an error"
+        );
+    }
+}
+
 #[cfg(test)]
 mod finding_shape_tests {
     use super::*;
@@ -2786,6 +2982,12 @@ mod finding_shape_tests {
             ValidationIssue::StatusAuthorityNotABoard {
                 type_name: "ticket".to_string(),
                 status_authority: "board-seven".to_string(),
+            },
+            ValidationIssue::GovernsNoMatch {
+                path: path(),
+                glob: "src/engine/ctx/**".to_string(),
+                renamed: Vec::new(),
+                suggested_glob: None,
             },
         ]
     }

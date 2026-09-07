@@ -191,4 +191,33 @@ mod tests {
             ["message", "rule"]
         );
     }
+
+    /// The repair fields (`renamed`, `suggested_glob`) ride along empty until
+    /// STORY-271 fills them; what an agent selects on today is `rule`, and what
+    /// it reads back is `path` and `glob`.
+    #[test]
+    fn run_json_gives_a_rotted_pin_its_rule_path_and_glob() {
+        let tmp = crate::engine::store::test_support::write_docs(&[(
+            "docs/rfcs/RFC-001-engine.md",
+            "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n  - src/gone/**\nrelated: []\n---\n\nbody\n",
+        )]);
+        let config = Config::default();
+        let store = Store::load(tmp.path(), &config).unwrap();
+
+        let output: serde_json::Value =
+            serde_json::from_str(&run_json(&store, &config, &[])).unwrap();
+
+        let finding = output["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["rule"] == "governs-no-match")
+            .expect("the pin matches nothing, so validate --json should carry the finding");
+        assert_eq!(finding["path"], "docs/rfcs/RFC-001-engine.md");
+        assert_eq!(finding["glob"], "src/gone/**");
+        assert_eq!(
+            finding["message"],
+            "governs glob in docs/rfcs/RFC-001-engine.md: \"src/gone/**\" matches no file"
+        );
+    }
 }
