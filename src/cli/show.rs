@@ -90,6 +90,20 @@ fn title_box(title: &str) -> String {
     format!("{}\n{}\n{}", top, mid, bot)
 }
 
+/// The `Governs:`/`Reviewed:` rows of the `show` header. Each row is absent
+/// when its field is empty, the way `Tags:` and `Assignee:` render, so an
+/// unpinned document reads exactly as it did before pins existed.
+fn pin_rows(doc: &DocMeta) -> String {
+    let mut out = String::new();
+    if !doc.governs.is_empty() {
+        out.push_str(&format!("{} {}\n", dim("Governs:"), doc.governs.join(", ")));
+    }
+    if let Some(reviewed) = &doc.reviewed {
+        out.push_str(&format!("{} {}\n", dim("Reviewed:"), bold(reviewed)));
+    }
+    out
+}
+
 pub fn run(
     store: &Store,
     id: &str,
@@ -129,6 +143,7 @@ pub fn run(
     if let Some(assignee) = &doc.assignee {
         println!("{} {}", dim("Assignee:"), bold(assignee));
     }
+    print!("{}", pin_rows(doc));
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
             println!(
@@ -407,6 +422,45 @@ mod tests {
         assert_eq!(out[0]["body"], "first");
         assert_eq!(out[0]["timestamp"], "2026-06-01T00:00:00Z");
         assert_eq!(out[1]["author"], "bob");
+    }
+
+    // STORY-265 AC5: a pinned document prints both rows, the globs joined the
+    // way `Tags:` joins.
+    #[test]
+    fn pin_rows_print_governs_and_reviewed_when_set() {
+        let mut doc = doc("spec");
+        doc.governs = vec![
+            "src/engine/context/**".to_string(),
+            "src/cli/why.rs".to_string(),
+        ];
+        doc.reviewed = Some("0123456789abcdef".to_string());
+
+        let out = pin_rows(&doc);
+        assert!(out.contains("Governs:"), "got: {out}");
+        assert!(
+            out.contains("src/engine/context/**, src/cli/why.rs"),
+            "got: {out}"
+        );
+        assert!(out.contains("Reviewed:"), "got: {out}");
+        assert!(out.contains("0123456789abcdef"), "got: {out}");
+    }
+
+    // STORY-265 AC5: an unpinned document prints neither row -- absent, not an
+    // empty row, matching how `Tags:` and `Assignee:` render.
+    #[test]
+    fn pin_rows_are_absent_when_unset() {
+        assert_eq!(pin_rows(&doc("spec")), "");
+    }
+
+    // Each row stands alone: globs with no review anchor print only `Governs:`.
+    #[test]
+    fn governs_without_reviewed_prints_only_the_governs_row() {
+        let mut doc = doc("spec");
+        doc.governs = vec!["src/engine/**".to_string()];
+
+        let out = pin_rows(&doc);
+        assert!(out.contains("Governs:"), "got: {out}");
+        assert!(!out.contains("Reviewed:"), "got: {out}");
     }
 
     // AC4: a filesystem-backed type never triggers a comment fetch.

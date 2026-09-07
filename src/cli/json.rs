@@ -44,6 +44,8 @@ pub fn doc_to_json(doc: &DocMeta) -> Value {
         "tags": doc.tags,
         "assignee": doc.assignee,
         "provenance": doc.provenance,
+        "governs": doc.governs,
+        "reviewed": doc.reviewed,
         "related": doc.related.iter().map(|r| {
             serde_json::json!({
                 "type": format!("{}", r.rel_type),
@@ -148,6 +150,39 @@ mod tests {
         let json = doc_to_json(&meta);
         assert_eq!(json["id"], serde_json::json!("ISSUE-42"));
         assert!(!json["id"].is_null());
+    }
+
+    // STORY-265 AC5: a pinned document carries its globs and review anchor, in
+    // the encoding `why --json` uses -- a list of glob strings, and a string.
+    #[test]
+    fn doc_to_json_carries_governs_and_reviewed() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+        meta.governs = vec!["src/engine/**".to_string(), "src/cli/why.rs".to_string()];
+        meta.reviewed = Some("0123456789abcdef".to_string());
+
+        let json = doc_to_json(&meta);
+        assert_eq!(
+            json["governs"],
+            serde_json::json!(["src/engine/**", "src/cli/why.rs"])
+        );
+        assert_eq!(json["reviewed"], serde_json::json!("0123456789abcdef"));
+    }
+
+    // STORY-265 AC5: an unpinned document still carries both keys -- `governs`
+    // empty like `provenance`, `reviewed` null like `assignee` -- so a consumer
+    // never has to check for their absence.
+    #[test]
+    fn unpinned_doc_json_carries_empty_governs_and_null_reviewed() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+
+        let json = doc_to_json(&meta);
+        assert_eq!(json["governs"], serde_json::json!([]));
+        assert!(
+            json.get("reviewed").is_some_and(Value::is_null),
+            "reviewed must be present as null, got: {json}"
+        );
     }
 
     // A non-milestone document (no counts) has no percent_complete key.
