@@ -87,4 +87,5 @@ lazyspec = { path = ".", features = ["test-support"] }
 tower = { version = "0.5", features = ["util"] }
 http = { version = "1" }
 jsonschema = { version = "0.47", default-features = false }
+strum = { version = "0.28", features = ["derive"] }
 

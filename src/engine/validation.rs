@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 /// finding an agent consumes is [`ValidationIssue::to_json`], which adds the
 /// [`rule`](ValidationIssue::rule) slug and the rendered `message`.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(strum::EnumCount))]
 #[serde(untagged)]
 pub enum ValidationIssue {
     BrokenLink {
@@ -2685,9 +2686,10 @@ mod hierarchy_from_edges_tests {
 mod finding_shape_tests {
     use super::*;
 
-    /// One of every variant. A new variant that is not listed here fails to
-    /// compile, which is the point: `rule` and the serialised shape are the
-    /// contract `validate --json` consumers select on.
+    /// One sample per variant, maintained by hand.
+    /// [`every_variant_has_a_sample`] is what keeps it honest: a new variant
+    /// with no sample here fails that test rather than being skipped in silence
+    /// by the ones below it.
     fn one_of_each_variant() -> Vec<ValidationIssue> {
         let path = || PathBuf::from("docs/stories/STORY-001-a.md");
         vec![
@@ -2786,6 +2788,12 @@ mod finding_shape_tests {
                 status_authority: "board-seven".to_string(),
             },
         ]
+    }
+
+    #[test]
+    fn every_variant_has_a_sample() {
+        use strum::EnumCount as _;
+        assert_eq!(one_of_each_variant().len(), ValidationIssue::COUNT);
     }
 
     #[test]

@@ -3078,6 +3078,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqids",
+ "strum",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

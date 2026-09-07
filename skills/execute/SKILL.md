@@ -83,7 +83,7 @@ Re-read the chain (`lazyspec context --json`, `lazyspec show`) when your context
 ## Close out
 
 1. Run the gate command **once**, at the end. Report its result whether it passed or failed. Do not re-run it to make it look better; a failing gate is a fact your reviewer needs.
-2. Run `lazyspec validate --json`, scoped to the documents you touched.
+2. Run `lazyspec validate --json`, scoped to the documents you touched. Findings are objects: select on `rule` and filter on the field carrying the document (`path` on most rules, `source` on `broken-link`, `paths` on `duplicate-id`). Do not grep `message`. One warning names no document and that filter drops it: `rule: "gh-auth"`, about the `gh` CLI rather than a document. Report it if present; it never blocks the pass.
 3. Report, and stop. The document sits at the work-active status, work ready for review.
 
 ## Report contract

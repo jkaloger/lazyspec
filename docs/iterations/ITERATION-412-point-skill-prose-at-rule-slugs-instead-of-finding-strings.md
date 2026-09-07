@@ -1,7 +1,7 @@
 ---
 title: Point skill prose at rule slugs instead of finding strings
 type: iteration
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

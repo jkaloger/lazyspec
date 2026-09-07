@@ -172,13 +172,23 @@ mod tests {
         assert!(!output.contains("gh CLI is not installed"));
     }
 
+    /// The one warning in `warnings` that names no document. The README and the
+    /// skill prose both tell agents so; this is what keeps that true.
     #[test]
-    fn run_json_includes_gh_warnings() {
+    fn run_json_gives_gh_warnings_the_gh_auth_rule_and_no_document_field() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh not installed warning".to_string()];
-        let output = run_json(&store, &config, &extra);
-        assert!(output.contains("gh not installed warning"));
+        let output: serde_json::Value =
+            serde_json::from_str(&run_json(&store, &config, &extra)).unwrap();
+
+        let warning = &output["warnings"][0];
+        assert_eq!(warning["rule"], GH_AUTH_RULE);
+        assert_eq!(warning["message"], "gh not installed warning");
+        assert_eq!(
+            warning.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["message", "rule"]
+        );
     }
 }

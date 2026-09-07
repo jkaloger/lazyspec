@@ -1,7 +1,7 @@
 ---
 title: Read validation findings as objects in validate --json
 type: story
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
