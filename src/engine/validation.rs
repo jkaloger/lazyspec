@@ -2,7 +2,7 @@ use crate::engine::config::{
     AttrKind, Config, EdgeDef, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
-use globset::GlobMatcher;
+use globset::{Glob, GlobMatcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -118,6 +118,13 @@ pub enum ValidationIssue {
         renamed: Vec<(String, String)>,
         suggested_glob: Option<String>,
     },
+    /// A file under `[governs] scope` that no document's `governs` glob matches
+    /// (RFC-068): code nothing speaks for. `file` is relative to
+    /// `[governs] root`, as the globs are. Severity comes from
+    /// `[governs] unowned`, so this variant reaches either array.
+    GovernsUnowned {
+        file: PathBuf,
+    },
 }
 
 impl ValidationIssue {
@@ -151,6 +158,7 @@ impl ValidationIssue {
             ValidationIssue::StatusAuthorityWrongStore { .. } => "status-authority-wrong-store",
             ValidationIssue::StatusAuthorityNotABoard { .. } => "status-authority-not-a-board",
             ValidationIssue::GovernsNoMatch { .. } => "governs-no-match",
+            ValidationIssue::GovernsUnowned { .. } => "governs-unowned",
         }
     }
 
@@ -420,6 +428,13 @@ impl std::fmt::Display for ValidationIssue {
                     glob
                 )
             }
+            ValidationIssue::GovernsUnowned { file } => {
+                write!(
+                    f,
+                    "{} is in [governs] scope but no document governs it",
+                    file.display()
+                )
+            }
         }
     }
 }
@@ -598,7 +613,7 @@ impl Checker for RequiredEdgeRule {
 
                 if !satisfied {
                     issues.push((
-                        severity.clone(),
+                        *severity,
                         ValidationIssue::UnsatisfiedEdge {
                             path: path.clone(),
                             edge_name: edge.name.clone(),
@@ -886,36 +901,77 @@ fn literal_dir_prefix(glob: &str) -> PathBuf {
         .collect()
 }
 
-/// Whether any file under `root` matches `matcher`, matched on the path
-/// relative to `root` exactly as [`Store::governing`](super::store::Store::governing)
-/// does. Bounded by [`literal_dir_prefix`] and stopping at the first match, so
-/// the usual module-depth pin reads one subtree; only a glob whose very first
-/// component is a wildcard walks the whole tree. `read_dir` failing (the pin
-/// names a directory that is gone, the common case) is no match.
+/// The directories a walk for `matchers` starts from: each glob's
+/// [`literal_dir_prefix`], with any prefix sitting under another dropped, so
+/// overlapping pins (`src/**` beside `src/engine/**`) read the tree once and
+/// the results carry no duplicates. A glob whose first component is already a
+/// wildcard has an empty prefix, which swallows every other root and walks the
+/// whole tree.
+fn walk_roots(root: &Path, matchers: &[GlobMatcher]) -> Vec<PathBuf> {
+    let mut prefixes: Vec<PathBuf> = matchers
+        .iter()
+        .map(|m| literal_dir_prefix(m.glob().glob()))
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+        .iter()
+        .filter(|p| {
+            !prefixes
+                .iter()
+                .any(|other| other != *p && p.starts_with(other))
+        })
+        .map(|p| root.join(p))
+        .collect()
+}
+
+/// Every file under `root` matching at least one of `matchers`, as paths
+/// relative to `root` -- matched exactly as
+/// [`Store::governing`](super::store::Store::governing) matches them. The one
+/// walk both `governs` rules read: `governs-no-match` asks which globs no file
+/// answered, `governs-unowned` asks which files no document claimed.
+///
+/// Bounded by [`walk_roots`], so a module-depth pin or a `scope` of `src/**`
+/// reads one subtree rather than the repository; an unbounded walk here descends
+/// into `target/`. `read_dir` failing (the pin names a directory that is gone,
+/// the common case) contributes no files.
+///
+/// The literal prefix is the *only* pruning, deliberately: a walk that skipped
+/// directories a matcher can still reach -- dot-directories were the case --
+/// makes a glob's matchability depend on which roots its neighbours contributed,
+/// so one document's `governs-no-match` turns on another document's unrelated
+/// pin. Which files a glob can match must not depend on how the walk was
+/// bounded.
 ///
 /// Directories are recognised by `file_type`, which does not follow symlinks,
 /// so a link cycle under `root` cannot spin the walk forever.
-fn matches_a_file(root: &Path, glob: &str, matcher: &GlobMatcher) -> bool {
-    let mut pending = vec![root.join(literal_dir_prefix(glob))];
+///
+// ponytail: the literal prefix is the only pruning. A glob rooted at a wildcard
+// reads the whole code root, `target/` included -- ~4s on this repo. Reach for a
+// `.gitignore`-aware walker (the `ignore` crate) if that ever bites.
+fn files_matching(root: &Path, matchers: &[GlobMatcher]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = walk_roots(root, matchers);
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
+            let path = entry.path();
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                pending.push(entry.path());
+                pending.push(path);
                 continue;
             }
-            let path = entry.path();
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            if matcher.is_match(relative) {
-                return true;
+            if matchers.iter().any(|m| m.is_match(relative)) {
+                found.push(relative.to_path_buf());
             }
         }
     }
-    false
+    found.sort();
+    found
 }
 
 impl Checker for GovernsNoMatchRule {
@@ -927,29 +983,69 @@ impl Checker for GovernsNoMatchRule {
         // Per glob, not per document: a document with three pins and one miss
         // is one finding. Sorted, because `governs_globs` is a `HashMap` and
         // the order findings print in should not be its iteration order.
-        let mut unmatched: Vec<(&PathBuf, &String)> = store
+        let mut pinned: Vec<(&PathBuf, &String, &GlobMatcher)> = store
             .governs_globs
             .iter()
             .filter(|(path, _)| store.docs.get(*path).is_some_and(|m| !m.validate_ignore))
-            .flat_map(|(path, globs)| globs.iter().map(move |glob| (path, glob)))
-            .filter(|(_, (glob, matcher))| !matches_a_file(&store.governs_root, glob, matcher))
-            .map(|(path, (glob, _))| (path, glob))
+            .flat_map(|(path, globs)| {
+                globs
+                    .iter()
+                    .map(move |(glob, matcher)| (path, glob, matcher))
+            })
             .collect();
-        unmatched.sort();
+        pinned.sort_by(|(ap, ag, _), (bp, bg, _)| (ap, ag).cmp(&(bp, bg)));
 
-        unmatched
-            .into_iter()
-            .map(|(path, glob)| {
+        let matchers: Vec<GlobMatcher> = pinned.iter().map(|(_, _, m)| (*m).clone()).collect();
+        let matched = files_matching(&store.governs_root, &matchers);
+
+        pinned
+            .iter()
+            .filter(|(_, _, matcher)| !matched.iter().any(|file| matcher.is_match(file)))
+            .map(|(path, glob, _)| {
                 (
                     Severity::Warning,
                     ValidationIssue::GovernsNoMatch {
-                        path: path.clone(),
-                        glob: glob.clone(),
+                        path: (*path).clone(),
+                        glob: (*glob).clone(),
                         renamed: Vec::new(),
                         suggested_glob: None,
                     },
                 )
             })
+            .collect()
+    }
+}
+
+pub struct GovernsUnownedRule;
+
+impl Checker for GovernsUnownedRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        // Off by default (RFC-068 §Risks "Day-one flood"): no `unowned`
+        // severity, and no `scope` to walk, both mean no walk at all. An empty
+        // `scope` is a project narrowing the check to nothing on purpose, not
+        // an invitation to read the whole root.
+        let Some(severity) = config.governs.unowned else {
+            return Vec::new();
+        };
+        let scope: Vec<GlobMatcher> = config
+            .governs
+            .scope
+            .iter()
+            .filter_map(|g| Glob::new(g).ok())
+            .map(|g| g.compile_matcher())
+            .collect();
+        if scope.is_empty() {
+            return Vec::new();
+        }
+
+        files_matching(&store.governs_root, &scope)
+            .into_iter()
+            .filter(|file| store.governing(&store.governs_root.join(file)).is_empty())
+            .map(|file| (severity, ValidationIssue::GovernsUnowned { file }))
             .collect()
     }
 }
@@ -1331,6 +1427,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(UnknownRelationshipRule),
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule),
+        Box::new(GovernsUnownedRule),
     ]
 }
 
@@ -2792,25 +2889,38 @@ mod governs_no_match_tests {
     use crate::engine::store::test_support::store_from_with_config;
     use crate::engine::store::Store;
 
-    /// An rfc pinning `globs`, beside one real source file for a pin to hit.
-    fn store_pinning(globs: &[&str]) -> (tempfile::TempDir, Store) {
-        let entries: String = globs.iter().map(|g| format!("  - {g}\n")).collect();
-        let doc = format!(
-            "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n{entries}related: []\n---\n\nbody\n"
-        );
-        store_from_with_config(
-            &[
-                ("docs/rfcs/RFC-001-engine.md", doc.as_str()),
-                ("src/engine/store.rs", "fn main() {}\n"),
-            ],
-            &Config::default(),
-        )
+    /// One rfc per entry in `pins`, each pinning that entry's globs, over one
+    /// real source file for a pin to hit plus `extra`. Several documents,
+    /// because a pin's fate must not turn on what its neighbours pinned.
+    fn store_pinning_each(pins: &[&[&str]], extra: &[(&str, &str)]) -> (tempfile::TempDir, Store) {
+        let docs: Vec<(String, String)> = pins
+            .iter()
+            .enumerate()
+            .map(|(i, globs)| {
+                let entries: String = globs.iter().map(|g| format!("  - \"{g}\"\n")).collect();
+                (
+                    format!("docs/rfcs/RFC-00{}-engine.md", i + 1),
+                    format!(
+                        "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n{entries}related: []\n---\n\nbody\n"
+                    ),
+                )
+            })
+            .collect();
+        let mut files: Vec<(&str, &str)> =
+            docs.iter().map(|(p, d)| (p.as_str(), d.as_str())).collect();
+        files.push(("src/engine/store.rs", "fn main() {}\n"));
+        files.extend_from_slice(extra);
+        store_from_with_config(&files, &Config::default())
     }
 
-    fn no_match_findings(globs: &[&str]) -> Vec<(String, String)> {
-        let (_tmp, store) = store_pinning(globs);
+    /// An rfc pinning `globs`, beside one real source file for a pin to hit.
+    fn store_pinning(globs: &[&str]) -> (tempfile::TempDir, Store) {
+        store_pinning_each(&[globs], &[])
+    }
+
+    fn no_match_findings_of(store: &Store) -> Vec<(String, String)> {
         GovernsNoMatchRule
-            .check(&store, &Config::default())
+            .check(store, &Config::default())
             .into_iter()
             .map(|(severity, issue)| match issue {
                 ValidationIssue::GovernsNoMatch { path, glob, .. } => {
@@ -2820,6 +2930,11 @@ mod governs_no_match_tests {
                 other => panic!("unexpected finding {other:?}"),
             })
             .collect()
+    }
+
+    fn no_match_findings(globs: &[&str]) -> Vec<(String, String)> {
+        let (_tmp, store) = store_pinning(globs);
+        no_match_findings_of(&store)
     }
 
     #[test]
@@ -2856,6 +2971,45 @@ mod governs_no_match_tests {
         );
     }
 
+    /// A wildcard-rooted glob is bounded by nothing, so the walk must reach
+    /// every directory under root -- dot-directories included. Pruning them
+    /// made this pin, whose only match lives in one, report as rotted.
+    #[test]
+    fn a_glob_whose_only_match_is_inside_a_dot_directory_is_not_reported() {
+        let (_tmp, store) = store_pinning_each(
+            &[&["**/*.yml"]],
+            &[(".github/workflows/ci.yml", "name: ci\n")],
+        );
+
+        assert_eq!(no_match_findings_of(&store), Vec::new());
+    }
+
+    /// One document's finding may not depend on another document's globs. A
+    /// pin under a dot-directory used to survive alone (its own walk root) and
+    /// fire as soon as any other document pinned an empty-prefix glob, which
+    /// collapsed that root into `""` and let the dot prune drop it.
+    #[test]
+    fn a_dot_directory_pin_is_unaffected_by_another_documents_empty_prefix_pin() {
+        let extra = [
+            (".github/workflows/ci.yml", "name: ci\n"),
+            ("Cargo.toml", "[package]\nname = \"g\"\n"),
+        ];
+        let alone = store_pinning_each(&[&[".github/**"]], &extra);
+        let beside_an_empty_prefix_pin =
+            store_pinning_each(&[&[".github/**"], &["Cargo.toml"]], &extra);
+
+        assert_eq!(
+            no_match_findings_of(&alone.1),
+            Vec::new(),
+            "the dot-directory pin matches a file, so it is not rotted"
+        );
+        assert_eq!(
+            no_match_findings_of(&beside_an_empty_prefix_pin.1),
+            Vec::new(),
+            "and a neighbour pinning Cargo.toml does not make it rotted"
+        );
+    }
+
     /// Registered, and in the array that carries warning severity.
     #[test]
     fn the_finding_reaches_validate_full_as_a_warning() {
@@ -2875,6 +3029,169 @@ mod governs_no_match_tests {
             !result.errors.iter().any(|e| e.rule() == "governs-no-match"),
             "the finding is a warning, never an error"
         );
+    }
+}
+
+// RFC-068: code in scope that no document speaks for.
+#[cfg(test)]
+mod governs_unowned_tests {
+    use super::*;
+    use crate::engine::config::GovernsConfig;
+    use crate::engine::store::test_support::store_from_with_config;
+    use crate::engine::store::Store;
+
+    fn governs_config(scope: &[&str], unowned: Option<Severity>) -> Config {
+        Config {
+            governs: GovernsConfig {
+                scope: scope.iter().map(|s| s.to_string()).collect(),
+                unowned,
+                ..GovernsConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    /// One rfc pinning `src/engine/**`, over two source modules: the pinned one
+    /// and an unpinned sibling under the same scope.
+    fn store_with_a_pinned_and_an_unpinned_module(config: &Config) -> (tempfile::TempDir, Store) {
+        store_from_with_config(
+            &[
+                (
+                    "docs/rfcs/RFC-001-engine.md",
+                    "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n  - src/engine/**\nrelated: []\n---\n\nbody\n",
+                ),
+                ("src/engine/store.rs", "fn main() {}\n"),
+                ("src/cli/show.rs", "fn main() {}\n"),
+                ("src/cli/list.rs", "fn main() {}\n"),
+            ],
+            config,
+        )
+    }
+
+    fn unowned_files(scope: &[&str], unowned: Option<Severity>) -> Vec<(Severity, String)> {
+        let config = governs_config(scope, unowned);
+        let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
+        GovernsUnownedRule
+            .check(&store, &config)
+            .into_iter()
+            .map(|(severity, issue)| match issue {
+                ValidationIssue::GovernsUnowned { file } => (severity, file.display().to_string()),
+                other => panic!("unexpected finding {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_under_scope_that_no_glob_matches_is_reported_once_each() {
+        assert_eq!(
+            unowned_files(&["src/**"], Some(Severity::Warning)),
+            vec![
+                (Severity::Warning, "src/cli/list.rs".to_string()),
+                (Severity::Warning, "src/cli/show.rs".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_configured_severity_is_the_findings_severity() {
+        assert_eq!(
+            unowned_files(&["src/**"], Some(Severity::Error))
+                .into_iter()
+                .map(|(severity, _)| severity)
+                .collect::<Vec<_>>(),
+            vec![Severity::Error, Severity::Error]
+        );
+    }
+
+    #[test]
+    fn no_unowned_severity_reports_nothing_whatever_scope_says() {
+        assert_eq!(unowned_files(&["src/**"], None), Vec::new());
+    }
+
+    /// A `scope` narrowed to the pinned module leaves the sibling silent: the
+    /// author asked about that module and nothing else.
+    #[test]
+    fn a_narrowed_scope_leaves_files_outside_it_silent() {
+        assert_eq!(
+            unowned_files(&["src/engine/**"], Some(Severity::Warning)),
+            Vec::new()
+        );
+    }
+
+    /// An empty `scope` is narrowed to nothing, not widened to everything.
+    #[test]
+    fn an_empty_scope_reports_nothing() {
+        assert_eq!(unowned_files(&[], Some(Severity::Warning)), Vec::new());
+    }
+
+    /// Registered, and in the array the configured severity names -- an error
+    /// severity is what makes `validate` exit non-zero.
+    #[test]
+    fn an_error_severity_puts_the_findings_in_the_errors_array() {
+        let config = governs_config(&["src/**"], Some(Severity::Error));
+        let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
+
+        let result = validate_full(&store, &config);
+
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .filter(|e| e.rule() == "governs-unowned")
+                .count(),
+            2,
+            "got errors {:?} warnings {:?}",
+            result.errors,
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.rule() == "governs-unowned"),
+            "an error-severity finding is not also a warning"
+        );
+    }
+
+    #[test]
+    fn a_warning_severity_puts_the_findings_in_the_warnings_array() {
+        let config = governs_config(&["src/**"], Some(Severity::Warning));
+        let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
+
+        let result = validate_full(&store, &config);
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.rule() == "governs-unowned"),
+            "got warnings {:?}",
+            result.warnings
+        );
+        assert!(!result.errors.iter().any(|e| e.rule() == "governs-unowned"));
+    }
+
+    /// The walk is bounded to the subtrees `scope` names, so a build directory
+    /// outside it is never read -- and never reported.
+    #[test]
+    fn a_file_outside_the_scope_subtree_is_not_walked() {
+        let config = governs_config(&["src/**"], Some(Severity::Warning));
+        let (_tmp, store) = store_from_with_config(
+            &[
+                ("src/cli/show.rs", "fn main() {}\n"),
+                ("target/debug/build.rs", "fn main() {}\n"),
+            ],
+            &config,
+        );
+
+        let reported: Vec<String> = GovernsUnownedRule
+            .check(&store, &config)
+            .into_iter()
+            .map(|(_, issue)| issue.to_string())
+            .collect();
+
+        assert_eq!(reported.len(), 1, "got {reported:?}");
+        assert!(reported[0].contains("src/cli/show.rs"), "got {reported:?}");
     }
 }
 
@@ -2988,6 +3305,9 @@ mod finding_shape_tests {
                 glob: "src/engine/ctx/**".to_string(),
                 renamed: Vec::new(),
                 suggested_glob: None,
+            },
+            ValidationIssue::GovernsUnowned {
+                file: PathBuf::from("src/engine/orphan.rs"),
             },
         ]
     }

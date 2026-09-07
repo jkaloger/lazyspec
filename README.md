@@ -372,6 +372,8 @@ lazyspec validate --json | jq '[.errors[], .warnings[]] | map(select(.rule == "u
 
 Every finding about a document names it in a field: `path` on most rules, `source` on `broken-link`, `paths` on `duplicate-id` and `singleton-violation`, and `type_name` on the rules that report a type rather than a document. The `unsatisfied-edge` finding also carries `edge_name`, `from_type`, `to` and `via`; `to` and `via` are spelled as in `[[edges]]`, a bare name, a list of names, or `"*"`.
 
+`governs-unowned` is the one finding about a source file rather than a document: it names the file in `file` and no document at all, because the absence of one is what it reports. See [Governed files](#governed-files).
+
 One warning is about the environment rather than a document and so names none: `gh-auth`, raised when the project declares a `github-issues` type and the `gh` CLI is missing, unauthenticated, or unreadable. It carries `rule` and `message` and no other field. Filtering `warnings` on a document field silently drops it, so select it by `rule` if you care about it. It appears only in `validate --json`, never in `status --json`.
 
 `validate --json` also reports a third array, `parse_errors`: files under a document directory that would not load — malformed frontmatter, or a `governs` glob that would not compile. Its entries are not findings, so no `rule` selects them; each is `{ "path", "error" }`. A non-empty `parse_errors` exits 2, the same as an error. `status --json` carries the same array, but at its top level beside `validation` rather than inside it.
@@ -942,7 +944,15 @@ root    = "."
 | `scope`   | Globs selecting the files that must be governed by some document. Defaults to empty                                                                                       |
 | `unowned` | Severity (`warning` or `error`) reported for a file under `scope` that no document governs. Omitted, the check is off                                                      |
 
-`scope` and `unowned` are parsed and exposed by `config --json`; `validate` does not yet report on them.
+With `unowned` set, `validate` reports every file under `scope` that no document's glob matches as a `governs-unowned` finding carrying `file`, the path relative to the code root. Its severity is the configured one, so an `unowned = "error"` project sees the findings in `errors` and `validate` exits 2; `unowned = "warning"` puts them in `warnings`. Omit `unowned` and no walk happens at all, whatever `scope` says. An empty `scope` reports nothing rather than claiming the whole root.
+
+```sh
+lazyspec validate --json | jq -r '[.errors[], .warnings[]] | map(select(.rule == "governs-unowned") | .file) | .[]'
+```
+
+The check is off by default because turning it on in an unpinned repository emits one finding per file under `scope`. Seed pins first, then narrow `scope` to the modules you want owned.
+
+Both `governs` rules read one walk, bounded to the directories the globs name literally: `scope = ["src/**"]` reads `src` and nothing else. That literal prefix is the only bound, so a glob's matches never depend on what other documents pinned. A glob whose first component is already a wildcard (`**/*.rs`) has no such bound and reads the whole code root, build and version-control directories included.
 
 ### Numbering
 

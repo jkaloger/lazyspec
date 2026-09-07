@@ -1,7 +1,7 @@
 ---
 title: Emit governs-no-match for a glob that matches nothing
 type: iteration
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

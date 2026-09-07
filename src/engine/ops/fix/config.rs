@@ -274,7 +274,7 @@ fn edge_from_rule(rule: &LegacyRule, chain: &[&str]) -> EdgeDef {
             from: TypeSelector::Types(vec![child.clone()]),
             to: TypeSelector::Types(vec![parent.clone()]),
             via: RelSelector::Named(chain.iter().map(|via| (*via).to_string()).collect()),
-            required: Some(severity.clone()),
+            required: Some(*severity),
             traversal: Some(Traversal::Chain),
         },
         LegacyRule::RelationExistence {
@@ -286,7 +286,7 @@ fn edge_from_rule(rule: &LegacyRule, chain: &[&str]) -> EdgeDef {
             from: TypeSelector::Types(vec![doc_type.clone()]),
             to: TypeSelector::Any,
             via: RelSelector::Any,
-            required: Some(severity.clone()),
+            required: Some(*severity),
             traversal: None,
         },
     }

@@ -220,4 +220,43 @@ mod tests {
             "governs glob in docs/rfcs/RFC-001-engine.md: \"src/gone/**\" matches no file"
         );
     }
+
+    /// What `jq 'select(.rule=="governs-unowned") | .file'` reads back: the
+    /// slug to select on and the path to open, relative to the code root.
+    #[test]
+    fn run_json_gives_an_unowned_file_its_rule_and_file() {
+        let tmp = crate::engine::store::test_support::write_docs(&[
+            (
+                "docs/rfcs/RFC-001-engine.md",
+                "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n  - src/engine/**\nrelated: []\n---\n\nbody\n",
+            ),
+            ("src/engine/store.rs", "fn main() {}\n"),
+            ("src/cli/show.rs", "fn main() {}\n"),
+        ]);
+        let config = Config {
+            governs: crate::engine::config::GovernsConfig {
+                scope: vec!["src/**".to_string()],
+                unowned: Some(crate::engine::config::Severity::Warning),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let store = Store::load(tmp.path(), &config).unwrap();
+
+        let output: serde_json::Value =
+            serde_json::from_str(&run_json(&store, &config, &[])).unwrap();
+
+        let unowned: Vec<&serde_json::Value> = output["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["rule"] == "governs-unowned")
+            .collect();
+        assert_eq!(unowned.len(), 1, "got {:?}", output["warnings"]);
+        assert_eq!(unowned[0]["file"], "src/cli/show.rs");
+        assert_eq!(
+            unowned[0]["message"],
+            "src/cli/show.rs is in [governs] scope but no document governs it"
+        );
+    }
 }
