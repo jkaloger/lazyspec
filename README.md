@@ -927,7 +927,15 @@ reviewed: 662d5533f0b1c9e4a7d2
 
 Globs are compiled when the store loads. An entry that is not a valid glob is reported as a parse error naming the document and the entry, and that document then governs nothing until the entry is fixed.
 
-A glob that compiles but matches no file under the code root is a pin the code moved out from under, and `validate` reports it as a `governs-no-match` warning naming the document and the glob. The finding is per glob rather than per document, so a document with three pins of which one is dead is reported once. It carries `path`, `glob`, and the repair fields `renamed` and `suggested_glob`, which are empty and `null`; nothing fills them yet. Its severity is fixed at warning, so it appears in `warnings` and never in `errors`. See [`validate` findings](#validate-findings).
+A glob that compiles but matches no file under the code root is a pin the code moved out from under, and `validate` reports it as a `governs-no-match` warning naming the document and the glob. The finding is per glob rather than per document, so a document with three pins of which one is dead is reported once. It carries `path`, `glob`, and the repair fields `renamed` and `suggested_glob`. Its severity is fixed at warning, so it appears in `warnings` and never in `errors`. See [`validate` findings](#validate-findings).
+
+`renamed` and `suggested_glob` say where the code went. When the document carries a `reviewed` anchor, `renamed` lists the renames git detected between that commit and `HEAD` whose old path the dead glob matched, each as `{ "from", "to" }` and in git's own order; renames elsewhere in the repository are not reported, because the pin never spoke for them. `suggested_glob` is the longest common directory prefix of the `to` paths with `/**` appended: for files that all landed in one directory it is that directory, and for a module that split across two it is their common ancestor, which is wider than either half. Every pair is reported beside it so the suggestion can be narrowed by hand.
+
+Both fields are empty and `null` when the document declares no `reviewed` — there is no anchor to diff from, so nothing is asked of git — and when no rename under the dead glob is found, which is what a deletion rather than a move looks like. A `reviewed` commit git cannot read, such as one dropped by a rebase, is reported the same way: the dead pin still appears, without its repair data.
+
+```sh
+lazyspec validate --json | jq '.warnings | map(select(.rule == "governs-no-match") | {glob, suggested_glob, renamed})'
+```
 
 The optional `[governs]` table configures the code root and the unowned-file check:
 

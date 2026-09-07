@@ -2,11 +2,27 @@ use crate::engine::config::{
     AttrKind, Config, EdgeDef, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+use crate::engine::git_ref::{GitCli, GitRefOps};
 use globset::{Glob, GlobMatcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+
+/// Where a file a rotted `governs` glob used to match went, as
+/// `validate --json` publishes it (RFC-068): named fields, not a positional
+/// pair, so a consumer reads `from`/`to` rather than array indices.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
+}
+
+impl From<(String, String)> for Rename {
+    fn from((from, to): (String, String)) -> Self {
+        Self { from, to }
+    }
+}
 
 /// The derived `Serialize` is the variant's own fields and nothing else; the
 /// finding an agent consumes is [`ValidationIssue::to_json`], which adds the
@@ -110,12 +126,13 @@ pub enum ValidationIssue {
         status_authority: String,
     },
     /// A `governs` glob that matches no file under `[governs] root` (RFC-068):
-    /// a pin the code moved out from under. `renamed` and `suggested_glob` are
-    /// the repair data STORY-271 fills from git; empty until then.
+    /// a pin the code moved out from under. `renamed` names where the files the
+    /// glob used to match went and `suggested_glob` is the glob to try instead,
+    /// both empty unless the document carries a `reviewed` anchor to diff from.
     GovernsNoMatch {
         path: PathBuf,
         glob: String,
-        renamed: Vec<(String, String)>,
+        renamed: Vec<Rename>,
         suggested_glob: Option<String>,
     },
     /// A file under `[governs] scope` that no document's `governs` glob matches
@@ -886,7 +903,78 @@ impl Checker for OrphanRefRule {
     }
 }
 
-pub struct GovernsNoMatchRule;
+pub struct GovernsNoMatchRule {
+    /// Where rename candidates come from: the renames between a document's
+    /// `reviewed` commit and `HEAD`. A seam, so no test reaches a real
+    /// repository (DICTUM-004).
+    git: Box<dyn GitRefOps>,
+}
+
+impl GovernsNoMatchRule {
+    pub fn new(git: Box<dyn GitRefOps>) -> Self {
+        Self { git }
+    }
+
+    /// The renames since the document's `reviewed` commit whose old path this
+    /// glob matched: the files the pin spoke for, and where they went. A
+    /// document without `reviewed` has no anchor to diff from, so it is not
+    /// asked -- and neither is git.
+    ///
+    /// A failing git call (a `reviewed` commit no longer in history after a
+    /// rebase, a working tree that is not a repository) contributes no
+    /// candidates. The rotted pin is still worth reporting without its repair
+    /// data, and `check` has no channel to return the error on.
+    fn rename_candidates(
+        &self,
+        store: &super::store::Store,
+        doc: &Path,
+        matcher: &GlobMatcher,
+    ) -> Vec<Rename> {
+        let Some(reviewed) = store.docs.get(doc).and_then(|m| m.reviewed.as_deref()) else {
+            return Vec::new();
+        };
+        let Ok(pairs) = self.git.renames(&store.governs_root, reviewed, "HEAD") else {
+            return Vec::new();
+        };
+        pairs
+            .into_iter()
+            .filter(|(from, _)| matcher.is_match(from))
+            .map(Rename::from)
+            .collect()
+    }
+}
+
+/// The glob to pin instead: the longest common directory prefix of where the
+/// files went, plus `/**`.
+///
+/// A module that split lands on the ancestor of both halves and so over-widens.
+/// Accepted in RFC-068 §Risks: every pair is reported beside the suggestion for
+/// the author to narrow, `reviewed` stays put so drift still flags it, and the
+/// rewrite lands in a reviewable diff.
+fn suggest_glob(renamed: &[Rename]) -> Option<String> {
+    let mut destinations = renamed.iter().map(|r| directory_components(&r.to));
+    let mut common = destinations.next()?;
+    for other in destinations {
+        let shared = common
+            .iter()
+            .zip(&other)
+            .take_while(|(a, b)| a == b)
+            .count();
+        common.truncate(shared);
+    }
+    if common.is_empty() {
+        // The files landed at the code root, which only `**` covers.
+        return Some("**".to_string());
+    }
+    Some(format!("{}/**", common.join("/")))
+}
+
+fn directory_components(path: &str) -> Vec<&str> {
+    let Some((dir, _file)) = path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    dir.split('/').filter(|c| !c.is_empty()).collect()
+}
 
 /// The deepest directory the glob names literally: every leading component up
 /// to the first one carrying a metacharacter, and never the glob's last
@@ -1001,14 +1089,15 @@ impl Checker for GovernsNoMatchRule {
         pinned
             .iter()
             .filter(|(_, _, matcher)| !matched.iter().any(|file| matcher.is_match(file)))
-            .map(|(path, glob, _)| {
+            .map(|(path, glob, matcher)| {
+                let renamed = self.rename_candidates(store, path, matcher);
                 (
                     Severity::Warning,
                     ValidationIssue::GovernsNoMatch {
                         path: (*path).clone(),
                         glob: (*glob).clone(),
-                        renamed: Vec::new(),
-                        suggested_glob: None,
+                        suggested_glob: suggest_glob(&renamed),
+                        renamed,
                     },
                 )
             })
@@ -1426,7 +1515,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(TypeConstraintChecker),
         Box::new(UnknownRelationshipRule),
         Box::new(AttributeSchemaChecker),
-        Box::new(GovernsNoMatchRule),
+        Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
     ]
 }
@@ -2886,13 +2975,22 @@ mod hierarchy_from_edges_tests {
 #[cfg(test)]
 mod governs_no_match_tests {
     use super::*;
+    use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::store::test_support::store_from_with_config;
     use crate::engine::store::Store;
 
-    /// One rfc per entry in `pins`, each pinning that entry's globs, over one
-    /// real source file for a pin to hit plus `extra`. Several documents,
-    /// because a pin's fate must not turn on what its neighbours pinned.
-    fn store_pinning_each(pins: &[&[&str]], extra: &[(&str, &str)]) -> (tempfile::TempDir, Store) {
+    const REVIEWED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// One rfc per entry in `pins`, each pinning that entry's globs and stamped
+    /// with `reviewed`, over one real source file for a pin to hit plus `extra`.
+    /// Several documents, because a pin's fate must not turn on what its
+    /// neighbours pinned.
+    fn store_pinning_each_reviewed(
+        pins: &[&[&str]],
+        reviewed: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Store) {
+        let reviewed_line = reviewed.map_or(String::new(), |sha| format!("reviewed: {sha}\n"));
         let docs: Vec<(String, String)> = pins
             .iter()
             .enumerate()
@@ -2901,7 +2999,7 @@ mod governs_no_match_tests {
                 (
                     format!("docs/rfcs/RFC-00{}-engine.md", i + 1),
                     format!(
-                        "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n{entries}related: []\n---\n\nbody\n"
+                        "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\ngoverns:\n{entries}{reviewed_line}related: []\n---\n\nbody\n"
                     ),
                 )
             })
@@ -2913,13 +3011,21 @@ mod governs_no_match_tests {
         store_from_with_config(&files, &Config::default())
     }
 
+    fn store_pinning_each(pins: &[&[&str]], extra: &[(&str, &str)]) -> (tempfile::TempDir, Store) {
+        store_pinning_each_reviewed(pins, None, extra)
+    }
+
     /// An rfc pinning `globs`, beside one real source file for a pin to hit.
     fn store_pinning(globs: &[&str]) -> (tempfile::TempDir, Store) {
         store_pinning_each(&[globs], &[])
     }
 
+    fn rule_with(git: MockGitRefClient) -> GovernsNoMatchRule {
+        GovernsNoMatchRule::new(Box::new(git))
+    }
+
     fn no_match_findings_of(store: &Store) -> Vec<(String, String)> {
-        GovernsNoMatchRule
+        rule_with(MockGitRefClient::new())
             .check(store, &Config::default())
             .into_iter()
             .map(|(severity, issue)| match issue {
@@ -3007,6 +3113,136 @@ mod governs_no_match_tests {
             no_match_findings_of(&beside_an_empty_prefix_pin.1),
             Vec::new(),
             "and a neighbour pinning Cargo.toml does not make it rotted"
+        );
+    }
+
+    /// The repair data of the one finding a single rotted glob produces.
+    fn repair_data_of(
+        globs: &[&str],
+        reviewed: Option<&str>,
+        renames: &[(&str, &str)],
+    ) -> (Vec<Rename>, Option<String>) {
+        let (_tmp, store) = store_pinning_each_reviewed(&[globs], reviewed, &[]);
+        let findings = rule_with(MockGitRefClient::new().with_renames(renames))
+            .check(&store, &Config::default());
+
+        match findings.into_iter().map(|(_, issue)| issue).next() {
+            Some(ValidationIssue::GovernsNoMatch {
+                renamed,
+                suggested_glob,
+                ..
+            }) => (renamed, suggested_glob),
+            other => panic!("expected exactly one no-match finding, got {other:?}"),
+        }
+    }
+
+    fn rename(from: &str, to: &str) -> Rename {
+        Rename {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
+
+    /// AC1: the pairs are the renames the *rotted glob* used to match. A
+    /// repo-wide rename list would name files the pin never spoke for.
+    #[test]
+    fn only_renames_the_stale_glob_matched_are_candidates() {
+        let (renamed, _) = repair_data_of(
+            &["src/ctx/**"],
+            Some(REVIEWED),
+            &[
+                ("src/ctx/resolve.rs", "src/context/resolve.rs"),
+                ("src/tui/app.rs", "src/tui/state/app.rs"),
+            ],
+        );
+
+        assert_eq!(
+            renamed,
+            vec![rename("src/ctx/resolve.rs", "src/context/resolve.rs")]
+        );
+    }
+
+    /// AC2.
+    #[test]
+    fn the_suggestion_is_the_directory_the_files_moved_into() {
+        let (_, suggested) = repair_data_of(
+            &["src/ctx/**"],
+            Some(REVIEWED),
+            &[
+                ("src/ctx/resolve.rs", "src/context/resolve.rs"),
+                ("src/ctx/pack.rs", "src/context/pack.rs"),
+            ],
+        );
+
+        assert_eq!(suggested, Some("src/context/**".to_string()));
+    }
+
+    /// AC4: a module split over-widens to the common ancestor, and every pair is
+    /// still reported so the author can narrow it by hand.
+    #[test]
+    fn a_split_across_two_directories_suggests_their_common_ancestor() {
+        let (renamed, suggested) = repair_data_of(
+            &["src/ctx/**"],
+            Some(REVIEWED),
+            &[
+                ("src/ctx/resolve.rs", "src/engine/context/resolve.rs"),
+                ("src/ctx/pack.rs", "src/engine/pack/pack.rs"),
+            ],
+        );
+
+        assert_eq!(suggested, Some("src/engine/**".to_string()));
+        assert_eq!(
+            renamed,
+            vec![
+                rename("src/ctx/resolve.rs", "src/engine/context/resolve.rs"),
+                rename("src/ctx/pack.rs", "src/engine/pack/pack.rs"),
+            ]
+        );
+    }
+
+    /// A `reviewed` anchor with no rename under the glob: the pin rotted some
+    /// other way (the code was deleted), and there is nothing to suggest.
+    #[test]
+    fn no_matching_rename_suggests_nothing() {
+        let (renamed, suggested) = repair_data_of(
+            &["src/ctx/**"],
+            Some(REVIEWED),
+            &[("src/tui/app.rs", "src/tui/state/app.rs")],
+        );
+
+        assert_eq!(renamed, Vec::new());
+        assert_eq!(suggested, None);
+    }
+
+    /// AC3: no anchor, no git. The fake is loaded with a rename the glob would
+    /// have matched, so an empty result is proof the rule never asked -- and a
+    /// document without `reviewed` is not an error, it just reports the rot.
+    #[test]
+    fn a_document_without_reviewed_carries_no_repair_data_and_never_asks_git() {
+        let (renamed, suggested) = repair_data_of(
+            &["src/ctx/**"],
+            None,
+            &[("src/ctx/resolve.rs", "src/context/resolve.rs")],
+        );
+
+        assert_eq!(renamed, Vec::new());
+        assert_eq!(suggested, None);
+    }
+
+    /// The `--json` shape RFC-068 publishes: objects with `from` and `to`, not
+    /// positional pairs.
+    #[test]
+    fn the_finding_serialises_renames_as_from_to_objects() {
+        let issue = ValidationIssue::GovernsNoMatch {
+            path: PathBuf::from("docs/rfcs/RFC-001-engine.md"),
+            glob: "src/ctx/**".to_string(),
+            renamed: vec![rename("src/ctx/resolve.rs", "src/context/resolve.rs")],
+            suggested_glob: Some("src/context/**".to_string()),
+        };
+
+        assert_eq!(
+            issue.to_json()["renamed"],
+            serde_json::json!([{"from": "src/ctx/resolve.rs", "to": "src/context/resolve.rs"}])
         );
     }
 

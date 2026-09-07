@@ -49,6 +49,10 @@ pub trait GitRefOps {
     /// The commit `HEAD` points at. Errors where `HEAD` cannot be read at all --
     /// a repository with no commits, or a directory that is not one.
     fn head(&self, root: &Path) -> Result<String>;
+    /// The `(from, to)` path pairs git detected as renames between two commits,
+    /// relative to `root` (RFC-068). Paths that moved in or out of `root` are
+    /// not pairs there and are omitted.
+    fn renames(&self, root: &Path, from: &str, to: &str) -> Result<Vec<(String, String)>>;
 }
 
 /// The git-ref client seam as an object-safe trait for `GitRefStore`'s boxed
@@ -337,6 +341,36 @@ impl GitRefOps for GitCli {
         };
         Ok(sha)
     }
+
+    fn renames(&self, root: &Path, from: &str, to: &str) -> Result<Vec<(String, String)>> {
+        // `--relative` reports paths relative to the working directory, which is
+        // `root`, so the pairs read in the same terms as the `governs` globs they
+        // are matched against.
+        let range = format!("{}..{}", from, to);
+        let output = self.run_git(root, &["diff", "-M", "--name-status", "--relative", &range])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git diff --name-status failed: {}", stderr.trim());
+        }
+        Ok(parse_renames(&String::from_utf8_lossy(&output.stdout)))
+    }
+}
+
+/// The rename rows of `git diff -M --name-status` output: status `R<score>`
+/// followed by the old and the new path, tab separated. Every other status
+/// (added, modified, deleted) carries one path and is not a rename.
+fn parse_renames(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with('R'))
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let _status = fields.next()?;
+            let from = fields.next()?;
+            let to = fields.next()?;
+            Some((from.to_string(), to.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -365,6 +399,10 @@ pub mod test_support {
         pub push_with_lease_results: RefCell<Vec<Result<()>>>,
         pub read_commit_timestamp_results: RefCell<Vec<Result<DateTime<Utc>>>>,
         pub head_results: RefCell<Vec<Result<String>>>,
+        /// What `renames` reports, on every call. Not a queue: a caller asking
+        /// once per rotted glob would otherwise see the fixture only the first
+        /// time.
+        pub renames_pairs: RefCell<RefList>,
         pub calls: RefCell<Vec<String>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
@@ -395,6 +433,7 @@ pub mod test_support {
                 push_with_lease_results: RefCell::new(vec![]),
                 read_commit_timestamp_results: RefCell::new(vec![]),
                 head_results: RefCell::new(vec![]),
+                renames_pairs: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
                 committed_blobs: RefCell::new(vec![]),
             }
@@ -467,6 +506,14 @@ pub mod test_support {
 
         pub fn with_head_result(self, result: Result<String>) -> Self {
             self.head_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_renames(self, pairs: &[(&str, &str)]) -> Self {
+            *self.renames_pairs.borrow_mut() = pairs
+                .iter()
+                .map(|(from, to)| (from.to_string(), to.to_string()))
+                .collect();
             self
         }
 
@@ -627,6 +674,13 @@ pub mod test_support {
             } else {
                 q.remove(0)
             }
+        }
+
+        fn renames(&self, _root: &Path, from: &str, to: &str) -> Result<Vec<(String, String)>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("renames:{}..{}", from, to));
+            Ok(self.renames_pairs.borrow().clone())
         }
     }
 }
@@ -811,6 +865,34 @@ mod tests {
         let result = mock.read_commit_timestamp(&dummy_root(), "abc123").unwrap();
         assert_eq!(result, ts);
         assert_eq!(mock.calls.borrow()[0], "read_commit_timestamp:abc123");
+    }
+
+    #[test]
+    fn mock_renames_replays_its_pairs_and_records_the_range() {
+        let mock = MockGitRefClient::new().with_renames(&[("src/a/mod.rs", "src/b/mod.rs")]);
+
+        let first = mock.renames(&dummy_root(), "abc123", "HEAD").unwrap();
+        let second = mock.renames(&dummy_root(), "abc123", "HEAD").unwrap();
+
+        assert_eq!(
+            first,
+            vec![("src/a/mod.rs".to_string(), "src/b/mod.rs".to_string())]
+        );
+        assert_eq!(second, first, "every call sees the same fixture");
+        assert_eq!(mock.calls.borrow()[0], "renames:abc123..HEAD");
+    }
+
+    #[test]
+    fn parse_renames_keeps_rename_rows_and_drops_the_rest() {
+        let stdout = "R100\tsrc/a/mod.rs\tsrc/b/mod.rs\nM\tsrc/c.rs\nR075\tsrc/a/x.rs\tsrc/b/x.rs\nD\tsrc/d.rs\n";
+
+        assert_eq!(
+            parse_renames(stdout),
+            vec![
+                ("src/a/mod.rs".to_string(), "src/b/mod.rs".to_string()),
+                ("src/a/x.rs".to_string(), "src/b/x.rs".to_string()),
+            ]
+        );
     }
 
     #[test]
