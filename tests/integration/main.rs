@@ -34,6 +34,7 @@ mod cli_status_test;
 mod cli_template_test;
 mod cli_transition_gate_test;
 mod cli_validate_test;
+mod cli_why_test;
 mod config_migration_preserves_context_test;
 mod config_schema_validation_test;
 mod config_test;

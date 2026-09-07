@@ -510,6 +510,10 @@ fn main() -> anyhow::Result<()> {
             let store = Store::load(&cwd, &config)?;
             lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json, &fs);
         }
+        Some(Commands::Why { path, json }) => {
+            let store = Store::load(&cwd, &config)?;
+            lazyspec::cli::why::run(&store, &path, json);
+        }
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;
             if json {

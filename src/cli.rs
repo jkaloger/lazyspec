@@ -25,6 +25,7 @@ pub mod style;
 pub mod tag;
 pub mod update;
 pub mod validate;
+pub mod why;
 pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
@@ -223,6 +224,19 @@ pub enum Commands {
         /// Filter by type (rfc, adr, story, iteration)
         #[arg(long, name = "type")]
         doc_type: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the documents that govern a source file
+    ///
+    /// Takes a file path, not a document ID, and reports every document whose
+    /// `governs` globs match it, with the glob that matched. A path no glob
+    /// matches lists nothing and exits zero.
+    Why {
+        /// Path to a source file, relative to the project root or absolute
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        path: std::path::PathBuf,
         /// Output as JSON
         #[arg(long)]
         json: bool,

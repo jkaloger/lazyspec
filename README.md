@@ -330,6 +330,7 @@ Every mutation's `--json` output also reports whether the change reached the doc
 | `tag add <id> <tags>...`                                                                          | Add tags to a document (auto-creates GitHub labels if needed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `tag remove <id> <tags>...`                                                                       | Remove tags from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `search <query> [--doc-type X]`                                                                   | Full-text search across all documents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `why <path>`                                                                                      | List the documents that govern a source file (see [Governed files](#governed-files))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `context <id> [--depth N]`                                                                        | Show the full document chain (RFC -> Story -> Iteration)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `context [--anchor TYPE]`                                                                         | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type, nesting each anchor's chain descendants and its inverted chain ancestors below it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `status`                                                                                          | Show full project status with all documents and validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -402,6 +403,21 @@ lazyspec context --json                   # whole-store forest
 lazyspec context --json --anchor story    # stories as roots: iterations below, RFCs inverted below
 lazyspec context --anchor iteration       # leaf pivot: each iteration with its story and RFC above it
 ```
+
+### `why`
+
+`why` takes a file path and reports every document whose `governs` globs match it. The argument is a path, not a document ID, and is never fuzzy-matched against ids. A relative path resolves against the project root, and matching is done against the path relative to the `[governs]` root (see [Governed files](#governed-files)); a path outside that root matches nothing.
+
+A document is listed once for each of its globs that matches, so a document pinning both `src/engine/**` and `src/engine/store.rs` is listed twice against `src/engine/store.rs`. Results are ordered by document path, then by glob.
+
+```sh
+lazyspec why src/engine/context/resolve.rs
+# [spec] Context resolution [accepted] docs/specs/SPEC-001-context.md [src/engine/context/**]
+
+lazyspec why src/engine/context/resolve.rs --json
+```
+
+Each `--json` entry carries `id`, `type`, `title`, `status`, `reviewed` and `glob`. `reviewed` is `null` on a document that declares none. A path no glob matches prints an empty array and exits zero.
 
 ### `provenance` subcommands
 
@@ -869,6 +885,42 @@ A row is addressed by its `name` — in every finding and load error above, and 
 `[[edges]]` is the whole declaration of the DAG. Rows describe it and drive findings; they never refuse a command.
 
 Findings stack: one document may be reported by several rows, and no row silences another's finding. A walk cannot stack, because a link either is hierarchy or is not, so traversal takes the narrower rule described above: an `[[edges]]` row that states a `traversal` suppresses the relationship's blanket marker instead of adding to it. The suppression reaches the walks and everything that reads them, `validate`'s status-hierarchy findings included: a row that suppresses a blanket marker changes both what `context` walks and which documents are reported as hanging off a rejected, superseded or unaccepted parent.
+
+### Governed files
+
+A document declares the source files it governs as globs in its frontmatter. `lazyspec why <path>` reports the documents governing a file; see [`why`](#why).
+
+```yaml
+---
+title: "Context resolution"
+type: spec
+status: accepted
+governs:
+  - src/engine/context/**
+reviewed: 662d5533f0b1c9e4a7d2
+---
+```
+
+`governs` is a list of glob patterns, matched against file paths relative to the code root. Every document type accepts it, and it defaults to empty. `reviewed` records the commit the document was last reviewed against; it is parsed and reported, and nothing judges it.
+
+Globs are compiled when the store loads. An entry that is not a valid glob is reported as a parse error naming the document and the entry, and that document then governs nothing until the entry is fixed.
+
+The optional `[governs]` table configures the code root and the unowned-file check:
+
+```toml
+[governs]
+scope   = ["src/**"]
+unowned = "warning"
+root    = "."
+```
+
+| Key       | Value                                                                                                                                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `root`    | Code root that `governs` globs resolve against. Defaults to `.`, the project root. A documents-only repository sets it to the checkout it describes, such as `../app`      |
+| `scope`   | Globs selecting the files that must be governed by some document. Defaults to empty                                                                                       |
+| `unowned` | Severity (`warning` or `error`) reported for a file under `scope` that no document governs. Omitted, the check is off                                                      |
+
+`scope` and `unowned` are parsed and exposed by `config --json`; `validate` does not yet report on them.
 
 ### Numbering
 
