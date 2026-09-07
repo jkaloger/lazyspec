@@ -4,6 +4,11 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
+governs:
+- src/cli/fix.rs
+- src/cli/fix/**
+- src/engine/ops/fix.rs
+- src/engine/ops/fix/**
 tags:
 - cli
 - fix

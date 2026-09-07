@@ -4,6 +4,11 @@ type: dictum
 status: accepted
 author: "jack"
 date: 2026-03-29
+governs:
+- src/lib.rs
+- src/engine.rs
+- src/cli.rs
+- src/tui.rs
 tags: [module-structure, architecture, engine, cli, tui]
 ---
 

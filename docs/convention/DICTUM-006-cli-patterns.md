@@ -4,6 +4,10 @@ type: dictum
 status: accepted
 author: "jack"
 date: 2026-03-29
+governs:
+- src/cli.rs
+- src/cli/**
+- src/main.rs
 tags: [cli, patterns]
 ---
 

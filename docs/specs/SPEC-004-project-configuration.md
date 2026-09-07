@@ -4,6 +4,8 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
+governs:
+- src/engine/config.rs
 tags: [engine, config]
 related: []
 ---

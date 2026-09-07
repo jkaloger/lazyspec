@@ -4,6 +4,10 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
+governs:
+- src/engine/store.rs
+- src/engine/store/**
+- src/engine/fs.rs
 tags:
 - engine
 - store

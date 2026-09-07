@@ -4,6 +4,9 @@ type: dictum
 status: accepted
 author: "jack"
 date: 2026-03-29
+governs:
+- src/tui.rs
+- src/tui/**
 tags: [tui, patterns]
 ---
 

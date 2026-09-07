@@ -4,6 +4,9 @@ type: spec
 status: draft
 author: "jkaloger"
 date: 2026-03-25
+governs:
+- src/engine/reservation.rs
+- src/engine/template.rs
 tags: [engine, numbering, sqids, reservations]
 related: []
 ---

@@ -4,6 +4,9 @@ type: spec
 status: draft
 author: jkaloger
 date: 2026-03-25
+governs:
+- src/engine/refs.rs
+- src/engine/refs/**
 tags:
 - refs
 - engine

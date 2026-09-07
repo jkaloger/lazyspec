@@ -210,3 +210,13 @@ from = "*"
 to = "*"
 via = "targets"
 traversal = "chain"
+
+[governs]
+scope = [
+  "src/cli/**/*.rs",
+  "src/tui/**/*.rs",
+  "src/engine/refs/**/*.rs",
+  "src/engine/store/**/*.rs",
+  "src/engine/ops/fix/**/*.rs",
+]
+unowned = "error"
