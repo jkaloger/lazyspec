@@ -91,6 +91,18 @@ pub fn serialize(doc: &DocMeta, body: &str) -> String {
         }
     }
 
+    if !doc.governs.is_empty() {
+        yaml_lines.push("governs:".to_string());
+        for entry in &doc.governs {
+            let yaml_value = serde_yaml::to_string(entry).unwrap_or_else(|_| entry.clone());
+            yaml_lines.push(format!("- {}", yaml_value.trim_end()));
+        }
+    }
+
+    if let Some(reviewed) = &doc.reviewed {
+        yaml_lines.push(format!("reviewed: {reviewed}"));
+    }
+
     if !doc.related.is_empty() {
         yaml_lines.push("related:".to_string());
         for rel in &doc.related {
@@ -162,8 +174,8 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         date: parsed.date,
         tags,
         provenance: parsed.provenance.unwrap_or_default(),
-        governs: vec![],
-        reviewed: None,
+        governs: parsed.governs.unwrap_or_default(),
+        reviewed: parsed.reviewed,
         related,
         validate_ignore: false,
         virtual_doc: false,
@@ -333,6 +345,10 @@ struct CommentFrontmatter {
     status: Option<String>,
     #[serde(default)]
     provenance: Option<Vec<String>>,
+    #[serde(default)]
+    governs: Option<Vec<String>>,
+    #[serde(default)]
+    reviewed: Option<String>,
     #[serde(default)]
     related: Option<Vec<serde_yaml::Value>>,
     #[serde(default)]
@@ -1018,6 +1034,30 @@ mod tests {
         let ctx = sample_context();
         let (meta, _) = deserialize(&serialized, &ctx).unwrap();
         assert_eq!(meta.provenance, doc.provenance);
+    }
+
+    /// RFC-068: a remote-backed document can carry pins. Without this the HTML
+    /// comment drops `governs`, and the cache mirror the store loads has no
+    /// globs to compile.
+    #[test]
+    fn roundtrip_preserves_governs_and_reviewed() {
+        let mut doc = sample_doc();
+        doc.governs = vec!["src/engine/**".to_string(), "src/**/*_test.rs".to_string()];
+        doc.reviewed = Some("0123456789abcdef".to_string());
+        let serialized = serialize(&doc, "body");
+        let ctx = sample_context();
+        let (meta, _) = deserialize(&serialized, &ctx).unwrap();
+        assert_eq!(meta.governs, doc.governs);
+        assert_eq!(meta.reviewed, doc.reviewed);
+    }
+
+    #[test]
+    fn serialize_omits_governs_and_reviewed_when_unset() {
+        let result = serialize(&sample_doc(), "body");
+        assert!(
+            !result.contains("governs:") && !result.contains("reviewed:"),
+            "should not emit empty pins, got: {result}"
+        );
     }
 
     #[test]

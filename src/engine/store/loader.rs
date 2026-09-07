@@ -3,10 +3,31 @@ use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
 use anyhow::Result;
 use chrono::Utc;
+use globset::{Glob, GlobMatcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{extract_id, title_from_folder_name, ParseError};
+
+/// Compile a document's `governs` entries into matchers, keeping each entry's
+/// source text so a match can report which glob matched (RFC-068).
+///
+/// One bad entry fails the whole set: a document with an uncompilable pin
+/// governs nothing until it is fixed, rather than governing a silent subset.
+/// The failure rides the loader's existing per-document [`ParseError`] channel.
+pub fn compile_governs(meta: &DocMeta) -> Result<Vec<(String, GlobMatcher)>, ParseError> {
+    meta.governs
+        .iter()
+        .map(|entry| {
+            Glob::new(entry)
+                .map(|g| (entry.clone(), g.compile_matcher()))
+                .map_err(|e| ParseError {
+                    path: meta.path.clone(),
+                    error: format!("invalid governs glob '{entry}': {e}"),
+                })
+        })
+        .collect()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn load_type_directory(

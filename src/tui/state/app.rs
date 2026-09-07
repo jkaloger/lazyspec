@@ -4318,6 +4318,8 @@ mod tests {
             parse_errors: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -4657,6 +4659,8 @@ mod tests {
             parse_errors: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         };
 
         let meta_a = DocMeta {

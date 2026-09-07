@@ -34,6 +34,12 @@ struct CacheFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignee: Option<String>,
     provenance: Vec<String>,
+    /// Pins are omitted when unset rather than written as `governs: []`, so a
+    /// backend that carries none leaves the cache mirror unchanged (RFC-068).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    governs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewed: Option<String>,
     related: Vec<BTreeMap<String, String>>,
     /// Custom attributes are flattened to top-level frontmatter keys so the
     /// cache loader's `parse_with_schema` (which reads undeclared top-level keys)
@@ -2879,6 +2885,8 @@ fn render_cache_content(meta: &DocMeta, body: &str) -> Result<String> {
         tags: meta.tags.clone(),
         assignee: meta.assignee.clone(),
         provenance: meta.provenance.clone(),
+        governs: meta.governs.clone(),
+        reviewed: meta.reviewed.clone(),
         related: meta
             .related
             .iter()

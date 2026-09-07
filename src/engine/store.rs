@@ -11,10 +11,11 @@ use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
 use crate::engine::traversal::TraversalWalk;
 use anyhow::Result;
+use globset::GlobMatcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
@@ -50,6 +51,31 @@ pub struct Store {
     /// search touches the body. Entries are dropped on `reload_file`/`remove_file`
     /// so a changed body is re-read (file-watch invalidation).
     pub(crate) body_cache: std::sync::Mutex<HashMap<PathBuf, String>>,
+    /// The code root `governs` globs are matched relative to: `[governs] root`
+    /// resolved against the docs root and lexically normalized, so a docs-repo
+    /// split (`root = "../app"`) points outside the store (RFC-068).
+    pub(crate) governs_root: PathBuf,
+    /// Each document's compiled `governs` globs, paired with the source text of
+    /// the entry they came from. Documents with no pins are absent.
+    pub(crate) governs_globs: HashMap<PathBuf, Vec<(String, GlobMatcher)>>,
+}
+
+/// Resolve `..` and `.` without touching the filesystem, so path arithmetic in
+/// the engine stays I/O-free (convention principle 3).
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 impl Store {
@@ -111,6 +137,16 @@ impl Store {
 
         let (forward_links, reverse_links) = Self::build_links(&docs);
 
+        let mut governs_globs = HashMap::new();
+        for meta in docs.values().filter(|d| !d.governs.is_empty()) {
+            match loader::compile_governs(meta) {
+                Ok(globs) => {
+                    governs_globs.insert(meta.path.clone(), globs);
+                }
+                Err(e) => parse_errors.push(e),
+            }
+        }
+
         let mut store = Store {
             root: root.to_path_buf(),
             docs,
@@ -121,6 +157,8 @@ impl Store {
             parse_errors,
             traversal_walk: TraversalWalk::from_config(config),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: normalize(&root.join(&config.governs.root)),
+            governs_globs,
         };
         store.propagate_parent_links();
 
@@ -133,6 +171,49 @@ impl Store {
 
     pub fn parse_errors(&self) -> &[ParseError] {
         &self.parse_errors
+    }
+
+    /// Every document whose `governs` globs match `path`, paired with the glob
+    /// that matched (RFC-068). A document matching on two of its own globs
+    /// appears twice, once per glob.
+    ///
+    /// A relative `path` is taken as relative to the docs root; matching is
+    /// against `path` made relative to `[governs] root`, so a path outside that
+    /// root matches nothing. Results are sorted by document path then glob, so
+    /// the order does not depend on `HashMap` iteration.
+    ///
+    /// A linear walk over the pinned documents. There is no index until there is
+    /// a measurement saying one is needed (convention principle 6).
+    pub fn governing(&self, path: &Path) -> Vec<(&DocMeta, &str)> {
+        let Some(relative) = self.relative_to_governs_root(path) else {
+            return Vec::new();
+        };
+
+        let mut matches: Vec<(&DocMeta, &str)> = self
+            .governs_globs
+            .iter()
+            .filter_map(|(doc_path, globs)| Some((self.docs.get(doc_path)?, globs)))
+            .flat_map(|(meta, globs)| {
+                globs
+                    .iter()
+                    .filter(|(_, matcher)| matcher.is_match(&relative))
+                    .map(move |(entry, _)| (meta, entry.as_str()))
+            })
+            .collect();
+        matches.sort_by(|(a, ag), (b, bg)| (&a.path, ag).cmp(&(&b.path, bg)));
+        matches
+    }
+
+    fn relative_to_governs_root(&self, path: &Path) -> Option<PathBuf> {
+        let absolute = if path.is_absolute() {
+            normalize(path)
+        } else {
+            normalize(&self.root.join(path))
+        };
+        absolute
+            .strip_prefix(&self.governs_root)
+            .ok()
+            .map(Path::to_path_buf)
     }
 
     pub fn list(&self, filter: &Filter) -> Vec<&DocMeta> {
@@ -282,6 +363,7 @@ impl Store {
         // Drop any memoized body so a changed file is re-read (file-watch
         // invalidation, ADR-013). Covers both the removed and re-parsed cases.
         self.body_cache.lock().unwrap().remove(relative_path);
+        self.governs_globs.remove(relative_path);
 
         let full_path = root.join(relative_path);
         if !fs.exists(&full_path) {
@@ -295,8 +377,17 @@ impl Store {
             Ok(mut meta) => {
                 meta.path = relative_path.to_path_buf();
                 meta.id = extract_id(&meta.path);
-                self.docs.insert(relative_path.to_path_buf(), meta);
                 self.parse_errors.retain(|e| e.path != relative_path);
+                if !meta.governs.is_empty() {
+                    match loader::compile_governs(&meta) {
+                        Ok(globs) => {
+                            self.governs_globs
+                                .insert(relative_path.to_path_buf(), globs);
+                        }
+                        Err(e) => self.parse_errors.push(e),
+                    }
+                }
+                self.docs.insert(relative_path.to_path_buf(), meta);
             }
             Err(e) => {
                 self.docs.remove(relative_path);
@@ -313,6 +404,7 @@ impl Store {
 
     pub fn remove_file(&mut self, relative_path: &Path) {
         self.body_cache.lock().unwrap().remove(relative_path);
+        self.governs_globs.remove(relative_path);
         self.docs.remove(relative_path);
         self.rebuild_links();
     }
@@ -1646,5 +1738,163 @@ mod tests {
     fn extract_id_flat_doc_unaffected_by_order_strip() {
         let path = PathBuf::from(".lazyspec/cache/story/STORY-12.md");
         assert_eq!(extract_id(&path), "STORY-12");
+    }
+
+    // RFC-068: `governs` globs compile at load and answer `governing(path)`.
+    mod governs {
+        use super::super::test_support::write_docs;
+        use super::*;
+        use crate::engine::config::GovernsConfig;
+
+        /// An rfc whose frontmatter carries `governs_block` verbatim, so a test
+        /// can pin one glob, several, or none.
+        fn pinned_doc(title: &str, governs_block: &str) -> String {
+            format!(
+                "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{governs_block}\nrelated: []\n---\n\nbody\n"
+            )
+        }
+
+        fn load(files: &[(&str, &str)], root: &str, config: &Config) -> (tempfile::TempDir, Store) {
+            let tmp = write_docs(files);
+            let store = Store::load(&tmp.path().join(root), config).unwrap();
+            (tmp, store)
+        }
+
+        fn ids(matches: &[(&DocMeta, &str)]) -> Vec<(String, String)> {
+            matches
+                .iter()
+                .map(|(d, g)| (d.id.clone(), g.to_string()))
+                .collect()
+        }
+
+        #[test]
+        fn uncompilable_entry_reports_document_and_entry() {
+            let (_tmp, store) = load(
+                &[(
+                    "docs/rfcs/RFC-001-bad.md",
+                    &pinned_doc("Bad", "governs:\n  - \"src/[unclosed/**\""),
+                )],
+                "",
+                &Config::default(),
+            );
+
+            let errors = store.parse_errors();
+            assert_eq!(errors.len(), 1, "expected one load error, got {errors:?}");
+            assert_eq!(errors[0].path, PathBuf::from("docs/rfcs/RFC-001-bad.md"));
+            assert!(
+                errors[0].error.contains("src/[unclosed/**"),
+                "error should name the failing entry, got: {}",
+                errors[0].error
+            );
+            assert!(
+                store.get(Path::new("docs/rfcs/RFC-001-bad.md")).is_some(),
+                "a bad pin should not evict the document"
+            );
+            assert!(store.governing(Path::new("src/engine/store.rs")).is_empty());
+        }
+
+        #[test]
+        fn two_documents_matching_one_path_each_report_their_own_glob() {
+            let (_tmp, store) = load(
+                &[
+                    (
+                        "docs/rfcs/RFC-001-engine.md",
+                        &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                    ),
+                    (
+                        "docs/rfcs/RFC-002-store.md",
+                        &pinned_doc("Store", "governs:\n  - src/engine/store*.rs"),
+                    ),
+                ],
+                "",
+                &Config::default(),
+            );
+
+            let matches = store.governing(Path::new("src/engine/store.rs"));
+            assert_eq!(
+                ids(&matches),
+                vec![
+                    ("RFC-001".to_string(), "src/engine/**".to_string()),
+                    ("RFC-002".to_string(), "src/engine/store*.rs".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn one_document_reports_each_of_its_matching_globs() {
+            let (_tmp, store) = load(
+                &[(
+                    "docs/rfcs/RFC-001-engine.md",
+                    &pinned_doc("Engine", "governs:\n  - src/engine/**\n  - src/**/store.rs"),
+                )],
+                "",
+                &Config::default(),
+            );
+
+            let matches = store.governing(Path::new("src/engine/store.rs"));
+            assert_eq!(
+                ids(&matches),
+                vec![
+                    ("RFC-001".to_string(), "src/**/store.rs".to_string()),
+                    ("RFC-001".to_string(), "src/engine/**".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn unmatched_path_governed_by_nothing() {
+            let (_tmp, store) = load(
+                &[(
+                    "docs/rfcs/RFC-001-engine.md",
+                    &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                )],
+                "",
+                &Config::default(),
+            );
+
+            assert!(store.governing(Path::new("src/cli/show.rs")).is_empty());
+        }
+
+        #[test]
+        fn document_without_pins_compiles_nothing_and_reports_nothing() {
+            let (_tmp, store) = load(
+                &[("docs/rfcs/RFC-001-plain.md", &pinned_doc("Plain", ""))],
+                "",
+                &Config::default(),
+            );
+
+            assert!(store.parse_errors().is_empty());
+            assert!(store.governs_globs.is_empty());
+            assert!(store.governing(Path::new("src/engine/store.rs")).is_empty());
+        }
+
+        #[test]
+        fn globs_resolve_relative_to_the_configured_root_not_the_docs_repo() {
+            let config = Config {
+                governs: GovernsConfig {
+                    root: PathBuf::from("../app"),
+                    ..GovernsConfig::default()
+                },
+                ..Config::default()
+            };
+            let (_tmp, store) = load(
+                &[(
+                    "docs_repo/docs/rfcs/RFC-001-engine.md",
+                    &pinned_doc("Engine", "governs:\n  - src/engine/**"),
+                )],
+                "docs_repo",
+                &config,
+            );
+
+            let matches = store.governing(Path::new("../app/src/engine/store.rs"));
+            assert_eq!(
+                ids(&matches),
+                vec![("RFC-001".to_string(), "src/engine/**".to_string())]
+            );
+            assert!(
+                store.governing(Path::new("src/engine/store.rs")).is_empty(),
+                "the same relative path under the docs repo is outside the code root"
+            );
+        }
     }
 }

@@ -890,6 +890,30 @@ Body.
         assert_eq!(reparsed.assignee, Some("bob".to_string()));
     }
 
+    // RFC-068: pins must survive the cache mirror, or a remote-backed document
+    // loads with an empty `governs` and is silently skipped at compile time.
+    #[test]
+    fn governs_and_reviewed_roundtrip_through_cache_serializer() {
+        use crate::engine::store_dispatch::render_cache_content_for_test;
+        let mut meta = blank_meta();
+        meta.governs = vec!["src/engine/**".to_string()];
+        meta.reviewed = Some("0123456".to_string());
+        let content = render_cache_content_for_test(&meta, "Body.");
+        let reparsed = DocMeta::parse(&content).unwrap();
+        assert_eq!(reparsed.governs, meta.governs);
+        assert_eq!(reparsed.reviewed, meta.reviewed);
+    }
+
+    #[test]
+    fn unset_governs_and_reviewed_are_absent_from_serialized_frontmatter() {
+        use crate::engine::store_dispatch::render_cache_content_for_test;
+        let content = render_cache_content_for_test(&blank_meta(), "Body.");
+        assert!(
+            !content.contains("governs:") && !content.contains("reviewed:"),
+            "unset pins must not appear in frontmatter, got:\n{content}"
+        );
+    }
+
     #[test]
     fn relation_type_new_lowercases_and_displays_inner() {
         assert_eq!(RelationType::new("Tracks").to_string(), "tracks");

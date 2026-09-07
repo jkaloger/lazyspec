@@ -1256,6 +1256,8 @@ mod attr_schema_tests {
             // assertion in this module is about one document's attributes.
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         }
     }
 
@@ -1352,6 +1354,8 @@ mod attr_schema_tests {
             // As `store_with` above: no hierarchy, none read.
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         }
     }
 
@@ -1505,6 +1509,8 @@ mod unknown_relationship_tests {
             // against, which no traversal role takes part in.
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         }
     }
 
@@ -1824,6 +1830,8 @@ mod edge_tests {
             parse_errors: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
+            governs_root: PathBuf::from("."),
+            governs_globs: HashMap::new(),
         }
     }
 
