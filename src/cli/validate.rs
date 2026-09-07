@@ -62,11 +62,21 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
     }
 }
 
+/// The slug for the warnings `gh_auth_warnings` raises. They are environment
+/// findings rather than [`ValidationIssue`](crate::engine::validation::ValidationIssue)s,
+/// but they travel in the same array, so they carry the same `rule`/`message`
+/// shape and one slug for all of them.
+pub const GH_AUTH_RULE: &str = "gh-auth";
+
 pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> String {
     let result = store.validate_full(config);
-    let errors: Vec<_> = result.errors.iter().map(|e| format!("{}", e)).collect();
-    let mut warnings: Vec<_> = result.warnings.iter().map(|w| format!("{}", w)).collect();
-    warnings.extend(extra_warnings.iter().cloned());
+    let errors: Vec<_> = result.errors.iter().map(|e| e.to_json()).collect();
+    let mut warnings: Vec<_> = result.warnings.iter().map(|w| w.to_json()).collect();
+    warnings.extend(
+        extra_warnings
+            .iter()
+            .map(|w| serde_json::json!({ "rule": GH_AUTH_RULE, "message": w })),
+    );
     let parse_errors: Vec<_> = store
         .parse_errors()
         .iter()

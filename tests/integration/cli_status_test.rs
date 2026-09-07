@@ -153,3 +153,31 @@ fn status_empty_project() {
     let human_output = lazyspec::cli::status::run_human(&store);
     assert!(human_output.is_empty() || human_output.trim().is_empty());
 }
+
+// DICTUM-006: `status --json` embeds the findings `validate --json` reports, so
+// STORY-266's object shape reaches both or the two commands disagree about what
+// a finding is.
+#[test]
+fn status_json_findings_have_the_same_shape_as_validate_json() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-030-alpha.md", "Alpha", "draft");
+    fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
+    let store = fixture.store();
+
+    let status: serde_json::Value = serde_json::from_str(&lazyspec::cli::status::run_json(
+        &store,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
+    ))
+    .unwrap();
+    let validate: serde_json::Value = serde_json::from_str(&lazyspec::cli::validate::run_json(
+        &store,
+        &fixture.config(),
+        &[],
+    ))
+    .unwrap();
+
+    assert_eq!(status["validation"]["errors"], validate["errors"]);
+    assert_eq!(status["validation"]["errors"][0]["rule"], "duplicate-id");
+}

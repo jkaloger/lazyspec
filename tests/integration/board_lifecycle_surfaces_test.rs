@@ -146,7 +146,11 @@ fn validate_json_reports_a_lifecycle_the_nominated_board_cannot_own() {
 
     let errors = parsed["errors"].as_array().unwrap();
     assert_eq!(errors.len(), 1, "got: {json}");
-    let message = errors[0].as_str().unwrap();
+    assert_eq!(
+        errors[0]["rule"], "status-authority-lifecycle-conflict",
+        "got: {json}"
+    );
+    let message = errors[0]["message"].as_str().unwrap();
     assert!(message.contains("status_authority"), "got: {json}");
     assert!(message.contains("lifecycle"), "got: {json}");
     assert!(message.contains("ticket"), "got: {json}");
@@ -1467,7 +1471,8 @@ status_authority = "PROJECT-seven"
 name = "related-to"
 "#;
 
-/// The `errors` array `validate --json` reports for `config_src`.
+/// The rendered `message` of every `errors` finding `validate --json` reports
+/// for `config_src`.
 fn validate_json_errors(config_src: &str) -> Vec<String> {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join(".lazyspec.toml"), config_src).unwrap();
@@ -1480,7 +1485,12 @@ fn validate_json_errors(config_src: &str) -> Vec<String> {
         .as_array()
         .expect("errors array")
         .iter()
-        .map(|e| e.as_str().unwrap().to_string())
+        .map(|e| {
+            e["message"]
+                .as_str()
+                .expect("finding carries a message")
+                .to_string()
+        })
         .collect()
 }
 

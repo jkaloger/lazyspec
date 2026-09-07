@@ -147,12 +147,13 @@ fn validate_duplicate_id_json_output() {
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
-    let has_dup = errors.iter().any(|e| {
-        e.as_str()
-            .map(|s| s.starts_with("duplicate id: RFC-030"))
-            .unwrap_or(false)
-    });
-    assert!(has_dup, "JSON output should contain duplicate id error");
+    let has_dup = errors
+        .iter()
+        .any(|e| e["rule"] == "duplicate-id" && e["id"] == "RFC-030");
+    assert!(
+        has_dup,
+        "JSON output should contain duplicate id error, got: {errors:?}"
+    );
 }
 
 #[test]
@@ -279,7 +280,7 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
     let errors = parsed["errors"].as_array().unwrap();
     let has_broken = errors
         .iter()
-        .any(|e| e.as_str().map(|s| s.contains("RFC-999")).unwrap_or(false));
+        .any(|e| e["rule"] == "broken-link" && e["target"] == "RFC-999");
     assert!(
         has_broken,
         "JSON output should contain broken link error with unresolved ID RFC-999, got: {:?}",
@@ -591,4 +592,101 @@ fn validate_flags_undeclared_relationship_name() {
         }
         _ => unreachable!(),
     }
+}
+
+// --- STORY-266: findings are objects carrying `rule` and `message` ---
+
+/// A project with exactly one error (two RFCs sharing an id) and exactly one
+/// warning (a story satisfying no `stories-need-rfcs` row), so the arrays can be
+/// zipped against the engine result one finding at a time. Returned with the
+/// config that declares the demand, since `Config::default()` declares no DAG.
+fn one_error_one_warning() -> (crate::common::TestFixture, Config) {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-030-alpha.md", "Alpha", "draft");
+    fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
+    fixture.write_story("STORY-001-unlinked.md", "Unlinked", "draft", None);
+    (fixture, config_with_starter_edges())
+}
+
+// AC1 + AC2: each finding is an object whose `rule` is the variant's slug and
+// whose `message` is byte-for-byte the string the array used to hold.
+#[test]
+fn validate_json_findings_carry_the_rule_slug_and_the_rendered_message() {
+    let (fixture, config) = one_error_one_warning();
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
+
+    let output = lazyspec::cli::validate::run_json(&store, &config, &[]);
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    for (key, issues) in [("errors", &result.errors), ("warnings", &result.warnings)] {
+        let findings = parsed[key].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{key}, got: {output}");
+        for (finding, issue) in findings.iter().zip(issues) {
+            assert_eq!(finding["rule"], issue.rule(), "{key}, got: {output}");
+            assert_eq!(
+                finding["message"],
+                issue.to_string(),
+                "{key}, got: {output}"
+            );
+        }
+    }
+}
+
+// AC1: the variant's own fields sit beside the message, which is the whole point
+// of the object -- repair data a sentence cannot hold.
+#[test]
+fn validate_json_findings_carry_the_variants_own_fields() {
+    let (fixture, config) = one_error_one_warning();
+    let store = fixture.store_with(&config);
+    let output = lazyspec::cli::validate::run_json(&store, &config, &[]);
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let error = &parsed["errors"][0];
+    assert_eq!(error["rule"], "duplicate-id");
+    assert_eq!(error["id"], "RFC-030");
+    assert_eq!(
+        error["paths"],
+        serde_json::json!(["docs/rfcs/RFC-030-alpha.md", "docs/rfcs/RFC-030-beta.md"])
+    );
+
+    let warning = &parsed["warnings"][0];
+    assert_eq!(warning["rule"], "unsatisfied-edge");
+    assert_eq!(warning["path"], "docs/stories/STORY-001-unlinked.md");
+    assert_eq!(warning["from_type"], "story");
+    assert_eq!(warning["to"], "rfc");
+}
+
+// A gh auth warning is not a `ValidationIssue`, but it travels in the same
+// array, so it must not survive the change as a bare string.
+#[test]
+fn validate_json_gives_a_gh_auth_warning_the_same_object_shape() {
+    let fixture = crate::common::TestFixture::new();
+    let store = fixture.store();
+    let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
+    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &extra);
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(parsed["warnings"][0]["rule"], "gh-auth", "got: {output}");
+    assert_eq!(parsed["warnings"][0]["message"], extra[0], "got: {output}");
+}
+
+// AC3: the human render is pinned against the same fixture. The object shape is
+// a `--json` change and reaches this output nowhere.
+#[test]
+fn validate_human_output_is_unchanged_by_the_finding_object_shape() {
+    let (fixture, config) = one_error_one_warning();
+    let store = fixture.store_with(&config);
+    let output = lazyspec::cli::validate::run_human(&store, &config, true, &[]);
+
+    assert_eq!(
+        output,
+        format!(
+            "  {} duplicate id: RFC-030 (docs/rfcs/RFC-030-alpha.md, docs/rfcs/RFC-030-beta.md)\n  \
+             {} unsatisfied edge [stories-need-rfcs]: docs/stories/STORY-001-unlinked.md \
+             (story needs \"implements\" to one of: rfc)\n",
+            lazyspec::cli::style::error_prefix(),
+            lazyspec::cli::style::warning_prefix(),
+        )
+    );
 }

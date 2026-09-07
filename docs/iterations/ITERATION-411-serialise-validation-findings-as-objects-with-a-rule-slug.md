@@ -1,7 +1,7 @@
 ---
 title: Serialise validation findings as objects with a rule slug
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

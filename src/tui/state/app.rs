@@ -4719,6 +4719,14 @@ mod tests {
             "expected a 'duplicate id' error, got: {:?}",
             app.validation_errors
         );
+        // STORY-266 AC4: findings became objects for `--json` consumers; the
+        // panel still holds exactly the `message` field of each.
+        let messages: Vec<String> = crate::engine::validation::validate_full(&app.store, &config)
+            .errors
+            .iter()
+            .map(|e| e.to_json()["message"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(app.validation_errors, messages);
     }
 
     #[test]

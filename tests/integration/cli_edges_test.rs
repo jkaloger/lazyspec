@@ -57,12 +57,19 @@ fn validate_json(fixture: &crate::common::TestFixture, config: &Config) -> serde
     serde_json::from_str(&output).expect("validate --json emits JSON")
 }
 
-fn strings(value: &serde_json::Value, key: &str) -> Vec<String> {
+/// The rendered `message` of every finding under `key`. The assertions below
+/// are about the prose a row produces, which is one field of the finding object.
+fn messages(value: &serde_json::Value, key: &str) -> Vec<String> {
     value[key]
         .as_array()
         .unwrap_or_else(|| panic!("`{key}` is an array in {value}"))
         .iter()
-        .map(|v| v.as_str().expect("finding is a string").to_string())
+        .map(|v| {
+            v["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("finding carries a message in {v}"))
+                .to_string()
+        })
         .collect()
 }
 
@@ -144,7 +151,7 @@ required = "error"
 
     fixture.write_iteration("ITERATION-001.md", "Unlinked", "draft", None);
 
-    let errors = strings(&validate_json(&fixture, &config), "errors");
+    let errors = messages(&validate_json(&fixture, &config), "errors");
     let edge_findings: Vec<&String> = errors
         .iter()
         .filter(|e| e.contains("unsatisfied edge"))
@@ -191,7 +198,7 @@ required = "error"
     );
 
     let parsed = validate_json(&fixture, &config);
-    let errors = strings(&parsed, "errors");
+    let errors = messages(&parsed, "errors");
 
     let edge_findings: Vec<&String> = errors
         .iter()
@@ -237,19 +244,19 @@ required = "warning"
     let parsed = validate_json(&fixture, &config);
 
     assert!(
-        strings(&parsed, "warnings").iter().any(|w| {
+        messages(&parsed, "warnings").iter().any(|w| {
             w.contains("unsatisfied edge [iterations-need-relations]")
                 && w.contains("(iteration needs any relationship to a document of any type)")
         }),
         "got warnings {:?}",
-        strings(&parsed, "warnings")
+        messages(&parsed, "warnings")
     );
     assert!(
-        !strings(&parsed, "errors")
+        !messages(&parsed, "errors")
             .iter()
             .any(|e| e.contains("unsatisfied edge")),
         "a `warning` row must not raise an error, got: {:?}",
-        strings(&parsed, "errors")
+        messages(&parsed, "errors")
     );
 }
 

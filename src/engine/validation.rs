@@ -2,11 +2,16 @@ use crate::engine::config::{
     AttrKind, Config, EdgeDef, RelSelector, Severity, StoreBackend, TypeDef, TypeSelector,
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-#[derive(Debug)]
+/// The derived `Serialize` is the variant's own fields and nothing else; the
+/// finding an agent consumes is [`ValidationIssue::to_json`], which adds the
+/// [`rule`](ValidationIssue::rule) slug and the rendered `message`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
 pub enum ValidationIssue {
     BrokenLink {
         source: PathBuf,
@@ -102,6 +107,50 @@ pub enum ValidationIssue {
         type_name: String,
         status_authority: String,
     },
+}
+
+impl ValidationIssue {
+    /// The stable slug naming which rule produced this finding. Selecting on it
+    /// is what spares a consumer parsing [`Display`](std::fmt::Display) prose.
+    /// The match is exhaustive with no wildcard so a new variant cannot ship
+    /// without one.
+    pub fn rule(&self) -> &'static str {
+        match self {
+            ValidationIssue::BrokenLink { .. } => "broken-link",
+            ValidationIssue::UnsatisfiedEdge { .. } => "unsatisfied-edge",
+            ValidationIssue::SupersededParent { .. } => "superseded-parent",
+            ValidationIssue::RejectedParent { .. } => "rejected-parent",
+            ValidationIssue::DuplicateId { .. } => "duplicate-id",
+            ValidationIssue::InvalidAcSlug { .. } => "invalid-ac-slug",
+            ValidationIssue::RefCountExceeded { .. } => "ref-count-exceeded",
+            ValidationIssue::CrossModuleRefs { .. } => "cross-module-refs",
+            ValidationIssue::OrphanRef { .. } => "orphan-ref",
+            ValidationIssue::SingletonViolation { .. } => "singleton-violation",
+            ValidationIssue::ParentTypeViolation { .. } => "parent-type-violation",
+            ValidationIssue::ParentTypeNotSingleton { .. } => "parent-type-not-singleton",
+            ValidationIssue::UnknownRelationship { .. } => "unknown-relationship",
+            ValidationIssue::AttributeKindMismatch { .. } => "attribute-kind-mismatch",
+            ValidationIssue::AttributeBadEnumValue { .. } => "attribute-bad-enum-value",
+            ValidationIssue::MissingRequiredAttribute { .. } => "missing-required-attribute",
+            ValidationIssue::UndeclaredAttribute { .. } => "undeclared-attribute",
+            ValidationIssue::UnknownProjectFieldOption { .. } => "unknown-project-field-option",
+            ValidationIssue::StatusAuthorityLifecycleConflict { .. } => {
+                "status-authority-lifecycle-conflict"
+            }
+            ValidationIssue::StatusAuthorityWrongStore { .. } => "status-authority-wrong-store",
+            ValidationIssue::StatusAuthorityNotABoard { .. } => "status-authority-not-a-board",
+        }
+    }
+
+    /// The finding as `--json` reports it: `rule`, the `message` the human
+    /// render prints, and the variant's own fields beside them.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut value =
+            serde_json::to_value(self).expect("a validation issue's fields serialise as JSON");
+        value["rule"] = self.rule().into();
+        value["message"] = self.to_string().into();
+        value
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2629,5 +2678,156 @@ mod hierarchy_from_edges_tests {
             "`blocks` is hierarchy nowhere in this config, got errors {:?}",
             result.errors
         );
+    }
+}
+
+#[cfg(test)]
+mod finding_shape_tests {
+    use super::*;
+
+    /// One of every variant. A new variant that is not listed here fails to
+    /// compile, which is the point: `rule` and the serialised shape are the
+    /// contract `validate --json` consumers select on.
+    fn one_of_each_variant() -> Vec<ValidationIssue> {
+        let path = || PathBuf::from("docs/stories/STORY-001-a.md");
+        vec![
+            ValidationIssue::BrokenLink {
+                source: path(),
+                target: "STORY-999".to_string(),
+            },
+            ValidationIssue::UnsatisfiedEdge {
+                path: path(),
+                edge_name: "stories-need-rfcs".to_string(),
+                from_type: "story".to_string(),
+                to: TypeSelector::Types(vec!["rfc".to_string()]),
+                via: RelSelector::Named(vec!["implements".to_string()]),
+            },
+            ValidationIssue::SupersededParent {
+                path: path(),
+                parent: path(),
+            },
+            ValidationIssue::RejectedParent {
+                path: path(),
+                parent: path(),
+            },
+            ValidationIssue::DuplicateId {
+                id: "STORY-001".to_string(),
+                paths: vec![path()],
+            },
+            ValidationIssue::InvalidAcSlug {
+                path: path(),
+                slug: "Bad Slug".to_string(),
+                reason: "empty AC slug".to_string(),
+            },
+            ValidationIssue::RefCountExceeded {
+                path: path(),
+                count: 9,
+                ceiling: 5,
+            },
+            ValidationIssue::CrossModuleRefs {
+                path: path(),
+                module_count: 4,
+            },
+            ValidationIssue::OrphanRef {
+                path: path(),
+                ref_target: "src/gone.rs".to_string(),
+            },
+            ValidationIssue::SingletonViolation {
+                type_name: "convention".to_string(),
+                paths: vec![path()],
+            },
+            ValidationIssue::ParentTypeViolation {
+                path: path(),
+                type_name: "dictum".to_string(),
+                expected_dir: "docs/convention".to_string(),
+            },
+            ValidationIssue::ParentTypeNotSingleton {
+                type_name: "dictum".to_string(),
+                parent_type: "convention".to_string(),
+            },
+            ValidationIssue::UnknownRelationship {
+                path: path(),
+                name: "bogus-rel".to_string(),
+            },
+            ValidationIssue::AttributeKindMismatch {
+                path: path(),
+                attr: "estimate".to_string(),
+                expected: "int".to_string(),
+            },
+            ValidationIssue::AttributeBadEnumValue {
+                path: path(),
+                attr: "priority".to_string(),
+                allowed: vec!["low".to_string()],
+            },
+            ValidationIssue::MissingRequiredAttribute {
+                path: path(),
+                attr: "owner".to_string(),
+            },
+            ValidationIssue::UndeclaredAttribute {
+                path: path(),
+                attr: "mystery".to_string(),
+            },
+            ValidationIssue::UnknownProjectFieldOption {
+                path: path(),
+                attr: "PROJECT-1.Status".to_string(),
+                allowed: vec!["In Progress".to_string()],
+            },
+            ValidationIssue::StatusAuthorityLifecycleConflict {
+                type_name: "ticket".to_string(),
+                status_authority: "PROJECT-7".to_string(),
+            },
+            ValidationIssue::StatusAuthorityWrongStore {
+                type_name: "ticket".to_string(),
+                store: "filesystem".to_string(),
+                status_authority: "PROJECT-7".to_string(),
+            },
+            ValidationIssue::StatusAuthorityNotABoard {
+                type_name: "ticket".to_string(),
+                status_authority: "board-seven".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_variant_has_a_non_empty_rule_slug() {
+        for issue in one_of_each_variant() {
+            assert!(!issue.rule().is_empty(), "no slug for {issue:?}");
+        }
+    }
+
+    #[test]
+    fn no_two_variants_share_a_rule_slug() {
+        let variants = one_of_each_variant();
+        let distinct: HashSet<&str> = variants.iter().map(|i| i.rule()).collect();
+        assert_eq!(distinct.len(), variants.len(), "slugs collide");
+    }
+
+    #[test]
+    fn to_json_carries_the_rule_and_the_rendered_message() {
+        for issue in one_of_each_variant() {
+            let json = issue.to_json();
+            assert_eq!(json["rule"], issue.rule(), "for {issue:?}");
+            assert_eq!(json["message"], issue.to_string(), "for {issue:?}");
+        }
+    }
+
+    // The reason a string finding could not carry repair data: the fields sit
+    // beside the message, addressable one at a time.
+    #[test]
+    fn to_json_carries_the_variants_own_fields() {
+        let json = ValidationIssue::UnsatisfiedEdge {
+            path: PathBuf::from("docs/stories/STORY-001-a.md"),
+            edge_name: "stories-need-rfcs".to_string(),
+            from_type: "story".to_string(),
+            to: TypeSelector::Types(vec!["rfc".to_string(), "spec".to_string()]),
+            via: RelSelector::Named(vec!["implements".to_string()]),
+        }
+        .to_json();
+
+        assert_eq!(json["path"], "docs/stories/STORY-001-a.md");
+        assert_eq!(json["edge_name"], "stories-need-rfcs");
+        assert_eq!(json["from_type"], "story");
+        assert_eq!(json["to"], serde_json::json!(["rfc", "spec"]));
+        assert_eq!(json["via"], serde_json::json!("implements"));
     }
 }

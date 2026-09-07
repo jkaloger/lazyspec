@@ -22,8 +22,8 @@ pub fn run_json(store: &Store, config: &Config, root: &Path, gh: &dyn GhIssueRea
         .collect();
 
     let result = store.validate_full(config);
-    let errors: Vec<_> = result.errors.iter().map(|e| format!("{}", e)).collect();
-    let warnings: Vec<_> = result.warnings.iter().map(|w| format!("{}", w)).collect();
+    let errors: Vec<_> = result.errors.iter().map(|e| e.to_json()).collect();
+    let warnings: Vec<_> = result.warnings.iter().map(|w| w.to_json()).collect();
 
     let parse_errors: Vec<_> = store
         .parse_errors()
