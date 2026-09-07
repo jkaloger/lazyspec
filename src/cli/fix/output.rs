@@ -7,6 +7,10 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
         if r.fields_added.is_empty() {
             continue;
         }
+        if let Some(e) = &r.error {
+            result.push_str(&format!("error: could not fix {}: {}\n", r.path, e));
+            continue;
+        }
         let fields = r.fields_added.join(", ");
         if dry_run {
             result.push_str(&format!("Would fix {} (would add: {})\n", r.path, fields));
@@ -16,6 +20,13 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     }
 
     for c in &output.conflict_fixes {
+        if let Some(e) = &c.error {
+            result.push_str(&format!(
+                "error: could not rename {} -> {}: {}\n",
+                c.old_path, c.new_path, e
+            ));
+            continue;
+        }
         if dry_run {
             result.push_str(&format!("Would rename {} -> {}\n", c.old_path, c.new_path));
         } else {
@@ -24,6 +35,13 @@ pub(super) fn format_human(output: &FixOutput, dry_run: bool) -> String {
     }
 
     for r in &output.status_fixes {
+        if let Some(e) = &r.error {
+            result.push_str(&format!(
+                "error: could not fix status in {}: {}\n",
+                r.path, e
+            ));
+            continue;
+        }
         if dry_run {
             result.push_str(&format!(
                 "Would fix status in {}: {} -> {}\n",

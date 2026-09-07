@@ -328,6 +328,7 @@ fn renumber_detects_external_references() {
         new_id: "RFC-xyz".to_string(),
         references_updated: vec![],
         written: false,
+        error: None,
     }];
 
     let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(
@@ -365,6 +366,7 @@ fn renumber_external_refs_skips_managed_files() {
         new_id: "RFC-xyz".to_string(),
         references_updated: vec![],
         written: false,
+        error: None,
     }];
 
     let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(
@@ -554,6 +556,7 @@ fn renumber_external_refs_skips_noise_dirs() {
         new_id: "RFC-xyz".to_string(),
         references_updated: vec![],
         written: false,
+        error: None,
     }];
 
     let ext_refs = lazyspec::cli::fix::renumber::scan_external_references(

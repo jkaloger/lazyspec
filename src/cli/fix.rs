@@ -27,6 +27,9 @@ pub struct RenumberFixResult {
     pub new_id: String,
     pub references_updated: Vec<ReferenceUpdate>,
     pub written: bool,
+    /// Why the rename did not reach the document, when it failed. `None` for a
+    /// dry run and for a rename that landed.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -71,8 +74,12 @@ pub fn run(
     }
 
     // A rewrite that could not reach its document is not a successful run, even
-    // though the plan named fixes to make.
-    let failed = output.relation_fixes.iter().any(|r| r.error.is_some());
+    // though the plan named fixes to make. Every collector, not just relations:
+    // a run that failed to write is a failure whichever repair it was making.
+    let failed = output.field_fixes.iter().any(|r| r.error.is_some())
+        || output.conflict_fixes.iter().any(|r| r.error.is_some())
+        || output.relation_fixes.iter().any(|r| r.error.is_some())
+        || output.status_fixes.iter().any(|r| r.error.is_some());
 
     if has_fixes && !failed {
         0
@@ -199,6 +206,13 @@ pub fn run_renumber(
         println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
     } else {
         for c in &output.changes {
+            if let Some(e) = &c.error {
+                println!(
+                    "error: could not rename {} -> {}: {}",
+                    c.old_path, c.new_path, e
+                );
+                continue;
+            }
             if dry_run {
                 println!("Would rename {} -> {}", c.old_path, c.new_path);
             } else {
@@ -235,7 +249,13 @@ pub fn run_renumber(
         }
     }
 
-    0
+    // A rename that could not reach its document is a failed run, like every
+    // other `fix` sub-mode.
+    if output.changes.iter().any(|c| c.error.is_some()) {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn run_json(

@@ -8,7 +8,7 @@ use crate::engine::store::{extract_id_from_name, Store};
 use crate::engine::template::{next_number, next_sqids_id};
 
 use super::cascade::cascade_references;
-use super::ConflictFixResult;
+use super::{record_write, ConflictFixResult};
 
 pub(super) fn collect_conflict_fixes(
     root: &Path,
@@ -60,8 +60,13 @@ pub(super) fn collect_conflict_fixes(
 
         for loser in &docs[1..] {
             if let Some(mut fix) = renumber_doc(root, loser, &id, config, dry_run, fs) {
-                let refs = cascade_references(root, store, &fix.old_id, &fix.new_id, dry_run, fs);
-                fix.references_updated = refs;
+                // A rename that never landed leaves the old id on disk, so
+                // rewriting every reference to point at the new one would break
+                // links the run claimed to be repairing.
+                if fix.error.is_none() {
+                    fix.references_updated =
+                        cascade_references(root, store, &fix.old_id, &fix.new_id, dry_run, fs);
+                }
                 results.push(fix);
             }
         }
@@ -117,10 +122,11 @@ fn renumber_doc(
         let old_abs = root.join(parent_rel);
         let new_abs = root.join(&new_parent_rel);
 
-        if !dry_run {
-            fs.rename(&old_abs, &new_abs).ok()?;
+        let (written, error) = record_write(dry_run, || {
+            fs.rename(&old_abs, &new_abs)?;
             update_title_in_file(&new_abs.join("index.md"), old_id, &new_id, fs);
-        }
+            Ok(())
+        });
 
         Some(ConflictFixResult {
             old_path: old_path_str,
@@ -128,7 +134,8 @@ fn renumber_doc(
             old_id: old_id.to_string(),
             new_id,
             references_updated: vec![],
-            written: !dry_run,
+            written,
+            error,
         })
     } else {
         let stem = doc.path.file_stem().and_then(|f| f.to_str())?;
@@ -140,10 +147,11 @@ fn renumber_doc(
         let old_abs = root.join(&doc.path);
         let new_abs = root.join(&new_rel);
 
-        if !dry_run {
-            fs.rename(&old_abs, &new_abs).ok()?;
+        let (written, error) = record_write(dry_run, || {
+            fs.rename(&old_abs, &new_abs)?;
             update_title_in_file(&new_abs, old_id, &new_id, fs);
-        }
+            Ok(())
+        });
 
         Some(ConflictFixResult {
             old_path: old_path_str,
@@ -151,7 +159,8 @@ fn renumber_doc(
             old_id: old_id.to_string(),
             new_id,
             references_updated: vec![],
-            written: !dry_run,
+            written,
+            error,
         })
     }
 }

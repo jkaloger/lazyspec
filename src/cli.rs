@@ -287,6 +287,11 @@ pub enum Commands {
         json: bool,
     },
     /// Fix documents with broken or incomplete frontmatter
+    ///
+    /// The sub-modes are mutually exclusive, and each reads a different subset
+    /// of the remaining arguments. Declaring the incompatible combinations here
+    /// makes clap reject them, rather than letting a precedence chain in
+    /// `main.rs` silently run one and drop the other (DICTUM-006).
     Fix {
         /// Document paths to fix (fixes all broken docs if none given)
         #[arg()]
@@ -298,16 +303,16 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
         /// Renumber all documents to the given format
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["config", "governs", "paths"])]
         renumber: Option<RenumberFormat>,
         /// Filter to a single document type (e.g. rfc, story)
-        #[arg(long = "type")]
+        #[arg(long = "type", requires = "renumber")]
         doc_type: Option<String>,
         /// Repair `.lazyspec.toml` instead of documents (injects missing standard relationships/edges)
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["governs", "paths"])]
         config: bool,
         /// Rewrite every `governs` glob that matches nothing to its suggested replacement
-        #[arg(long)]
+        #[arg(long, conflicts_with = "paths")]
         governs: bool,
     },
     /// Generate shell completion scripts

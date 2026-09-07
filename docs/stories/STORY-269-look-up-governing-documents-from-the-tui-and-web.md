@@ -1,7 +1,7 @@
 ---
 title: Look up governing documents from the TUI and web
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

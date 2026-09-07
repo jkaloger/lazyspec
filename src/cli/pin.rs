@@ -2,6 +2,7 @@ use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::engine::certification::compute_blob_hash_for_spec;
 use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
+use crate::engine::fs::FileSystem;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::{parse_refs, Ref};
 use crate::engine::store::{ResolveError, Store};
@@ -106,21 +107,17 @@ fn json_output(result: &PinResult) -> serde_json::Value {
 
 /// Stamp `reviewed: <sha>` onto the document's frontmatter, through the YAML
 /// writer `update` and `set_provenance` use rather than a textual edit.
-fn stamp_reviewed(full_path: &Path, sha: &str) -> Result<()> {
-    crate::engine::document::rewrite_frontmatter(
-        full_path,
-        &crate::engine::fs::RealFileSystem,
-        |val| {
-            let map = val
-                .as_mapping_mut()
-                .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
-            map.insert(
-                serde_yaml::Value::String("reviewed".to_string()),
-                serde_yaml::Value::String(sha.to_string()),
-            );
-            Ok(())
-        },
-    )
+fn stamp_reviewed(full_path: &Path, fs: &dyn FileSystem, sha: &str) -> Result<()> {
+    crate::engine::document::rewrite_frontmatter(full_path, fs, |val| {
+        let map = val
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow::anyhow!("frontmatter root must be a mapping"))?;
+        map.insert(
+            serde_yaml::Value::String("reviewed".to_string()),
+            serde_yaml::Value::String(sha.to_string()),
+        );
+        Ok(())
+    })
     .with_context(|| format!("failed to stamp reviewed in {}", full_path.display()))
 }
 
@@ -128,6 +125,7 @@ pub fn run(
     store: &Store,
     config: &Config,
     git: &dyn GitRefOps,
+    fs: &dyn FileSystem,
     id: &str,
     json: bool,
 ) -> Result<()> {
@@ -160,15 +158,23 @@ pub fn run(
 
     let root = store.root();
 
-    // Read HEAD before anything is written, so a repo whose HEAD cannot be read
-    // fails with the document byte-identical.
-    let reviewed = git.head(root).context("failed to read HEAD")?;
+    // HEAD comes from the code root, not the docs root. The sha `reviewed`
+    // carries is what `governs-no-match` diffs against to find renames, and that
+    // diff runs in `[governs] root`; in a docs-repo split the two are different
+    // repositories and a docs-repo sha means nothing in the code one.
+    //
+    // Read before anything is written, so a repo whose HEAD cannot be read fails
+    // with the document byte-identical.
+    let reviewed = git
+        .head(store.governs_root())
+        .context("failed to read HEAD")?;
 
     let full_path = root.join(&doc.path);
     let spec_path = doc.path.to_string_lossy();
 
     // Read the full file content
-    let content = std::fs::read_to_string(&full_path)
+    let content = fs
+        .read_to_string(&full_path)
         .with_context(|| format!("failed to read {}", full_path.display()))?;
 
     // Extract body from frontmatter
@@ -183,11 +189,11 @@ pub fn run(
         let frontmatter_end = find_body_start(&content)?;
         let prefix = &content[..frontmatter_end];
         let new_content = format!("{}{}", prefix, result.new_body);
-        std::fs::write(&full_path, new_content)
+        fs.write(&full_path, &new_content)
             .with_context(|| format!("failed to write {}", full_path.display()))?;
     }
 
-    stamp_reviewed(&full_path, &result.reviewed)?;
+    stamp_reviewed(&full_path, fs, &result.reviewed)?;
 
     // Output results
     if json {
@@ -448,9 +454,19 @@ mod tests {
     }
 
     fn pin_rfc(root: &Path, git: &dyn GitRefOps) -> Result<()> {
-        let config = Config::default();
-        let store = Store::load(root, &config).unwrap();
-        run(&store, &config, git, "RFC-001", false)
+        pin_rfc_with(root, git, &Config::default())
+    }
+
+    fn pin_rfc_with(root: &Path, git: &dyn GitRefOps, config: &Config) -> Result<()> {
+        let store = Store::load(root, config).unwrap();
+        run(
+            &store,
+            config,
+            git,
+            &crate::engine::fs::RealFileSystem,
+            "RFC-001",
+            false,
+        )
     }
 
     // AC1: a document with no `reviewed` gains the sha HEAD resolves to.
@@ -522,6 +538,30 @@ mod tests {
         );
 
         assert_eq!(json_output(&result)["reviewed"], FAKE_HEAD);
+    }
+
+    /// The sha `reviewed` carries is diffed against in `[governs] root` by
+    /// `governs-no-match`, so it must be HEAD of the code repo. Under a
+    /// docs-repo split those are two repositories, and a docs-repo sha makes
+    /// every rename lookup fail silently and `fix --governs` a no-op.
+    #[test]
+    fn run_reads_head_from_the_code_root_not_the_docs_root() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join("code")).unwrap();
+        write_rfc(root, "RFC-001-pinned.md", "", "No refs here.\n");
+
+        let mut config = Config::default();
+        config.governs.root = std::path::PathBuf::from("code");
+
+        let git = MockGitRefClient::new();
+        pin_rfc_with(root, &git, &config).unwrap();
+
+        assert_eq!(
+            git.calls.borrow().as_slice(),
+            [format!("head:{}", root.join("code").display())],
+            "HEAD must be read from [governs] root"
+        );
     }
 
     // AC5: an unreadable HEAD is reported and nothing is written.

@@ -73,6 +73,10 @@ Two new `ValidationIssue` variants:
 - `GovernsNoMatch { path, glob, renamed, suggested_glob }`, rule `governs-no-match`: a glob matches no file under root. Warning. When `reviewed` is set, `renamed: [{from, to}]` comes from `git diff -M --name-status <reviewed>..HEAD` filtered to paths the old glob matched, and `suggested_glob` is the longest common directory prefix of the `to` paths plus `/**`. Both empty otherwise.
 - `GovernsUnowned { file }`, rule `governs-unowned`: a file under `scope` no document's glob matches. Severity from `unowned`.
 
+**Amended 2026-09-08 (STORY-271 implementation):** the command is `git diff -M --name-status --relative <reviewed>..HEAD`. Without `--relative` git reports paths from the repository root, while `governs` globs are matched relative to `[governs] root`; under a docs-repo split the two differ and every pair would fail the "paths the old glob matched" filter. The filter, and the suggestion built from the `to` paths, only hold if both sides speak the same terms.
+
+**Amended 2026-09-08 (batch cleanup):** the variant carries a fifth field, `rename_lookup_error: Option<String>`. `pin` stamps `HEAD` of `[governs] root` and this diff runs in the same root, so a `reviewed` sha git cannot resolve there is an anomaly, not the expected case — but it produces exactly the empty `renamed` and null `suggested_glob` a document with no anchor produces, leaving the author with no way to tell "nothing moved" from "nothing was asked". The error rides onto the finding and into `message` instead of being swallowed. `check` still returns no `Result`: a rotted pin is worth reporting whether or not its repair data could be gathered.
+
 ### Finding shape
 
 `validate --json` today emits `warnings` and `errors` as arrays of strings. Repair data does not fit a string. Every `ValidationIssue` gains a `rule` slug and serialises as an object:
@@ -80,7 +84,7 @@ Two new `ValidationIssue` variants:
 ```json
 {"rule": "governs-no-match", "message": "...", "path": "docs/specs/SPEC-001-context.md",
  "glob": "src/engine/ctx/**", "renamed": [{"from": "src/engine/ctx/mod.rs", "to": "src/engine/context/mod.rs"}],
- "suggested_glob": "src/engine/context/**"}
+ "suggested_glob": "src/engine/context/**", "rename_lookup_error": null}
 ```
 
 `message` is the string emitted today. Human `validate` output is unchanged. The TUI validation panel and web validation view render `message`, so their only change is reading a field instead of a string. Breaking change for `validate --json` consumers; lands in story 1 before either new rule.
@@ -92,6 +96,8 @@ Two new `ValidationIssue` variants:
 `why <path> --json` walks the store's compiled globs and returns every match. Engine owns matching; CLI formats. `show` and `show --json` print `governs` and `reviewed`.
 
 `pin <id>` extends the existing verb. Today it pins blob hashes onto `@ref` directives through `certification::compute_blob_hash_for_spec`. It additionally sets `reviewed: <HEAD sha>`, read through `GitRefOps::head`. One verb: "I have reviewed this document against current code."
+
+**Amended 2026-09-08 (batch cleanup):** `head` is asked of `[governs] root`, not the docs root. The sha is only ever consumed as the left side of the rename diff above, which runs in the code root; under the docs-repo split this §Configuration supports, a docs-repo sha means nothing there and the whole repair path goes silently empty.
 
 ### Surfaces
 
@@ -112,9 +118,19 @@ TUI and web render `governs`/`reviewed` as frontmatter fields on document detail
     pub root: PathBuf,
 }
 
+// `Rename` rather than a positional pair: the finding shape above publishes
+// `{from, to}` objects, and a tuple serialises as a two-element array.
+@draft pub struct Rename { pub from: String, pub to: String }
+
 @draft pub enum ValidationIssue {
     // existing variants
-    GovernsNoMatch { path: PathBuf, glob: String, renamed: Vec<(String, String)>, suggested_glob: Option<String> },
+    GovernsNoMatch {
+        path: PathBuf,
+        glob: String,
+        renamed: Vec<Rename>,
+        suggested_glob: Option<String>,
+        rename_lookup_error: Option<String>,
+    },
     GovernsUnowned { file: PathBuf },
 }
 

@@ -2535,8 +2535,9 @@ impl App {
 
     /// Dispatch the current query to the background search worker (BUG-011):
     /// scoring 700+ full bodies per keystroke blocked the event loop, so the UI
-    /// thread only snapshots the corpus (a cheap clone via the engine body
-    /// cache) and stamps a fresh generation; results arrive later as
+    /// thread only snapshots the corpus -- bodies cloned out of the engine body
+    /// cache, plus the compiled `governs` globs of the documents that carry any
+    /// (RFC-068) -- and stamps a fresh generation; results arrive later as
     /// [`AppEvent::SearchResults`] and are applied by [`apply_search_results`].
     /// The generation bump on an empty query invalidates any in-flight search
     /// so its late results cannot repopulate a cleared list.

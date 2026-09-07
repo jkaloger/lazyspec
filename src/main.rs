@@ -643,7 +643,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Pin { id, json }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::pin::run(&store, &config, &GitCli, &id, json)?;
+            lazyspec::cli::pin::run(&store, &config, &GitCli, &fs, &id, json)?;
         }
         Some(Commands::Reservations { command }) => match command {
             ReservationsCommand::List { json } => {

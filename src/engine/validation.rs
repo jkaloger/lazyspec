@@ -129,11 +129,18 @@ pub enum ValidationIssue {
     /// a pin the code moved out from under. `renamed` names where the files the
     /// glob used to match went and `suggested_glob` is the glob to try instead,
     /// both empty unless the document carries a `reviewed` anchor to diff from.
+    ///
+    /// `rename_lookup_error` is set when the document *did* carry an anchor and
+    /// git could not diff from it -- a `reviewed` sha the code repo has never
+    /// heard of. Without it that case is indistinguishable from a document with
+    /// no anchor at all, and the author is left wondering why `fix --governs`
+    /// does nothing.
     GovernsNoMatch {
         path: PathBuf,
         glob: String,
         renamed: Vec<Rename>,
         suggested_glob: Option<String>,
+        rename_lookup_error: Option<String>,
     },
     /// A file under `[governs] scope` that no document's `governs` glob matches
     /// (RFC-068): code nothing speaks for. `file` is relative to
@@ -437,13 +444,22 @@ impl std::fmt::Display for ValidationIssue {
                     status_authority, type_name
                 )
             }
-            ValidationIssue::GovernsNoMatch { path, glob, .. } => {
+            ValidationIssue::GovernsNoMatch {
+                path,
+                glob,
+                rename_lookup_error,
+                ..
+            } => {
                 write!(
                     f,
                     "governs glob in {}: \"{}\" matches no file",
                     path.display(),
                     glob
-                )
+                )?;
+                match rename_lookup_error {
+                    Some(e) => write!(f, "; no rename candidates: {}", e),
+                    None => Ok(()),
+                }
             }
             ValidationIssue::GovernsUnowned { file } => {
                 write!(
@@ -923,24 +939,29 @@ impl GovernsNoMatchRule {
     /// A failing git call (a `reviewed` commit no longer in history after a
     /// rebase, a working tree that is not a repository) contributes no
     /// candidates. The rotted pin is still worth reporting without its repair
-    /// data, and `check` has no channel to return the error on.
+    /// data, so the error rides back beside the empty list and onto the finding
+    /// rather than being dropped: `pin` stamps HEAD of the same root this diffs
+    /// in, so a sha git cannot resolve here is a real anomaly, not the expected
+    /// case.
     fn rename_candidates(
         &self,
         store: &super::store::Store,
         doc: &Path,
         matcher: &GlobMatcher,
-    ) -> Vec<Rename> {
+    ) -> (Vec<Rename>, Option<String>) {
         let Some(reviewed) = store.docs.get(doc).and_then(|m| m.reviewed.as_deref()) else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
-        let Ok(pairs) = self.git.renames(&store.governs_root, reviewed, "HEAD") else {
-            return Vec::new();
+        let pairs = match self.git.renames(&store.governs_root, reviewed, "HEAD") {
+            Ok(pairs) => pairs,
+            Err(e) => return (Vec::new(), Some(format!("{e:#}"))),
         };
-        pairs
+        let renamed = pairs
             .into_iter()
             .filter(|(from, _)| matcher.is_match(from))
             .map(Rename::from)
-            .collect()
+            .collect();
+        (renamed, None)
     }
 }
 
@@ -1090,7 +1111,7 @@ impl Checker for GovernsNoMatchRule {
             .iter()
             .filter(|(_, _, matcher)| !matched.iter().any(|file| matcher.is_match(file)))
             .map(|(path, glob, matcher)| {
-                let renamed = self.rename_candidates(store, path, matcher);
+                let (renamed, rename_lookup_error) = self.rename_candidates(store, path, matcher);
                 (
                     Severity::Warning,
                     ValidationIssue::GovernsNoMatch {
@@ -1098,6 +1119,7 @@ impl Checker for GovernsNoMatchRule {
                         glob: (*glob).clone(),
                         suggested_glob: suggest_glob(&renamed),
                         renamed,
+                        rename_lookup_error,
                     },
                 )
             })
@@ -3229,6 +3251,25 @@ mod governs_no_match_tests {
         assert_eq!(suggested, None);
     }
 
+    /// `pin` stamps HEAD of `[governs] root` and this diffs in the same root,
+    /// so a sha git cannot resolve is an anomaly worth naming rather than the
+    /// silent empty result it reads as otherwise.
+    #[test]
+    fn a_reviewed_sha_git_cannot_diff_from_is_reported_on_the_finding() {
+        let (_tmp, store) = store_pinning_each_reviewed(&[&["src/ctx/**"]], Some(REVIEWED), &[]);
+
+        let findings = rule_with(MockGitRefClient::new().with_renames_error("bad object HEAD"))
+            .check(&store, &Config::default());
+
+        let (_, issue) = findings.into_iter().next().expect("one rotted pin");
+        assert!(
+            issue
+                .to_string()
+                .contains("no rename candidates: bad object HEAD"),
+            "the swallowed git error should reach the reader, got: {issue}"
+        );
+    }
+
     /// The `--json` shape RFC-068 publishes: objects with `from` and `to`, not
     /// positional pairs.
     #[test]
@@ -3238,6 +3279,7 @@ mod governs_no_match_tests {
             glob: "src/ctx/**".to_string(),
             renamed: vec![rename("src/ctx/resolve.rs", "src/context/resolve.rs")],
             suggested_glob: Some("src/context/**".to_string()),
+            rename_lookup_error: None,
         };
 
         assert_eq!(
@@ -3541,6 +3583,7 @@ mod finding_shape_tests {
                 glob: "src/engine/ctx/**".to_string(),
                 renamed: Vec::new(),
                 suggested_glob: None,
+                rename_lookup_error: None,
             },
             ValidationIssue::GovernsUnowned {
                 file: PathBuf::from("src/engine/orphan.rs"),

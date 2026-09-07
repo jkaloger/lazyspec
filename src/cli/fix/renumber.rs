@@ -9,6 +9,7 @@ use crate::engine::store::Store;
 use crate::engine::template::shuffle_alphabet;
 
 pub use crate::engine::ops::fix::cascade_references;
+use crate::engine::ops::fix::record_write;
 
 use super::{ExternalReference, RenumberFixResult, RenumberOutput};
 
@@ -352,10 +353,11 @@ fn build_rename(
         let old_abs = root.join(parent_rel);
         let new_abs = root.join(&new_parent_rel);
 
-        if !dry_run {
-            fs.rename(&old_abs, &new_abs).ok()?;
+        let (written, error) = record_write(dry_run, || {
+            fs.rename(&old_abs, &new_abs)?;
             update_title_in_file(&new_abs.join("index.md"), old_id, new_id, fs);
-        }
+            Ok(())
+        });
 
         Some(RenumberFixResult {
             old_path: old_path_str,
@@ -363,7 +365,8 @@ fn build_rename(
             old_id: old_id.to_string(),
             new_id: new_id.to_string(),
             references_updated: vec![],
-            written: !dry_run,
+            written,
+            error,
         })
     } else {
         let stem = doc.path.file_stem().and_then(|f| f.to_str())?;
@@ -375,10 +378,11 @@ fn build_rename(
         let old_abs = root.join(&doc.path);
         let new_abs = root.join(&new_rel);
 
-        if !dry_run {
-            fs.rename(&old_abs, &new_abs).ok()?;
+        let (written, error) = record_write(dry_run, || {
+            fs.rename(&old_abs, &new_abs)?;
             update_title_in_file(&new_abs, old_id, new_id, fs);
-        }
+            Ok(())
+        });
 
         Some(RenumberFixResult {
             old_path: old_path_str,
@@ -386,7 +390,8 @@ fn build_rename(
             old_id: old_id.to_string(),
             new_id: new_id.to_string(),
             references_updated: vec![],
-            written: !dry_run,
+            written,
+            error,
         })
     }
 }

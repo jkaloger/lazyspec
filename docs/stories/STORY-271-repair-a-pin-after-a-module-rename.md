@@ -1,7 +1,7 @@
 ---
 title: Repair a pin after a module rename
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
@@ -13,7 +13,7 @@ As a document author whose module was renamed, I want the zero-match finding to 
 
 ## Acceptance criteria
 
-- Given a document with `reviewed` set and a glob that now matches nothing, when I run `validate --json`, then the finding's `renamed` lists `{from, to}` pairs from `git diff -M --name-status <reviewed>..HEAD` filtered to paths the old glob matched.
+- Given a document with `reviewed` set and a glob that now matches nothing, when I run `validate --json`, then the finding's `renamed` lists `{from, to}` pairs from `git diff -M --name-status --relative <reviewed>..HEAD`, run in `[governs] root`, filtered to paths the old glob matched.
 - Given those renames, when the finding is built, then `suggested_glob` is the longest common directory prefix of the `to` paths with `/**` appended.
 - Given a document without `reviewed`, when its glob matches nothing, then `renamed` is empty and `suggested_glob` is null.
 - Given renamed files spread across two directories, when the suggestion is built, then it is their common ancestor plus `/**`, and the finding still reports every pair so the author can narrow it by hand.
@@ -24,3 +24,5 @@ As a document author whose module was renamed, I want the zero-match finding to 
 ## Notes
 
 Depends on the zero-match finding and on `reviewed` being stamped by `pin`. Renames come through `GitRefOps::renames`. The suggestion is a heuristic that over-widens on a module split; accepted in RFC-068 §Risks because `reviewed` stays put and RFC-069 will still flag drift.
+
+**Amended 2026-09-08 (batch cleanup):** AC1 originally named the command without `--relative` and without saying which root it runs in. Both matter and both were wrong-by-omission: git reports paths from the repository root while `governs` globs are matched relative to `[governs] root`, so under a docs-repo split the pairs and the glob would speak different terms and the filter would drop every one. `pin` stamping `HEAD` of the docs root rather than `[governs] root` was the same mistake on the other side; corrected there too, so AC1 is now reachable under the split RFC-068 §Configuration supports.

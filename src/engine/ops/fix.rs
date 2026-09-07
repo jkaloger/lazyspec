@@ -29,7 +29,7 @@ use status::collect_status_fixes;
 /// tell apart from a dry run (DICTUM-006).
 ///
 /// A dry run neither writes nor fails, so it is `(false, None)`.
-fn record_write(
+pub(crate) fn record_write(
     dry_run: bool,
     write: impl FnOnce() -> anyhow::Result<()>,
 ) -> (bool, Option<String>) {
@@ -59,6 +59,9 @@ pub struct StatusFixResult {
     pub old_status: String,
     pub new_status: String,
     pub written: bool,
+    /// Why the rewrite did not reach the document, when it failed. `None` for a
+    /// dry run and for a write that landed.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +83,9 @@ pub struct FieldFixResult {
     pub path: String,
     pub fields_added: Vec<String>,
     pub written: bool,
+    /// Why the rewrite did not reach the document, when it failed. `None` for a
+    /// dry run and for a write that landed.
+    pub error: Option<String>,
 }
 
 /// The kind of block a lost comment was attached to. The rewrite destroys decor
@@ -158,6 +164,9 @@ pub struct ConflictFixResult {
     pub new_id: String,
     pub references_updated: Vec<ReferenceUpdate>,
     pub written: bool,
+    /// Why the rename did not reach the document, when it failed. `None` for a
+    /// dry run and for a rename that landed.
+    pub error: Option<String>,
 }
 
 /// One rotted `governs` glob rewritten to the suggestion its

@@ -403,6 +403,9 @@ pub mod test_support {
         /// once per rotted glob would otherwise see the fixture only the first
         /// time.
         pub renames_pairs: RefCell<RefList>,
+        /// Makes `renames` fail on every call, standing in for a `reviewed` sha
+        /// the repository cannot resolve.
+        pub renames_error: RefCell<Option<String>>,
         pub calls: RefCell<Vec<String>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
@@ -434,6 +437,7 @@ pub mod test_support {
                 read_commit_timestamp_results: RefCell::new(vec![]),
                 head_results: RefCell::new(vec![]),
                 renames_pairs: RefCell::new(vec![]),
+                renames_error: RefCell::new(None),
                 calls: RefCell::new(vec![]),
                 committed_blobs: RefCell::new(vec![]),
             }
@@ -514,6 +518,11 @@ pub mod test_support {
                 .iter()
                 .map(|(from, to)| (from.to_string(), to.to_string()))
                 .collect();
+            self
+        }
+
+        pub fn with_renames_error(self, message: &str) -> Self {
+            *self.renames_error.borrow_mut() = Some(message.to_string());
             self
         }
 
@@ -666,8 +675,13 @@ pub mod test_support {
             }
         }
 
-        fn head(&self, _root: &Path) -> Result<String> {
-            self.calls.borrow_mut().push("head".to_string());
+        fn head(&self, root: &Path) -> Result<String> {
+            // The root is logged, not ignored: which repository HEAD was read
+            // from is the whole question in a docs-repo split, where the docs
+            // root and `[governs] root` are different repositories.
+            self.calls
+                .borrow_mut()
+                .push(format!("head:{}", root.display()));
             let mut q = self.head_results.borrow_mut();
             if q.is_empty() {
                 Ok(FAKE_HEAD.to_string())
@@ -680,6 +694,9 @@ pub mod test_support {
             self.calls
                 .borrow_mut()
                 .push(format!("renames:{}..{}", from, to));
+            if let Some(message) = self.renames_error.borrow().as_deref() {
+                bail!("{}", message);
+            }
             Ok(self.renames_pairs.borrow().clone())
         }
     }

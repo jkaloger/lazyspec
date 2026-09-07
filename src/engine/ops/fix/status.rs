@@ -5,7 +5,7 @@ use crate::engine::document::{compose_frontmatter, split_frontmatter, DocMeta};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
-use super::StatusFixResult;
+use super::{record_write, StatusFixResult};
 
 pub(super) fn collect_status_fixes(
     root: &Path,
@@ -51,17 +51,16 @@ pub(super) fn collect_status_fixes(
         let new_status = type_def.lifecycle.states[0].clone();
         let old_status = doc.status.as_str().to_string();
 
-        let written = if dry_run {
-            false
-        } else {
-            repair_status(&root.join(&doc.path), &new_status, fs).is_ok()
-        };
+        let (written, error) = record_write(dry_run, || {
+            repair_status(&root.join(&doc.path), &new_status, fs)
+        });
 
         results.push(StatusFixResult {
             path: doc.path.display().to_string(),
             old_status,
             new_status,
             written,
+            error,
         });
     }
 

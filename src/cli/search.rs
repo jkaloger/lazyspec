@@ -20,7 +20,12 @@ fn json_output(results: &[SearchResult]) -> String {
             let mut json = doc_to_json(r.doc);
             json["match_field"] = serde_json::Value::String(r.match_field.to_string());
             json["snippet"] = serde_json::Value::String(r.snippet.clone());
-            json["score"] = serde_json::Value::from(r.score);
+            // `null` for a `governs` path hit: it was matched exactly, not
+            // scored, and a number on the fuzzy scale would be invented.
+            json["score"] = match r.score.fuzzy() {
+                Some(score) => serde_json::Value::from(score),
+                None => serde_json::Value::Null,
+            };
             json
         })
         .collect();

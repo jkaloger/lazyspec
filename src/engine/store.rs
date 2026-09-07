@@ -429,6 +429,14 @@ impl Store {
         &self.root
     }
 
+    /// The code root `governs` globs resolve against: `root` joined with
+    /// `[governs] root`, and a different repository entirely under a docs-repo
+    /// split. Every git question about the *code* -- what HEAD is, what moved --
+    /// must be asked here rather than at [`root`](Store::root) (RFC-068).
+    pub fn governs_root(&self) -> &Path {
+        &self.governs_root
+    }
+
     pub fn children_of(&self, path: &Path) -> &[PathBuf] {
         self.children.get(path).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -497,7 +505,9 @@ impl Store {
     /// An owned snapshot of every doc's searchable fields, so a background
     /// thread can run [`SearchCorpus::search`] without borrowing the store.
     /// Bodies come through the same memoizing cache as [`Store::search`], so a
-    /// warm snapshot is a plain clone of in-memory strings.
+    /// warm snapshot clones in-memory strings and, beside them, the compiled
+    /// `governs` globs (RFC-068) -- an entry only for the documents that carry a
+    /// pin, so the map is a fraction of the corpus.
     pub fn search_corpus(&self, fs: &dyn FileSystem) -> SearchCorpus {
         let docs = self
             .docs
@@ -533,6 +543,30 @@ impl Store {
     }
 }
 
+/// How well one document answered a query. A `governs` glob match is exact, not
+/// fuzzy, and outranks every fuzzy score -- but it has no score on nucleo's
+/// scale, so it is a variant rather than a sentinel number. `u32::MAX` in the
+/// `score` an agent reads off `search --json` is a magic value nothing in the
+/// published contract explains (DICTUM-006).
+///
+/// The derived `Ord` is the ranking: `Exact` sorts above every `Fuzzy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchScore {
+    Fuzzy(u32),
+    Exact,
+}
+
+impl SearchScore {
+    /// The nucleo score, or `None` for an exact match -- which was never scored
+    /// on that scale and so has no number to publish.
+    pub fn fuzzy(self) -> Option<u32> {
+        match self {
+            SearchScore::Fuzzy(score) => Some(score),
+            SearchScore::Exact => None,
+        }
+    }
+}
+
 /// Score one document's fields against a parsed pattern, returning the single
 /// best-scoring `(score, field, snippet)` or `None` when nothing matches (the
 /// score floor). Strict `>` keeps the earliest field on ties, so field
@@ -540,9 +574,9 @@ impl Store {
 /// [`SearchCorpus::search`] so both paths rank identically.
 ///
 /// `governs_glob` is the document's `governs` entry that matches the query read
-/// as a file path (RFC-068). It is a glob match, not a fuzzy one, so it takes
-/// the maximum score: an exact answer outranks any text match, and a document
-/// matching both a title and a path still yields one result.
+/// as a file path (RFC-068). It is a glob match, not a fuzzy one, so it ranks
+/// [`SearchScore::Exact`]: an exact answer outranks any text match, and a
+/// document matching both a title and a path still yields one result.
 #[allow(clippy::too_many_arguments)]
 fn score_doc_fields(
     pattern: &Pattern,
@@ -554,38 +588,40 @@ fn score_doc_fields(
     path: &Path,
     body: Option<&str>,
     governs_glob: Option<&str>,
-) -> Option<(u32, &'static str, String)> {
-    let mut best: Option<(u32, &'static str, String)> = None;
+) -> Option<(SearchScore, &'static str, String)> {
+    let mut best: Option<(SearchScore, &'static str, String)> = None;
 
-    let mut consider = |score: u32, field: &'static str, snippet: &dyn Fn() -> String| {
+    let mut consider = |score: SearchScore, field: &'static str, snippet: &dyn Fn() -> String| {
         if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
             best = Some((score, field, snippet()));
         }
     };
 
     if let Some(glob) = governs_glob {
-        consider(u32::MAX, "governs", &|| glob.to_string());
+        consider(SearchScore::Exact, "governs", &|| glob.to_string());
     }
 
     if let Some(score) = pattern.score(Utf32Str::new(title, buf), matcher) {
-        consider(score, "title", &|| title.to_string());
+        consider(SearchScore::Fuzzy(score), "title", &|| title.to_string());
     }
 
     for tag in tags {
         if let Some(score) = pattern.score(Utf32Str::new(tag, buf), matcher) {
-            consider(score, "tag", &|| tag.clone());
+            consider(SearchScore::Fuzzy(score), "tag", &|| tag.clone());
         }
     }
 
     let path_str = path.to_string_lossy();
     if let Some(score) = pattern.score(Utf32Str::new(&path_str, buf), matcher) {
-        consider(score, "path", &|| path_str.to_string());
+        consider(SearchScore::Fuzzy(score), "path", &|| path_str.to_string());
     }
 
     if let Some(body) = body {
         let mut indices: Vec<u32> = Vec::new();
         if let Some(score) = pattern.indices(Utf32Str::new(body, buf), matcher, &mut indices) {
-            consider(score, "body", &|| body_snippet(body, &indices, query));
+            consider(SearchScore::Fuzzy(score), "body", &|| {
+                body_snippet(body, &indices, query)
+            });
         }
     }
 
@@ -622,7 +658,7 @@ pub struct CorpusSearchResult {
     pub path: PathBuf,
     pub match_field: &'static str,
     pub snippet: String,
-    pub score: u32,
+    pub score: SearchScore,
 }
 
 impl SearchCorpus {
@@ -906,7 +942,7 @@ pub struct SearchResult<'a> {
     pub doc: &'a DocMeta,
     pub match_field: &'static str,
     pub snippet: String,
-    pub score: u32,
+    pub score: SearchScore,
 }
 
 /// Fixtures shared by the engine's walk tests (`context`, `graph`, `traversal`),
@@ -1158,7 +1194,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].doc.title, "engine fuzzy");
         assert_eq!(results[0].match_field, "title");
-        assert!(results[0].score > 0);
+        assert!(results[0].score.fuzzy().is_some_and(|s| s > 0));
     }
 
     #[test]

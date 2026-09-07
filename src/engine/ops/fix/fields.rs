@@ -5,7 +5,7 @@ use crate::engine::document::{compose_frontmatter, split_frontmatter};
 use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
-use super::FieldFixResult;
+use super::{record_write, FieldFixResult};
 
 const REQUIRED_FIELDS: &[&str] = &["title", "type", "status", "author", "date", "tags"];
 
@@ -71,19 +71,22 @@ fn fix_file(
         fields_added.push(field.to_string());
     }
 
-    let written = if !dry_run && !fields_added.is_empty() {
-        let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
-        let output = compose_frontmatter(&new_yaml, &body);
-        fs.write(&full_path, &output)?;
-        true
+    // Nothing missing is nothing to write, which is neither a success nor a
+    // failure; only a run with fields to add reports a write outcome.
+    let (written, error) = if fields_added.is_empty() {
+        (false, None)
     } else {
-        false
+        record_write(dry_run, || {
+            let new_yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))?;
+            fs.write(&full_path, &compose_frontmatter(&new_yaml, &body))
+        })
     };
 
     Ok(FieldFixResult {
         path: path.to_string(),
         fields_added,
         written,
+        error,
     })
 }
 
