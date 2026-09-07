@@ -1,7 +1,7 @@
 ---
 title: Module pins and code ownership lookup
 type: rfc
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-04
 tags: []
