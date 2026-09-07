@@ -1,7 +1,7 @@
 ---
 title: Carry rename candidates and a suggested glob on the zero-match finding
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

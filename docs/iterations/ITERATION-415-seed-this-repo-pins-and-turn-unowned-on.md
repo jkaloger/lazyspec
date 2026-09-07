@@ -1,7 +1,7 @@
 ---
 title: Seed this repo pins and turn unowned on
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

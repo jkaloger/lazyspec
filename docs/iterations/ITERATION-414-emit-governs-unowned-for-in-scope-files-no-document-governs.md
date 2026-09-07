@@ -1,7 +1,7 @@
 ---
 title: Emit governs-unowned for in-scope files no document governs
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

@@ -1,7 +1,7 @@
 ---
 title: Rewrite stale globs with fix --governs
 type: iteration
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
