@@ -1,7 +1,7 @@
 ---
 title: Find the documents that govern a file
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []

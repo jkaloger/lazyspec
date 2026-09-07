@@ -1,7 +1,7 @@
 ---
 title: Find code no document governs
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-07
 tags: []
