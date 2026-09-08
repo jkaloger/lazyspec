@@ -19,7 +19,7 @@ pub fn parse_attr_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
                 bail!("invalid --attr, empty key: {entry}");
             }
             if RESERVED_ATTR_KEYS.contains(&key) {
-                bail!("'{key}' is a reserved field and cannot be set via --attr; use --{key}");
+                bail!("'{key}' is a reserved frontmatter field and cannot be set via --attr; use --status, --title or --body, set author at `create`, and let `--status` or `pin` stamp reviewed");
             }
             Ok((key.to_string(), value.to_string()))
         })

@@ -1999,6 +1999,15 @@ impl Config {
 
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
 
+        let staleness = raw.staleness.unwrap_or_default();
+        if staleness.aging > staleness.stale {
+            bail!(
+                "staleness.aging (\"{}d\") must not exceed staleness.stale (\"{}d\"); the aging band would be unreachable",
+                staleness.aging.0,
+                staleness.stale.0
+            );
+        }
+
         Ok(Config {
             documents: DocumentConfig {
                 types,
@@ -2024,7 +2033,7 @@ impl Config {
             web: raw.web,
             git_ref: raw.git_ref.unwrap_or_default(),
             governs: raw.governs.unwrap_or_default(),
-            staleness: raw.staleness.unwrap_or_default(),
+            staleness,
         })
     }
 
@@ -4076,6 +4085,25 @@ stale = "60d"
         let config = Config::parse(&toml_str).unwrap();
         assert_eq!(config.staleness.aging, Days(30));
         assert_eq!(config.staleness.stale, Days(60));
+    }
+
+    /// `band_by_age` tests `stale` first, so an `aging` above it can never be
+    /// reached: everything past `stale` reads stale and nothing reads aging.
+    #[test]
+    fn staleness_aging_above_stale_is_a_config_error() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[staleness]
+aging = "200d"
+stale = "100d"
+"#
+        );
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("200d") && err.contains("100d"),
+            "unhelpful error: {err}"
+        );
     }
 
     #[test]

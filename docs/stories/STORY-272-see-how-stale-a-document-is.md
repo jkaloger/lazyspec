@@ -23,7 +23,7 @@ As an agent reading a document before I trust it, I want `show` to tell me how s
 - Given a document with `reviewed` set, when staleness is computed, then `staleness.anchor` is that sha and `age_days` is measured from the anchor commit's timestamp; given no `reviewed`, then `anchor` is the document's `date` and `age_days` is measured from it.
 - Given any document, when I run `show <id>` without `--json`, then one line reads `staleness: <band> (<driver>, <n> files since <sha>, <n>d)`.
 - Given a path governed by a document whose governed files have changed since its `reviewed`, when I run `why <path> --json`, then that record carries `drifted: true`; given no change since `reviewed`, or no `reviewed`, then `drifted` is `false`.
-- Given a command that neither reports a band nor runs full validation — `list`, `create`, `link` and their peers — when it runs, then no staleness computation is issued for it: the band is computed only by `show` and `why`, and by the `validate_full` path that `validate`, `status --json` and the TUI validation refresh share.
+- Given a command that neither reports a band nor runs full validation — `list`, `create`, `link` and their peers — when it runs, then no staleness computation is issued for it: the band is computed only by `show`, by `why`, by the TUI's background badge worker on selection, and by the `validate_full` path that `validate`, `status --json` and the TUI validation refresh share.
 
 ## Notes
 

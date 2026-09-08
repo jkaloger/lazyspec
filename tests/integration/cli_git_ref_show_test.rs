@@ -51,7 +51,7 @@ fn show_json_displays_git_ref_iteration() {
         &_fixture.config(),
         _fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -79,7 +79,7 @@ fn show_json_not_found_for_missing_git_ref_doc() {
         &_fixture.config(),
         _fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
     assert!(result.is_err());
     assert!(result

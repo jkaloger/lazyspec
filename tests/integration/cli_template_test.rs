@@ -123,7 +123,7 @@ fn show_json_retains_comments() {
         &config,
         root,
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     )
     .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();

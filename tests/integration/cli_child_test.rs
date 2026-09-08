@@ -232,7 +232,7 @@ fn show_parent_json_includes_children() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -266,7 +266,7 @@ fn show_child_json_includes_parent() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -344,7 +344,7 @@ fn show_parent_json_no_children_field_when_none() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();

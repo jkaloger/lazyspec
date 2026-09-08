@@ -183,9 +183,10 @@ fn a_record_with_no_reviewed_anchor_is_not_drifted_and_asks_git_nothing() {
     let found = results_with(&store, "src/engine/context/resolve.rs", &git);
 
     assert_eq!(found[0]["drifted"], serde_json::json!(false));
+    let calls = git.call_log();
     assert!(
-        git.calls.borrow().is_empty(),
+        calls.borrow().is_empty(),
         "nothing to diff: {:?}",
-        git.calls.borrow()
+        calls.borrow()
     );
 }

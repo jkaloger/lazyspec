@@ -2,10 +2,12 @@
 //! review anchor and what moved under the document's `governs` globs since it.
 //!
 //! Nothing here is stored. [`compute`] is called by the surfaces that show a
-//! band -- `show` and `why` -- and by `StaleRule` on the `validate_full` path,
-//! so `validate`, `status --json` and the TUI validation refresh pay for it
-//! too, unless `[staleness] finding = "off"` gates the rule out before it runs.
-//! A command on neither path issues no git subprocess for staleness.
+//! band -- `show`, `why`, and the TUI's background badge worker, which bands
+//! the selected document off the render path -- and by `StaleRule` on the
+//! `validate_full` path, so `validate`, `status --json` and the TUI validation
+//! refresh pay for it too, unless `[staleness] finding = "off"` gates the rule
+//! out before it runs. A command on neither path issues no git subprocess for
+//! staleness.
 
 use chrono::{NaiveDate, Utc};
 use serde::Serialize;
@@ -286,13 +288,14 @@ mod tests {
             assert_eq!(staleness.driver, StalenessDriver::Age);
             assert_eq!(staleness.band, Band::Stale);
             assert_eq!(staleness.drift, Drift::default());
+            let calls = git.call_log();
             assert!(
-                !git.calls
+                !calls
                     .borrow()
                     .iter()
                     .any(|call| call.starts_with("diff_stat:")),
                 "nothing to diff, so git is never asked: {:?}",
-                git.calls.borrow()
+                calls.borrow()
             );
         }
     }
@@ -325,11 +328,12 @@ mod tests {
         .unwrap();
 
         let store = Store::load(tmp.path(), &config).unwrap();
-        git.calls.borrow_mut().clear();
+        let calls = git.call_log();
+        calls.borrow_mut().clear();
         compute_in(&store, &config, &git);
 
         assert_eq!(
-            git.calls
+            calls
                 .borrow()
                 .iter()
                 .filter(|call| call.starts_with("diff_stat:"))
@@ -371,10 +375,11 @@ mod tests {
 
         assert_eq!(staleness.anchor, Anchor::Date(days_ago(140)));
         assert_eq!(staleness.age_days, 140);
+        let calls = git.call_log();
         assert!(
-            git.calls.borrow().is_empty(),
+            calls.borrow().is_empty(),
             "no anchor commit to read: {:?}",
-            git.calls.borrow()
+            calls.borrow()
         );
     }
 
@@ -396,7 +401,7 @@ mod tests {
         compute_in(&store, &config_driven_by(StalenessDriver::Drift), &git);
 
         assert_eq!(
-            git.calls.borrow()[0],
+            git.call_log().borrow()[0],
             format!(
                 "diff_stat:{}:{REVIEWED}..HEAD:src/engine/**,src/cli.rs",
                 store.governs_root().display()

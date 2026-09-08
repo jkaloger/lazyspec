@@ -98,7 +98,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -155,7 +155,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -197,7 +197,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -245,7 +245,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -288,7 +288,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -334,7 +334,7 @@ tags: []
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -378,7 +378,7 @@ tags: []
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -431,7 +431,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -483,7 +483,7 @@ See the code:
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
 
     assert!(result.is_ok());
@@ -715,7 +715,7 @@ tags: []
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
-        &lazyspec::engine::git_ref::GitCli,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     );
     assert!(result.is_ok());
     let output = result.unwrap();
