@@ -1,7 +1,7 @@
 ---
 title: Stamp reviewed when I move a document's status
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []

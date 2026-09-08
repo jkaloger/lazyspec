@@ -1,7 +1,7 @@
 ---
 title: Show the staleness band where documents are inspected
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []

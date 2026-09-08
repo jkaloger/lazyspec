@@ -1,7 +1,7 @@
 ---
 title: See how stale a document is
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
