@@ -107,20 +107,22 @@ fn pin_rows(doc: &DocMeta) -> String {
     out
 }
 
+/// Everything `show` renders a document with besides the document: how much of
+/// the body to expand, and the seams a body and a band come through. Grouped
+/// because the positional list had grown past what a reader -- or clippy -- will
+/// follow.
+pub struct ShowArgs<'a> {
+    pub expand: bool,
+    pub max_ref_lines: usize,
+    pub fs: &'a dyn FileSystem,
+    pub config: &'a Config,
+    pub git: &'a dyn GitRefOps,
+}
+
 /// Writes to `out` rather than straight to `println!` so a test can assert on
 /// the rendered document -- the staleness line included -- through the same path
 /// `main` takes.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    out: &mut dyn std::io::Write,
-    store: &Store,
-    id: &str,
-    expand: bool,
-    max_ref_lines: usize,
-    fs: &dyn FileSystem,
-    config: &Config,
-    git: &dyn GitRefOps,
-) -> Result<()> {
+pub fn run(out: &mut dyn std::io::Write, store: &Store, id: &str, args: ShowArgs) -> Result<()> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -164,9 +166,9 @@ pub fn run(
         "staleness: {}",
         compute(
             store.governs_root(),
-            StalenessTerms::of(config, doc),
+            StalenessTerms::of(args.config, doc),
             doc,
-            git,
+            args.git,
             &StalenessCache::load(store.root()),
         )
     )?;
@@ -183,10 +185,10 @@ pub fn run(
     }
     writeln!(out, "{}", separator())?;
 
-    let body = if expand {
-        store.get_body_expanded(&doc.path, max_ref_lines, fs)?
+    let body = if args.expand {
+        store.get_body_expanded(&doc.path, args.max_ref_lines, args.fs)?
     } else {
-        store.get_body_raw(&doc.path, fs)?
+        store.get_body_raw(&doc.path, args.fs)?
     };
     writeln!(out, "{}", strip_html_comments(&body))?;
 
@@ -544,11 +546,13 @@ mod tests {
             &mut out,
             store,
             "RFC-001",
-            false,
-            25,
-            &crate::engine::fs::RealFileSystem,
-            config,
-            git,
+            ShowArgs {
+                expand: false,
+                max_ref_lines: 25,
+                fs: &crate::engine::fs::RealFileSystem,
+                config,
+                git,
+            },
         )
         .unwrap();
         String::from_utf8(out).unwrap()

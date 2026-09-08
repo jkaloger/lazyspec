@@ -706,6 +706,16 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     });
 
+    // One `(reviewed, HEAD)` memo for the whole session, shared by both
+    // staleness workers below (STORY-276). Loaded here rather than per request:
+    // a memo per request pays a JSON read on every cursor move, and a memo per
+    // worker writes the whole file back from two owners, so whichever wrote
+    // second would discard what the other learned. Flushed by each worker after
+    // its pass, which is a no-op unless that pass learned something.
+    let staleness_cache = Arc::new(crate::engine::staleness_cache::StalenessCache::load(
+        app.store.root(),
+    ));
+
     // Background staleness worker (STORY-275): `compute` shells out to
     // `git diff`, which on the render path stalls every cursor move. Same shape
     // as the search worker above -- an owned request, drained to the newest
@@ -716,6 +726,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         crossbeam_channel::unbounded::<crate::tui::state::StalenessRequest>();
     app.staleness_tx = staleness_tx;
     let staleness_result_tx = tx.clone();
+    let badge_cache = Arc::clone(&staleness_cache);
     std::thread::spawn(move || {
         let git = crate::engine::git_ref::GitCli;
         while let Ok(mut req) = staleness_rx.recv() {
@@ -727,8 +738,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 req.terms,
                 &req.doc,
                 &git,
-                &crate::engine::staleness_cache::StalenessCache::load(&req.root),
+                &badge_cache,
             );
+            badge_cache.flush();
             if staleness_result_tx
                 .send(AppEvent::StalenessComputed {
                     generation: req.generation,
@@ -761,8 +773,9 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 req.docs.iter(),
                 &req.config,
                 &git,
-                &crate::engine::staleness_cache::StalenessCache::load(&req.root),
+                &staleness_cache,
             );
+            staleness_cache.flush();
             if stale_findings_result_tx
                 .send(AppEvent::StaleFindingsComputed {
                     generation: req.generation,

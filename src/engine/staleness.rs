@@ -81,7 +81,7 @@ pub struct Drift {
 /// worker builds one per selection change and cannot borrow the config across
 /// the thread boundary -- and cloning the whole of it per keystroke, to read two
 /// `Copy` values off it, is a toll with nothing behind it (STORY-277).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct StalenessTerms {
     pub driver: StalenessDriver,
     pub thresholds: StalenessConfig,

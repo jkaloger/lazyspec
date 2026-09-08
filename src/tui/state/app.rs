@@ -314,8 +314,6 @@ pub struct SearchRequest {
 /// can borrow neither the `Store` nor the `App`; the governed root is the only
 /// thing it ever read off the store.
 pub struct StalenessRequest {
-    /// The docs root, which is where the `(reviewed, HEAD)` memo is filed.
-    pub root: PathBuf,
     pub governs_root: PathBuf,
     /// The two `Copy` values `compute` reads off the config, rather than a clone
     /// of the whole of it per selection change (STORY-277).
@@ -333,7 +331,6 @@ pub struct StalenessRequest {
 /// Owned, and a `Vec<DocMeta>` rather than the `Store` those documents came
 /// from, because that store lives on the UI thread.
 pub struct StaleFindingsRequest {
-    pub root: PathBuf,
     pub governs_root: PathBuf,
     pub config: Config,
     pub docs: Vec<DocMeta>,
@@ -1013,12 +1010,9 @@ impl App {
     /// result folds through here too, and re-requesting from there would loop.
     pub(super) fn fold_validation(&mut self, config: &Config) {
         // STORY-276 AC2: `stale` is the one rule that shells out to git per
-        // document, and this runs on the render path. It is gated out through
-        // its own `finding = "off"` knob and answered by a worker instead, whose
-        // last result is folded in below.
-        let mut cheap = config.clone();
-        cheap.staleness.finding = crate::engine::config::StalenessFinding::Off;
-        let result = crate::engine::validation::validate_full(&self.store, &cheap);
+        // document, and this runs on the render path. It is skipped here and
+        // answered by a worker instead, whose last result is folded in below.
+        let result = crate::engine::validation::validate_without_stale(&self.store, config);
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
         self.validation_errors
@@ -4405,6 +4399,7 @@ mod tests {
     use super::parity_seed::{bare_app, populate_docs};
     use super::*;
     use crate::engine::config::TypeDef;
+    use crate::engine::staleness_cache::StalenessCache;
     use crate::engine::store::Store;
     use crate::engine::traversal::TraversalWalk;
     use crate::tui::state::forms::PickerPane;
@@ -4884,7 +4879,7 @@ mod tests {
 
         let mut app = make_test_app(0);
         app.store = store;
-        app.run_stale_findings_now(&config);
+        app.run_stale_findings_now(&config, &StalenessCache::off());
 
         let message = crate::engine::validation::validate_full(&app.store, &config)
             .warnings
@@ -4918,7 +4913,7 @@ mod tests {
             app.validation_warnings
         );
 
-        app.run_stale_findings_now(&config);
+        app.run_stale_findings_now(&config, &StalenessCache::off());
 
         assert!(
             app.validation_warnings.iter().any(|w| w.contains("stale")),
@@ -6298,6 +6293,60 @@ mod tests {
         );
     }
 
+    // STORY-276 AC3 on the surface the TUI actually runs: both staleness
+    // surfaces share one loaded memo for the session -- the badge worker's and
+    // the findings worker's -- so the second of them asks git nothing about an
+    // anchor the first already resolved. A memo per surface would answer the
+    // same two subprocesses twice and, writing the whole file back from two
+    // owners, would discard the other's entries as well.
+    #[test]
+    fn the_two_staleness_surfaces_share_one_warm_memo() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+        use crate::engine::staleness::Drift;
+
+        let mut config = Config::default();
+        for type_def in &mut config.documents.types {
+            type_def.staleness = crate::engine::config::StalenessDriver::Drift;
+        }
+        let (_tmp, mut app) = app_with_store_config(
+            &[(
+                "docs/rfcs/RFC-001-a.md",
+                &rfc_doc("A", "governs:\n  - \"src/engine/**\"\nreviewed: abc1234\n"),
+            )],
+            &config,
+        );
+        select_rfc_doc(&mut app);
+        let git = MockGitRefClient::new()
+            .with_diff_stat(Drift {
+                files: 12,
+                insertions: 310,
+                deletions: 85,
+            })
+            .with_read_commit_timestamp_result(Ok(chrono::Utc::now()))
+            .with_read_commit_timestamp_result(Ok(chrono::Utc::now()));
+        let calls = git.call_log();
+        app.git = Box::new(git);
+        let cache = StalenessCache::load(app.store.root());
+
+        app.run_staleness_now(&config, &cache);
+        app.run_stale_findings_now(&config, &cache);
+
+        let count = |prefix: &str| {
+            calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with(prefix))
+                .count()
+        };
+        assert_eq!(count("diff_stat:"), 1, "one diff for both surfaces");
+        assert_eq!(count("read_commit_timestamp:"), 1, "one anchor lookup");
+        assert!(
+            app.validation_warnings.iter().any(|w| w.contains("stale")),
+            "the memoized drift still bands the document: {:?}",
+            app.validation_warnings
+        );
+    }
+
     // STORY-275 AC1, end to end bar the git subprocess: the governed root and
     // the selected document go into the engine's `compute`, and the band that
     // comes back is the one the header will render. Only the git seam is a
@@ -6329,7 +6378,7 @@ mod tests {
                 .with_read_commit_timestamp_result(Ok(chrono::Utc::now())),
         );
 
-        app.run_staleness_now(&config);
+        app.run_staleness_now(&config, &StalenessCache::off());
 
         let staleness = app
             .staleness

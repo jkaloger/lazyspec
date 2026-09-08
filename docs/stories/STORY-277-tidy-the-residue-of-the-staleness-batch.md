@@ -1,13 +1,13 @@
 ---
 title: Tidy the residue of the staleness batch
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - implements: RFC-069
-reviewed: 21b889a2058a5cacfa1247d1baaccec691497b95
+reviewed: 23798d6a0bd261b59ddd759d151e0e26be868931
 ---
 
 As a maintainer reading the staleness code after the fact, I want the small inconsistencies the batch left behind cleaned up, so that the next person to touch it does not inherit three answers to the same question.

@@ -11,10 +11,11 @@
 //! the whole drift map is dropped the moment `HEAD` moves, and the entries need
 //! no `HEAD` of their own in their keys.
 //!
-//! One memo per process (or per worker thread), so the `Mutex` -- which is here
-//! to make the memo `Send` for the TUI's staleness workers, not to arbitrate
-//! between callers -- is never contended, and holding it across a git
-//! subprocess costs nothing.
+//! One memo per process, shared: the `Mutex` is here so that the TUI's two
+//! staleness workers can hold the same instance -- two instances over one file
+//! would each write the whole memo back and the later write would discard what
+//! the other learned. Contention is a git subprocess long and there are two
+//! threads, so the lock is not worth splitting.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,7 @@ struct State {
     dirty: bool,
 }
 
+#[derive(Debug)]
 pub struct StalenessCache {
     /// Where the memo is read from and written back to. `None` is a memo that
     /// remembers nothing at all -- what a test uses, so that a git call log is
@@ -145,6 +147,39 @@ impl StalenessCache {
         Ok(drift)
     }
 
+    /// Write the memo back, when there is something new in it to write. Public
+    /// and not only on `Drop` because the TUI's two workers share one instance
+    /// that outlives every request and is never dropped in an ordinary session:
+    /// they flush after each pass instead. Cheap to call on an unchanged memo --
+    /// that is what `dirty` is for -- so a warm cache writes nothing.
+    pub fn flush(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let mut state = self.lock();
+        if !state.dirty {
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let Ok(raw) = serde_json::to_string(&state.memo) else {
+            return;
+        };
+        // Written beside the memo and renamed over it, rather than into it: a
+        // reader that catches a half-written file parses nothing, and `load`
+        // answers that with an empty memo -- dropping `head`, and with it every
+        // drift entry the file held. A rename is atomic, so a concurrent reader
+        // sees one whole memo or the other.
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        match std::fs::write(&tmp, raw).and_then(|()| std::fs::rename(&tmp, path)) {
+            Ok(()) => state.dirty = false,
+            Err(_) => {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+
     /// A poisoned memo carries no corrupt state -- worst case an entry is
     /// missing and git is asked again -- so the guard is recovered rather than
     /// taking the process down with it.
@@ -157,6 +192,10 @@ impl StalenessCache {
 /// dropping every drift entry measured to a `HEAD` that has since moved.
 /// Returns whether drift can be memoized at all: a repository whose `HEAD` git
 /// will not name has no key to file an entry under.
+///
+/// The `head_attempted` latch does not record which `root` answered, so it is
+/// only sound while one cache is asked about one root -- which holds because
+/// every caller passes the `governs_root` the memo was loaded for.
 fn resolve_head(state: &mut State, git: &dyn GitRefOps, root: &Path) -> bool {
     if !state.head_attempted {
         state.head_attempted = true;
@@ -171,22 +210,11 @@ fn resolve_head(state: &mut State, git: &dyn GitRefOps, root: &Path) -> bool {
 }
 
 /// Written back once, when the memo goes out of scope, rather than per entry:
-/// the whole point is that the next process does not shell out.
+/// the whole point is that the next process does not shell out. A one-shot
+/// command needs no more than this; a long-lived one flushes as it goes.
 impl Drop for StalenessCache {
     fn drop(&mut self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let state = self.lock();
-        if !state.dirty {
-            return;
-        }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(raw) = serde_json::to_string(&state.memo) {
-            let _ = std::fs::write(path, raw);
-        }
+        self.flush();
     }
 }
 
@@ -374,6 +402,48 @@ mod tests {
 
         assert_eq!(git_calls(&git, "head:"), 1);
         assert_eq!(git_calls(&git, "diff_stat:"), 3);
+    }
+
+    /// The shape the TUI's two staleness workers run in: one instance for the
+    /// process, flushed after each pass, never dropped. Both workers' learning
+    /// has to survive -- two instances over one file each write the whole memo
+    /// back, and the later write discards what the other found. And a pass that
+    /// learned nothing must write nothing, or the memo trades a git subprocess
+    /// per cursor move for a JSON write per cursor move.
+    #[test]
+    fn one_shared_memo_flushed_per_pass_keeps_both_workers_entries() {
+        let tmp = TempDir::new().unwrap();
+        let globs = vec!["src/engine/**".to_string()];
+        let path = tmp.path().join(".lazyspec").join("cache").join(CACHE_FILE);
+        let first = git_answering(drift_of(3));
+        let shared = StalenessCache::load(tmp.path());
+
+        shared.commit_timestamp(&first, tmp.path(), ANCHOR).unwrap();
+        shared.flush();
+        shared.drift(&first, tmp.path(), ANCHOR, &globs).unwrap();
+        shared.flush();
+
+        std::fs::remove_file(&path).unwrap();
+        shared.flush();
+        assert!(!path.exists(), "a flush with nothing new writes nothing");
+
+        shared
+            .commit_timestamp(&first, tmp.path(), "second")
+            .unwrap();
+        shared.flush();
+
+        let second = git_answering(drift_of(99));
+        let next = StalenessCache::load(tmp.path());
+        let drift = next.drift(&second, tmp.path(), ANCHOR, &globs).unwrap();
+        next.commit_timestamp(&second, tmp.path(), ANCHOR).unwrap();
+
+        assert_eq!(drift, drift_of(3), "the findings worker's entry survived");
+        assert_eq!(git_calls(&second, "diff_stat:"), 0);
+        assert_eq!(
+            git_calls(&second, "read_commit_timestamp:"),
+            0,
+            "the badge worker's entry survived"
+        );
     }
 
     /// A memo nothing was learned from is not rewritten, so a read-only command

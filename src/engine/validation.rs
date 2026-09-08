@@ -3,7 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
-use crate::engine::staleness::{compute, Band, Staleness, StalenessTerms};
+use crate::engine::staleness::{cannot_be_stale, compute, Band, Staleness, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
 use serde::Serialize;
@@ -221,9 +221,9 @@ impl ValidationResult {
     }
 }
 
-/// What a [`Checker`] returns, split by severity. Named, because the TUI's
-/// `stale` worker (STORY-276) sends one rule's findings back to the render
-/// thread in this shape and `validate_full` folds every rule's into it.
+/// Splits what a [`Checker`] returns by severity. The conversion every rule's
+/// findings go through on the way into a [`ValidationResult`], including the
+/// ones the TUI's `stale` worker sends back to the render thread (STORY-276).
 impl From<Vec<(Severity, ValidationIssue)>> for ValidationResult {
     fn from(issues: Vec<(Severity, ValidationIssue)>) -> Self {
         let mut result = ValidationResult::default();
@@ -1213,31 +1213,20 @@ pub fn stale_findings<'a>(
     };
 
     // Sorted, because `store.docs` is a map and the order findings print in
-    // should not be its iteration order.
-    let mut docs: Vec<&DocMeta> = docs
+    // should not be its iteration order. The terms travel with the document
+    // rather than being rebuilt for the band: one type lookup per document.
+    let mut docs: Vec<(&DocMeta, StalenessTerms)> = docs
         .into_iter()
         .filter(|meta| !meta.validate_ignore)
+        .map(|meta| (meta, StalenessTerms::of(config, meta)))
         // Nothing an anchor could say would make these rot, so nothing is asked
         // of git for them -- which on an age-driven tree is most of it.
-        .filter(|meta| {
-            !crate::engine::staleness::cannot_be_stale(StalenessTerms::of(config, meta), meta)
-        })
+        .filter(|(meta, terms)| !cannot_be_stale(*terms, meta))
         .collect();
-    docs.sort_by(|a, b| a.path.cmp(&b.path));
+    docs.sort_by(|(a, _), (b, _)| a.path.cmp(&b.path));
 
     docs.into_iter()
-        .map(|doc| {
-            (
-                &doc.path,
-                compute(
-                    governs_root,
-                    StalenessTerms::of(config, doc),
-                    doc,
-                    git,
-                    cache,
-                ),
-            )
-        })
+        .map(|(doc, terms)| (&doc.path, compute(governs_root, terms, doc, git, cache)))
         .filter(|(_, staleness)| staleness.band == Band::Stale)
         .map(|(path, staleness)| {
             (
@@ -1649,9 +1638,10 @@ fn check_project_field(
     }
 }
 
-/// `root` is the docs root, which only [`StaleRule`] needs: its `(reviewed,
-/// HEAD)` memo is filed under it.
-fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
+/// Every rule but [`StaleRule`], the one that shells out to git per document.
+/// What a caller on a render path runs (STORY-276 AC2): it also reads no memo
+/// file, since only that rule has one.
+fn checkers_without_stale() -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(RequiredEdgeRule),
@@ -1664,17 +1654,41 @@ fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
-        Box::new(StaleRule::new(Box::new(GitCli), StalenessCache::load(root))),
     ]
 }
 
-pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
-    let mut result = ValidationResult::default();
+/// `root` is the docs root, which only [`StaleRule`] needs: its `(reviewed,
+/// HEAD)` memo is filed under it.
+fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
+    let mut checkers = checkers_without_stale();
+    checkers.push(Box::new(StaleRule::new(
+        Box::new(GitCli),
+        StalenessCache::load(root),
+    )));
+    checkers
+}
 
-    for checker in default_checkers(store.root()) {
+pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
+    run_checkers(default_checkers(store.root()), store, config)
+}
+
+/// [`validate_full`] without [`StaleRule`], for a caller that cannot afford a
+/// git subprocess per document where it runs -- the TUI's validation refresh,
+/// which answers `stale` from a worker instead (STORY-276 AC2). A skipped rule,
+/// not a suppressed one: nothing is banded and no memo is read.
+pub fn validate_without_stale(store: &super::store::Store, config: &Config) -> ValidationResult {
+    run_checkers(checkers_without_stale(), store, config)
+}
+
+fn run_checkers(
+    checkers: Vec<Box<dyn Checker>>,
+    store: &super::store::Store,
+    config: &Config,
+) -> ValidationResult {
+    let mut result = ValidationResult::default();
+    for checker in checkers {
         result.merge(checker.check(store, config).into());
     }
-
     result
 }
 

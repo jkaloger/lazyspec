@@ -277,11 +277,13 @@ fn main() -> anyhow::Result<()> {
                     &mut std::io::stdout(),
                     &store,
                     &id,
-                    expand_references,
-                    max_ref_lines,
-                    &fs,
-                    &config,
-                    &GitCli,
+                    lazyspec::cli::show::ShowArgs {
+                        expand: expand_references,
+                        max_ref_lines,
+                        fs: &fs,
+                        config: &config,
+                        git: &GitCli,
+                    },
                 )?;
             }
         }

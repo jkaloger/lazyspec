@@ -111,7 +111,6 @@ impl App {
         self.staleness = None;
         self.staleness_generation = self.staleness_generation.wrapping_add(1);
         let _ = self.staleness_tx.send(StalenessRequest {
-            root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             terms: StalenessTerms::of(config, &doc),
             doc,
@@ -129,7 +128,6 @@ impl App {
     pub fn request_stale_findings(&mut self, config: &Config) {
         self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
         let _ = self.stale_findings_tx.send(StaleFindingsRequest {
-            root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),
             docs: self.store.docs.values().cloned().collect(),
@@ -179,8 +177,16 @@ impl App {
     /// Test-only synchronous staleness: dispatch, then compute inline through
     /// `self.git` and apply, so a test exercises the production path without a
     /// worker thread. `App::run_search_now` is the shape.
+    ///
+    /// The memo is the caller's, as it is the worker's: a test asserting on a
+    /// git call log passes an `off()` one, and a test asserting on the memo
+    /// itself passes the shared instance the session runs with.
     #[cfg(test)]
-    pub(crate) fn run_staleness_now(&mut self, config: &Config) {
+    pub(crate) fn run_staleness_now(
+        &mut self,
+        config: &Config,
+        cache: &crate::engine::staleness_cache::StalenessCache,
+    ) {
         self.request_staleness(config);
         let Some(doc) = self.selected_doc_for_view().cloned() else {
             return;
@@ -190,15 +196,20 @@ impl App {
             StalenessTerms::of(config, &doc),
             &doc,
             &*self.git,
-            &crate::engine::staleness_cache::StalenessCache::off(),
+            cache,
         );
+        cache.flush();
         self.apply_staleness(self.staleness_generation, staleness);
     }
 
     /// Test-only synchronous `stale` findings, the shape `run_staleness_now` is:
     /// dispatch, compute inline through `self.git`, apply.
     #[cfg(test)]
-    pub(crate) fn run_stale_findings_now(&mut self, config: &Config) {
+    pub(crate) fn run_stale_findings_now(
+        &mut self,
+        config: &Config,
+        cache: &crate::engine::staleness_cache::StalenessCache,
+    ) {
         self.request_stale_findings(config);
         let docs: Vec<DocMeta> = self.store.docs.values().cloned().collect();
         let result = crate::engine::validation::stale_findings(
@@ -206,9 +217,10 @@ impl App {
             docs.iter(),
             config,
             &*self.git,
-            &crate::engine::staleness_cache::StalenessCache::off(),
+            cache,
         )
         .into();
+        cache.flush();
         self.apply_stale_findings(self.stale_findings_generation, result, config);
     }
 
