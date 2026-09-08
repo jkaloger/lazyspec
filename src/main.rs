@@ -522,7 +522,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Why { path, json }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::why::run(&store, &config, &path, json, &GitCli);
+            lazyspec::cli::why::run(&store, &path, json, &GitCli);
         }
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;

@@ -314,9 +314,27 @@ pub struct SearchRequest {
 /// can borrow neither the `Store` nor the `App`; the governed root is the only
 /// thing it ever read off the store.
 pub struct StalenessRequest {
+    /// The docs root, which is where the `(reviewed, HEAD)` memo is filed.
+    pub root: PathBuf,
     pub governs_root: PathBuf,
     pub config: Config,
     pub doc: DocMeta,
+    pub generation: u64,
+}
+
+/// One validation refresh's worth of `stale` findings for the background worker
+/// (STORY-276). `StaleRule` is the one validation rule that shells out per
+/// document, and `refresh_validation` runs on the render path -- so the rule is
+/// gated out of the synchronous pass and answered from here instead, on the same
+/// terms RFC-069 Decision 6 put the detail badge on.
+///
+/// Owned, and a `Vec<DocMeta>` rather than the `Store` those documents came
+/// from, because that store lives on the UI thread.
+pub struct StaleFindingsRequest {
+    pub root: PathBuf,
+    pub governs_root: PathBuf,
+    pub config: Config,
+    pub docs: Vec<DocMeta>,
     pub generation: u64,
 }
 
@@ -347,6 +365,10 @@ pub enum AppEvent {
     StalenessComputed {
         generation: u64,
         staleness: Staleness,
+    },
+    StaleFindingsComputed {
+        generation: u64,
+        result: crate::engine::validation::ValidationResult,
     },
     CacheRefresh {
         warnings: Vec<String>,
@@ -619,6 +641,16 @@ pub struct App {
     /// Sender to the background staleness worker, rebound by the event loop
     /// exactly as `search_tx` is.
     pub staleness_tx: crossbeam_channel::Sender<StalenessRequest>,
+    /// The last `stale` findings the background worker answered with
+    /// (STORY-276), folded into the validation panel by
+    /// [`App::fold_validation`] the way the gh fetch warnings beside them are.
+    /// Unlike `staleness`, this one is a cache: it holds the previous answer
+    /// while the next is being computed, so the panel does not flicker.
+    pub stale_findings: crate::engine::validation::ValidationResult,
+    /// Monotonic id stamped onto each dispatched findings pass; an older
+    /// result is dropped, so a slow pass cannot overwrite a newer one.
+    pub stale_findings_generation: u64,
+    pub stale_findings_tx: crossbeam_channel::Sender<StaleFindingsRequest>,
     pub show_help: bool,
     pub help_scroll: u16,
     /// Maximum legal `help_scroll` for the current help content + viewport,
@@ -779,6 +811,7 @@ impl App {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
+        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
         #[cfg(feature = "agent")]
@@ -815,6 +848,9 @@ impl App {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
+            stale_findings: Default::default(),
+            stale_findings_generation: 0,
+            stale_findings_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -963,10 +999,30 @@ impl App {
         }
     }
 
+    /// Re-run validation and dispatch the one rule that is too expensive to run
+    /// here. Reached from every event that can change what validation says.
     pub fn refresh_validation(&mut self, config: &Config) {
-        let result = crate::engine::validation::validate_full(&self.store, config);
+        self.fold_validation(config);
+        self.request_stale_findings(config);
+    }
+
+    /// Everything the panel shows, rebuilt from the cheap rules plus the
+    /// warnings that arrive from elsewhere. Not a dispatch: applying a worker
+    /// result folds through here too, and re-requesting from there would loop.
+    pub(super) fn fold_validation(&mut self, config: &Config) {
+        // STORY-276 AC2: `stale` is the one rule that shells out to git per
+        // document, and this runs on the render path. It is gated out through
+        // its own `finding = "off"` knob and answered by a worker instead, whose
+        // last result is folded in below.
+        let mut cheap = config.clone();
+        cheap.staleness.finding = crate::engine::config::StalenessFinding::Off;
+        let result = crate::engine::validation::validate_full(&self.store, &cheap);
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
+        self.validation_errors
+            .extend(self.stale_findings.errors.iter().map(|e| e.to_string()));
+        self.validation_warnings
+            .extend(self.stale_findings.warnings.iter().map(|e| e.to_string()));
         self.validation_warnings
             .extend(self.status_bar_warnings.iter().cloned());
         self.validation_warnings
@@ -3885,6 +3941,7 @@ pub(crate) mod parity_seed {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
+        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         let config = Config::default();
@@ -3912,6 +3969,9 @@ pub(crate) mod parity_seed {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
+            stale_findings: Default::default(),
+            stale_findings_generation: 0,
+            stale_findings_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4380,6 +4440,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
+        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
         #[cfg(feature = "agent")]
@@ -4409,6 +4470,9 @@ mod tests {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
+            stale_findings: Default::default(),
+            stale_findings_generation: 0,
+            stale_findings_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4790,27 +4854,35 @@ mod tests {
         assert_eq!(app.validation_errors, messages);
     }
 
-    /// STORY-273 AC5: the `stale` finding reaches the validation panel by the
-    /// same route every other rule takes -- `refresh_validation` renders each
-    /// finding's `message` and knows no rule by name.
-    #[test]
-    fn refresh_validation_carries_the_stale_finding_into_the_panel() {
-        use crate::engine::config::Config;
-        use chrono::{Duration, Utc};
-
-        let date = Utc::now().date_naive() - Duration::days(200);
+    /// A rotted document, banded by its own date under the default `age` driver,
+    /// so no git is in play.
+    fn store_with_a_rotted_document(
+        config: &Config,
+    ) -> (tempfile::TempDir, crate::engine::store::Store) {
+        let date = chrono::Utc::now().date_naive() - chrono::Duration::days(200);
         let doc = format!(
             "---\ntitle: \"Rotted\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {date}\ntags: []\ngoverns: []\nrelated: []\n---\n\nbody\n"
         );
-        let config = Config::default();
-        let (_tmp, store) = crate::engine::store::test_support::store_from_with_config(
+        crate::engine::store::test_support::store_from_with_config(
             &[("docs/rfcs/RFC-001-rotted.md", &doc)],
-            &config,
-        );
+            config,
+        )
+    }
+
+    /// STORY-273 AC5: the `stale` finding reaches the validation panel by the
+    /// same route every other rule takes -- the panel renders each finding's
+    /// `message` and knows no rule by name. It arrives from the worker rather
+    /// than from `validate_full` since STORY-276, so the route runs through
+    /// `apply_stale_findings`; `run_stale_findings_now` is that route without a
+    /// thread.
+    #[test]
+    fn the_stale_finding_reaches_the_validation_panel() {
+        let config = Config::default();
+        let (_tmp, store) = store_with_a_rotted_document(&config);
 
         let mut app = make_test_app(0);
         app.store = store;
-        app.refresh_validation(&config);
+        app.run_stale_findings_now(&config);
 
         let message = crate::engine::validation::validate_full(&app.store, &config)
             .warnings
@@ -4821,6 +4893,60 @@ mod tests {
         assert!(
             app.validation_warnings.contains(&message),
             "expected the stale finding's message in the panel, got: {:?}",
+            app.validation_warnings
+        );
+    }
+
+    /// STORY-276 AC2: `refresh_validation` runs on the render path, so the one
+    /// validation rule that shells out per document is not run there. Asserted
+    /// on the panel, because that is the only place the difference shows: the
+    /// warning is absent until the worker answers, and present after.
+    #[test]
+    fn refresh_validation_leaves_the_stale_rule_to_the_worker() {
+        let config = Config::default();
+        let (_tmp, store) = store_with_a_rotted_document(&config);
+
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.refresh_validation(&config);
+
+        assert!(
+            !app.validation_warnings.iter().any(|w| w.contains("stale")),
+            "the render path must not have banded anything: {:?}",
+            app.validation_warnings
+        );
+
+        app.run_stale_findings_now(&config);
+
+        assert!(
+            app.validation_warnings.iter().any(|w| w.contains("stale")),
+            "the worker's answer folds into the same panel: {:?}",
+            app.validation_warnings
+        );
+    }
+
+    /// A findings pass a newer one has superseded is dropped, the way a stale
+    /// search result is: the store may have moved on while git was running.
+    #[test]
+    fn a_superseded_findings_pass_is_dropped() {
+        let config = Config::default();
+        let (_tmp, store) = store_with_a_rotted_document(&config);
+        let mut app = make_test_app(0);
+        app.store = store;
+
+        app.request_stale_findings(&config);
+        let superseded = app.stale_findings_generation;
+        app.request_stale_findings(&config);
+
+        app.apply_stale_findings(
+            superseded,
+            crate::engine::validation::validate_full(&app.store, &config),
+            &config,
+        );
+
+        assert!(
+            !app.validation_warnings.iter().any(|w| w.contains("stale")),
+            "got: {:?}",
             app.validation_warnings
         );
     }

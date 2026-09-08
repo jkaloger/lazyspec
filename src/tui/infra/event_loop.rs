@@ -574,6 +574,9 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         } => {
             app.apply_staleness(generation, staleness);
         }
+        AppEvent::StaleFindingsComputed { generation, result } => {
+            app.apply_stale_findings(generation, result, config);
+        }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
             if app.create_form.active && app.create_form.loading {
@@ -719,12 +722,51 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             while let Ok(newer) = staleness_rx.try_recv() {
                 req = newer;
             }
-            let staleness =
-                crate::engine::staleness::compute(&req.governs_root, &req.config, &req.doc, &git);
+            let staleness = crate::engine::staleness::compute(
+                &req.governs_root,
+                &req.config,
+                &req.doc,
+                &git,
+                &crate::engine::staleness_cache::StalenessCache::load(&req.root),
+            );
             if staleness_result_tx
                 .send(AppEvent::StalenessComputed {
                     generation: req.generation,
                     staleness,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    // Background `stale` findings worker (STORY-276): the validation panel's
+    // share of the same rule. `refresh_validation` gates it out of the
+    // synchronous pass, so this thread is what answers it -- one pass per event
+    // that can change what validation says, drained to the newest, results
+    // carrying their generation, exactly as the two workers above.
+    let (stale_findings_tx, stale_findings_rx) =
+        crossbeam_channel::unbounded::<crate::tui::state::StaleFindingsRequest>();
+    app.stale_findings_tx = stale_findings_tx;
+    let stale_findings_result_tx = tx.clone();
+    std::thread::spawn(move || {
+        let git = crate::engine::git_ref::GitCli;
+        while let Ok(mut req) = stale_findings_rx.recv() {
+            while let Ok(newer) = stale_findings_rx.try_recv() {
+                req = newer;
+            }
+            let result = crate::engine::validation::stale_findings(
+                &req.governs_root,
+                req.docs.iter(),
+                &req.config,
+                &git,
+                &crate::engine::staleness_cache::StalenessCache::load(&req.root),
+            );
+            if stale_findings_result_tx
+                .send(AppEvent::StaleFindingsComputed {
+                    generation: req.generation,
+                    result: result.into(),
                 })
                 .is_err()
             {

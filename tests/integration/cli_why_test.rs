@@ -2,7 +2,6 @@
 
 use crate::common::TestFixture;
 use lazyspec::cli::why;
-use lazyspec::engine::config::Config;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::staleness::Drift;
 use lazyspec::engine::store::Store;
@@ -30,13 +29,7 @@ fn drifting(files: u64) -> MockGitRefClient {
 }
 
 fn results_with(store: &Store, path: &str, git: &MockGitRefClient) -> Vec<serde_json::Value> {
-    serde_json::from_str(&why::run_json(
-        store,
-        &Config::default(),
-        Path::new(path),
-        git,
-    ))
-    .unwrap()
+    serde_json::from_str(&why::run_json(store, Path::new(path), git)).unwrap()
 }
 
 fn results(store: &Store, path: &str) -> Vec<serde_json::Value> {
@@ -109,13 +102,7 @@ fn unmatched_path_is_an_empty_list() {
     let store = fixture.store();
 
     assert_eq!(
-        why::run_json(
-            &store,
-            &Config::default(),
-            Path::new("src/cli/show.rs"),
-            &no_drift()
-        )
-        .trim(),
+        why::run_json(&store, Path::new("src/cli/show.rs"), &no_drift()).trim(),
         "[]"
     );
     assert!(results(&store, "src/cli/show.rs").is_empty());
@@ -166,6 +153,41 @@ fn a_record_with_nothing_changed_since_review_is_not_drifted() {
     let found = results_with(&store, "src/engine/context/resolve.rs", &drifting(0));
 
     assert_eq!(found[0]["drifted"], serde_json::json!(false));
+}
+
+/// STORY-276 AC5: `why` over N governing documents costs N git subprocesses,
+/// not 2N. It reports the drift bit and never the band, so the anchor commit's
+/// time -- which only a band needs -- is not read.
+#[test]
+fn each_record_costs_one_subprocess_and_not_two() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/specs/SPEC-001-context.md",
+        &spec("src/engine/context/**", "0123456789abcdef"),
+    );
+    fixture.write_doc(
+        "docs/specs/SPEC-002-engine.md",
+        &spec("src/engine/**/*.rs", "fedcba9876543210"),
+    );
+    let store = fixture.store();
+    let git = drifting(2);
+
+    let found = results_with(&store, "src/engine/context/resolve.rs", &git);
+
+    assert_eq!(found.len(), 2, "got: {found:?}");
+    let calls = git.call_log();
+    let calls = calls.borrow();
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("diff_stat:")).count(),
+        2,
+        "one diff per record: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("read_commit_timestamp:")),
+        "no anchor commit is read for a fact `why` does not report: {calls:?}"
+    );
 }
 
 // AC7's second half: no anchor is nothing to diff, so the record is not drifted

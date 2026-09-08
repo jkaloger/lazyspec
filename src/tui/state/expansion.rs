@@ -7,7 +7,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::{App, AppEvent, StalenessRequest};
+use super::{App, AppEvent, StaleFindingsRequest, StalenessRequest};
 
 impl App {
     pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
@@ -111,11 +111,45 @@ impl App {
         self.staleness = None;
         self.staleness_generation = self.staleness_generation.wrapping_add(1);
         let _ = self.staleness_tx.send(StalenessRequest {
+            root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),
             doc,
             generation: self.staleness_generation,
         });
+    }
+
+    /// Dispatch the whole tree's `stale` findings to the background worker
+    /// (STORY-276 AC2). `refresh_validation` gates the rule out of its own
+    /// synchronous pass, so this is the only thing that answers it.
+    ///
+    /// Called from `refresh_validation` and nowhere else -- once per event that
+    /// can change what validation says, not once per frame -- so no dedupe key:
+    /// each of those events is a reason the previous answer may be wrong.
+    pub fn request_stale_findings(&mut self, config: &Config) {
+        self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
+        let _ = self.stale_findings_tx.send(StaleFindingsRequest {
+            root: self.store.root().to_path_buf(),
+            governs_root: self.store.governs_root().to_path_buf(),
+            config: config.clone(),
+            docs: self.store.docs.values().cloned().collect(),
+            generation: self.stale_findings_generation,
+        });
+    }
+
+    /// Apply a findings pass, dropping one a newer pass has superseded, and fold
+    /// it into the panel.
+    pub fn apply_stale_findings(
+        &mut self,
+        generation: u64,
+        result: crate::engine::validation::ValidationResult,
+        config: &Config,
+    ) {
+        if generation != self.stale_findings_generation {
+            return;
+        }
+        self.stale_findings = result;
+        self.fold_validation(config);
     }
 
     /// Apply a worker result, dropping it when the generation has moved on. The
@@ -151,9 +185,31 @@ impl App {
         let Some(doc) = self.selected_doc_for_view().cloned() else {
             return;
         };
-        let staleness =
-            crate::engine::staleness::compute(self.store.governs_root(), config, &doc, &*self.git);
+        let staleness = crate::engine::staleness::compute(
+            self.store.governs_root(),
+            config,
+            &doc,
+            &*self.git,
+            &crate::engine::staleness_cache::StalenessCache::off(),
+        );
         self.apply_staleness(self.staleness_generation, staleness);
+    }
+
+    /// Test-only synchronous `stale` findings, the shape `run_staleness_now` is:
+    /// dispatch, compute inline through `self.git`, apply.
+    #[cfg(test)]
+    pub(crate) fn run_stale_findings_now(&mut self, config: &Config) {
+        self.request_stale_findings(config);
+        let docs: Vec<DocMeta> = self.store.docs.values().cloned().collect();
+        let result = crate::engine::validation::stale_findings(
+            self.store.governs_root(),
+            docs.iter(),
+            config,
+            &*self.git,
+            &crate::engine::staleness_cache::StalenessCache::off(),
+        )
+        .into();
+        self.apply_stale_findings(self.stale_findings_generation, result, config);
     }
 
     pub fn request_diagram_render(

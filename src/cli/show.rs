@@ -11,6 +11,7 @@ use crate::engine::github_url::resolve_repo_coords;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::staleness::{compute, Staleness};
+use crate::engine::staleness_cache::StalenessCache;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
@@ -158,7 +159,13 @@ pub fn run(
     print!("{}", pin_rows(doc));
     println!(
         "{}",
-        staleness_line(&compute(store.governs_root(), config, doc, git))
+        staleness_line(&compute(
+            store.governs_root(),
+            config,
+            doc,
+            git,
+            &StalenessCache::load(store.root()),
+        ))
     );
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
@@ -246,7 +253,13 @@ pub fn run_json(
     };
     json["body"] = serde_json::Value::String(body);
     json["comments"] = serde_json::Value::Array(fetch_comments_for_doc(doc, config, root, gh));
-    json["staleness"] = serde_json::to_value(compute(store.governs_root(), config, doc, git))?;
+    json["staleness"] = serde_json::to_value(compute(
+        store.governs_root(),
+        config,
+        doc,
+        git,
+        &StalenessCache::load(store.root()),
+    ))?;
 
     Ok(serde_json::to_string_pretty(&json)?)
 }

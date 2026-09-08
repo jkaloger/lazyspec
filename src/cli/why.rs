@@ -1,8 +1,8 @@
 use crate::cli::style::{dim, doc_card};
-use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
 use crate::engine::git_ref::GitRefOps;
-use crate::engine::staleness::compute;
+use crate::engine::staleness::drifted;
+use crate::engine::staleness_cache::StalenessCache;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use serde_json::Value;
@@ -29,16 +29,20 @@ fn entry(doc: &DocMeta, glob: &str, drifted: bool) -> Value {
     })
 }
 
-pub fn run_json(store: &Store, config: &Config, path: &Path, git: &dyn GitRefOps) -> String {
+pub fn run_json(store: &Store, path: &Path, git: &dyn GitRefOps) -> String {
+    let cache = StalenessCache::load(store.root());
     let items: Vec<Value> = store
         .governing(path)
         .into_iter()
         .map(|(doc, glob)| {
             // Per record, not per store: `governing` already narrowed the set to
-            // the documents that answer for this path, so nothing else is diffed.
-            // A document with no `reviewed` has nothing to diff and reads as
-            // undrifted, which is what an unpinned document honestly is.
-            let drifted = compute(store.governs_root(), config, doc, git).drift.files > 0;
+            // the documents that answer for this path, so nothing else is
+            // diffed. One subprocess per record and not two, because `drifted`
+            // does not read the anchor commit a band would need and this shape
+            // would discard (STORY-276). A document with no `reviewed` has
+            // nothing to diff and reads as undrifted, which is what an unpinned
+            // document honestly is.
+            let drifted = drifted(store.governs_root(), doc, git, &cache);
             entry(doc, glob, drifted)
         })
         .collect();
@@ -70,9 +74,9 @@ fn human_output(store: &Store, path: &Path) -> String {
         .collect()
 }
 
-pub fn run(store: &Store, config: &Config, path: &Path, json: bool, git: &dyn GitRefOps) {
+pub fn run(store: &Store, path: &Path, json: bool, git: &dyn GitRefOps) {
     if json {
-        println!("{}", run_json(store, config, path, git));
+        println!("{}", run_json(store, path, git));
     } else {
         print!("{}", human_output(store, path));
     }
@@ -81,6 +85,7 @@ pub fn run(store: &Store, config: &Config, path: &Path, json: bool, git: &dyn Gi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::Config;
     use crate::engine::store::test_support::store_from_with_config;
 
     /// The human surface is out of RFC-069's scope here: `drifted` is a

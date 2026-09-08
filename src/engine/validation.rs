@@ -4,6 +4,7 @@ use crate::engine::config::{
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::staleness::{compute, Band, Staleness};
+use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -217,6 +218,22 @@ impl ValidationResult {
     fn merge(&mut self, other: ValidationResult) {
         self.errors.extend(other.errors);
         self.warnings.extend(other.warnings);
+    }
+}
+
+/// What a [`Checker`] returns, split by severity. Named, because the TUI's
+/// `stale` worker (STORY-276) sends one rule's findings back to the render
+/// thread in this shape and `validate_full` folds every rule's into it.
+impl From<Vec<(Severity, ValidationIssue)>> for ValidationResult {
+    fn from(issues: Vec<(Severity, ValidationIssue)>) -> Self {
+        let mut result = ValidationResult::default();
+        for (severity, issue) in issues {
+            match severity {
+                Severity::Error => result.errors.push(issue),
+                Severity::Warning => result.warnings.push(issue),
+            }
+        }
+        result
     }
 }
 
@@ -1174,19 +1191,67 @@ impl Checker for GovernsUnownedRule {
     }
 }
 
-/// Every document whose band is `stale` (RFC-069), at `[staleness] finding`
-/// severity. `aging` is a fact `show` reports and never a finding.
+/// Every document in `docs` whose band is `stale` (RFC-069), at
+/// `[staleness] finding` severity. `aging` is a fact `show` reports and never a
+/// finding.
+///
+/// A free function as well as [`StaleRule`] because the TUI runs it in a worker
+/// thread (STORY-276), where a `Store` cannot go: the documents and the governed
+/// root are everything the rule reads off one.
+pub fn stale_findings<'a>(
+    governs_root: &Path,
+    docs: impl IntoIterator<Item = &'a DocMeta>,
+    config: &Config,
+    git: &dyn GitRefOps,
+    cache: &StalenessCache,
+) -> Vec<(Severity, ValidationIssue)> {
+    // The gate before the walk, not a filter after it: `finding = "off"`
+    // means no document is banded at all, so `validate` costs no git
+    // subprocess a project opted out of.
+    let Some(severity) = config.staleness.finding.severity() else {
+        return Vec::new();
+    };
+
+    // Sorted, because `store.docs` is a map and the order findings print in
+    // should not be its iteration order.
+    let mut docs: Vec<&DocMeta> = docs
+        .into_iter()
+        .filter(|meta| !meta.validate_ignore)
+        // Nothing an anchor could say would make these rot, so nothing is asked
+        // of git for them -- which on an age-driven tree is most of it.
+        .filter(|meta| !crate::engine::staleness::cannot_be_stale(config, meta))
+        .collect();
+    docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+    docs.into_iter()
+        .map(|doc| (&doc.path, compute(governs_root, config, doc, git, cache)))
+        .filter(|(_, staleness)| staleness.band == Band::Stale)
+        .map(|(path, staleness)| {
+            (
+                severity,
+                ValidationIssue::Stale {
+                    path: path.clone(),
+                    staleness,
+                },
+            )
+        })
+        .collect()
+}
+
 pub struct StaleRule {
     /// The git seam [`compute`] reads drift and anchor times through. Owned by
     /// the rule because [`Checker::check`] is handed store and config and
     /// nothing else, exactly as [`GovernsNoMatchRule`] owns its own
     /// (DICTUM-002, DICTUM-004).
     git: Box<dyn GitRefOps>,
+    /// The `(reviewed, HEAD)` memo in front of that seam, so the rule's second
+    /// run over an unchanged tree costs one `rev-parse` (STORY-276).
+    cache: StalenessCache,
 }
 
 impl StaleRule {
-    pub fn new(git: Box<dyn GitRefOps>) -> Self {
-        Self { git }
+    pub fn new(git: Box<dyn GitRefOps>, cache: StalenessCache) -> Self {
+        Self { git, cache }
     }
 }
 
@@ -1196,40 +1261,13 @@ impl Checker for StaleRule {
         store: &super::store::Store,
         config: &Config,
     ) -> Vec<(Severity, ValidationIssue)> {
-        // The gate before the walk, not a filter after it: `finding = "off"`
-        // means no document is banded at all, so `validate` costs no git
-        // subprocess a project opted out of.
-        let Some(severity) = config.staleness.finding.severity() else {
-            return Vec::new();
-        };
-
-        // Sorted, because `store.docs` is a map and the order findings print in
-        // should not be its iteration order.
-        let mut docs: Vec<&DocMeta> = store
-            .docs
-            .values()
-            .filter(|meta| !meta.validate_ignore)
-            .collect();
-        docs.sort_by(|a, b| a.path.cmp(&b.path));
-
-        docs.into_iter()
-            .map(|doc| {
-                (
-                    &doc.path,
-                    compute(store.governs_root(), config, doc, self.git.as_ref()),
-                )
-            })
-            .filter(|(_, staleness)| staleness.band == Band::Stale)
-            .map(|(path, staleness)| {
-                (
-                    severity,
-                    ValidationIssue::Stale {
-                        path: path.clone(),
-                        staleness,
-                    },
-                )
-            })
-            .collect()
+        stale_findings(
+            store.governs_root(),
+            store.docs.values(),
+            config,
+            self.git.as_ref(),
+            &self.cache,
+        )
     }
 }
 
@@ -1598,7 +1636,9 @@ fn check_project_field(
     }
 }
 
-fn default_checkers() -> Vec<Box<dyn Checker>> {
+/// `root` is the docs root, which only [`StaleRule`] needs: its `(reviewed,
+/// HEAD)` memo is filed under it.
+fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
     vec![
         Box::new(BrokenLinkRule),
         Box::new(RequiredEdgeRule),
@@ -1611,23 +1651,15 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
-        Box::new(StaleRule::new(Box::new(GitCli))),
+        Box::new(StaleRule::new(Box::new(GitCli), StalenessCache::load(root))),
     ]
 }
 
 pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
     let mut result = ValidationResult::default();
 
-    for checker in default_checkers() {
-        let issues = checker.check(store, config);
-        let mut partial = ValidationResult::default();
-        for (severity, issue) in issues {
-            match severity {
-                Severity::Error => partial.errors.push(issue),
-                Severity::Warning => partial.warnings.push(issue),
-            }
-        }
-        result.merge(partial);
+    for checker in default_checkers(store.root()) {
+        result.merge(checker.check(store, config).into());
     }
 
     result
@@ -3602,7 +3634,7 @@ mod stale_tests {
     }
 
     fn findings(config: &Config, store: &Store) -> Vec<(Severity, String, Band)> {
-        StaleRule::new(Box::new(MockGitRefClient::new()))
+        StaleRule::new(Box::new(MockGitRefClient::new()), StalenessCache::off())
             .check(store, config)
             .into_iter()
             .map(|(severity, issue)| match issue {
@@ -3720,7 +3752,9 @@ mod stale_tests {
             .with_read_commit_timestamp_result(Ok(Utc::now() - Duration::days(200)));
         let calls = git.call_log();
 
-        let count = StaleRule::new(Box::new(git)).check(&store, &config).len();
+        let count = StaleRule::new(Box::new(git), StalenessCache::off())
+            .check(&store, &config)
+            .len();
 
         let calls = calls.borrow().clone();
         (count, calls)

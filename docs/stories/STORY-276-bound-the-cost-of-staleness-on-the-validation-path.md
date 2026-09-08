@@ -1,13 +1,14 @@
 ---
 title: Bound the cost of staleness on the validation path
 type: story
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - related-to: STORY-274
 - implements: RFC-069
+reviewed: d8c31c3e8ebc453f7621742c626ef242a750c5aa
 ---
 
 As a maintainer running `status --json` or moving the cursor in the TUI, I want the staleness rule to cost a bounded number of git subprocesses, so that stamping `reviewed` on documents does not make routine commands and the TUI validation refresh slow in proportion to the size of the docs tree.

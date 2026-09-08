@@ -55,6 +55,7 @@ mod spec_ac_validation_test;
 mod spec_ref_validation_test;
 mod spec_type_test;
 mod sqids_numbering_test;
+mod staleness_cost_test;
 mod store_test;
 mod surface_parity_test;
 mod tui_agent_dialog_test;
