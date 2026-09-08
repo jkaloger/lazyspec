@@ -34,6 +34,7 @@ pub mod provenance;
 pub mod refs;
 pub mod reservation;
 pub mod skills;
+pub mod staleness;
 pub mod status_colors;
 pub mod store;
 pub mod store_dispatch;

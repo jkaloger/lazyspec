@@ -784,6 +784,11 @@ pub struct TypeDef {
     /// AI may write: `human`, `assisted` (default), or `generated`.
     #[serde(default)]
     pub authorship: Authorship,
+    /// What drives this type's staleness band: `age` (default), banding by the
+    /// `[staleness]` thresholds, or `drift`, going stale on any change under a
+    /// document's `governs` globs since its review anchor.
+    #[serde(default)]
+    pub staleness: StalenessDriver,
     /// The valid statuses (`states`) and permitted transitions (`edges`) for
     /// this type. `update --status` is gated by these edges; a lifecycle with
     /// states but no edges is unconstrained.
@@ -1135,6 +1140,10 @@ pub struct Config {
     /// against. Serialized into `config --json` but parsed via `RawConfig`.
     #[serde(default, skip_deserializing)]
     pub governs: GovernsConfig,
+    /// The `[staleness]` table: the age thresholds the `fresh`/`aging`/`stale`
+    /// bands step at. Serialized into `config --json` but parsed via `RawConfig`.
+    #[serde(default, skip_deserializing)]
+    pub staleness: StalenessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1265,6 +1274,82 @@ impl Default for GovernsConfig {
     }
 }
 
+/// A whole number of days, spelled `"90d"`. The staleness bands compare nothing
+/// finer than a day, so that is all this parses and all it yields; it renders
+/// back to `"90d"` so a config round-trips through `to_toml`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(with = "String")]
+pub struct Days(pub u64);
+
+impl TryFrom<String> for Days {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
+        s.strip_suffix('d')
+            .and_then(|n| n.parse().ok())
+            .map(Days)
+            .ok_or_else(|| format!("expected a day count like \"90d\", got \"{s}\""))
+    }
+}
+
+impl From<Days> for String {
+    fn from(d: Days) -> String {
+        format!("{}d", d.0)
+    }
+}
+
+/// The `[staleness]` table (RFC-069): the day thresholds an `age`-driven band
+/// steps at. A document younger than `aging` is fresh, one at or past `stale` is
+/// stale, and anything between is aging.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct StalenessConfig {
+    #[serde(default = "default_aging")]
+    pub aging: Days,
+    #[serde(default = "default_stale")]
+    pub stale: Days,
+}
+
+pub fn default_aging() -> Days {
+    Days(90)
+}
+
+pub fn default_stale() -> Days {
+    Days(180)
+}
+
+impl Default for StalenessConfig {
+    fn default() -> Self {
+        StalenessConfig {
+            aging: default_aging(),
+            stale: default_stale(),
+        }
+    }
+}
+
+/// What drives a type's staleness band (RFC-069). `age` bands by the
+/// `[staleness]` thresholds; `drift` goes stale on any change under the
+/// document's `governs` globs since its review anchor, falling back to `age`
+/// when it has nothing to diff.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StalenessDriver {
+    #[default]
+    Age,
+    Drift,
+}
+
+impl std::fmt::Display for StalenessDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            StalenessDriver::Age => "age",
+            StalenessDriver::Drift => "drift",
+        })
+    }
+}
+
 /// The global `[agents]` block. `interactive` is the optional `bash -lc` shell
 /// command for terminal handover (e.g. `claude "$LAZYSPEC_PROMPT"`). Zero-defaults
 /// (ADR-015): absent -> None -> interactive run mode is unavailable and not offered.
@@ -1360,6 +1445,9 @@ struct RawConfig {
     /// an ungoverned one, and the code root globs resolve against.
     #[serde(default)]
     governs: Option<GovernsConfig>,
+    /// The `[staleness]` block: the age thresholds the staleness bands step at.
+    #[serde(default)]
+    staleness: Option<StalenessConfig>,
 }
 
 /// The JSON Schema for `.lazyspec.toml`, derived from the private `RawConfig`
@@ -1393,6 +1481,7 @@ pub fn starter_types() -> Vec<TypeDef> {
         label_override: None,
         github_issue_tag: None,
         github_issue_type: None,
+        staleness: StalenessDriver::default(),
         status_authority: None,
         clickup_list_id: None,
         clickup_task_type: None,
@@ -1429,6 +1518,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            staleness: StalenessDriver::default(),
             status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
@@ -1453,6 +1543,7 @@ pub fn starter_types() -> Vec<TypeDef> {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            staleness: StalenessDriver::default(),
             status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
@@ -1588,6 +1679,7 @@ impl Default for Config {
             web: None,
             git_ref: GitRefConfig::default(),
             governs: GovernsConfig::default(),
+            staleness: StalenessConfig::default(),
         }
     }
 }
@@ -1900,6 +1992,7 @@ impl Config {
             web: raw.web,
             git_ref: raw.git_ref.unwrap_or_default(),
             governs: raw.governs.unwrap_or_default(),
+            staleness: raw.staleness.unwrap_or_default(),
         })
     }
 
@@ -2098,6 +2191,7 @@ impl TypeDef {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            staleness: StalenessDriver::default(),
             status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
@@ -3927,6 +4021,97 @@ root = "../app"
         assert_eq!(config.governs.scope, vec!["src/**".to_string()]);
         assert_eq!(config.governs.unowned, Some(Severity::Warning));
         assert_eq!(config.governs.root, std::path::PathBuf::from("../app"));
+    }
+
+    // RFC-069: an absent [staleness] table gives the 90d/180d thresholds.
+    #[test]
+    fn staleness_defaults_to_ninety_and_one_eighty_days() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.staleness.aging, Days(90));
+        assert_eq!(config.staleness.stale, Days(180));
+    }
+
+    #[test]
+    fn staleness_table_is_parsed() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[staleness]
+aging = "30d"
+stale = "60d"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(config.staleness.aging, Days(30));
+        assert_eq!(config.staleness.stale, Days(60));
+    }
+
+    #[test]
+    fn staleness_threshold_without_a_day_suffix_is_a_config_error() {
+        let toml_str = format!(
+            "{TYPES}{}",
+            r#"
+[staleness]
+aging = "ninety"
+"#
+        );
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("90d") && err.contains("ninety"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[test]
+    fn type_staleness_driver_parses_and_round_trips() {
+        let toml_str = format!(
+            "{}{RELATIONSHIPS}",
+            r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+staleness = "drift"
+"#
+        );
+        let config = Config::parse(&toml_str).unwrap();
+        assert_eq!(
+            config.type_by_name("spec").unwrap().staleness,
+            StalenessDriver::Drift
+        );
+
+        let reparsed = Config::parse(&config.to_toml().unwrap()).unwrap();
+        let td = reparsed.type_by_name("spec").unwrap();
+        assert_eq!(td.staleness, StalenessDriver::Drift);
+        let json = serde_json::to_value(td).unwrap();
+        assert_eq!(json["staleness"], serde_json::json!("drift"));
+    }
+
+    #[test]
+    fn type_without_staleness_is_driven_by_age() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(
+            config.type_by_name("rfc").unwrap().staleness,
+            StalenessDriver::Age
+        );
+    }
+
+    #[test]
+    fn unknown_type_staleness_driver_is_a_config_error() {
+        let toml_str = format!(
+            "{}{RELATIONSHIPS}",
+            r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+staleness = "evergreen"
+"#
+        );
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("evergreen"), "unhelpful error: {err}");
     }
 
     #[test]

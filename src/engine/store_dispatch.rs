@@ -3155,6 +3155,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            staleness: Default::default(),
             status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
@@ -4690,6 +4691,7 @@ mod tests {
             label_override: None,
             github_issue_tag: None,
             github_issue_type: None,
+            staleness: Default::default(),
             status_authority: None,
             clickup_list_id: None,
             clickup_task_type: None,
@@ -7363,6 +7365,7 @@ mod tests {
             agents: Default::default(),
             skills: Default::default(),
             governs: Default::default(),
+            staleness: Default::default(),
             web: None,
             git_ref: Default::default(),
         };

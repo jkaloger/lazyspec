@@ -73,6 +73,7 @@ fn show_json_output() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &lazyspec::engine::git_ref::GitCli,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -195,6 +196,7 @@ fn show_json_ambiguous_id_returns_error() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &lazyspec::engine::git_ref::GitCli,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -226,6 +228,7 @@ fn show_json_full_path_works_when_shorthand_ambiguous() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &lazyspec::engine::git_ref::GitCli,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -350,6 +353,7 @@ fn show_json_attributes_empty_object_when_none() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &lazyspec::engine::git_ref::GitCli,
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();

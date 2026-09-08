@@ -5,10 +5,12 @@ use crate::engine::config::{Config, StoreBackend};
 use crate::engine::document::DocMeta;
 use crate::engine::fs::FileSystem;
 use crate::engine::gh::GhIssueReader;
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
 use crate::engine::github_url::resolve_repo_coords;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::open::{resolve_open_target, OpenTarget};
+use crate::engine::staleness::{compute, Staleness};
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{ResolveError, Store};
 use anyhow::Result;
@@ -104,12 +106,29 @@ fn pin_rows(doc: &DocMeta) -> String {
     out
 }
 
+/// RFC-069's one staleness line, unconditional: a document with neither a review
+/// anchor nor globs still reports a band, off its own date. Unstyled, because
+/// the wording is the contract `show --json` carries the same facts under
+/// (DICTUM-006).
+fn staleness_line(staleness: &Staleness) -> String {
+    format!(
+        "staleness: {} ({}, {} files since {}, {}d)",
+        staleness.band,
+        staleness.driver,
+        staleness.drift.files,
+        staleness.anchor,
+        staleness.age_days,
+    )
+}
+
 pub fn run(
     store: &Store,
     id: &str,
     expand: bool,
     max_ref_lines: usize,
     fs: &dyn FileSystem,
+    config: &Config,
+    git: &dyn GitRefOps,
 ) -> Result<()> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
@@ -144,6 +163,7 @@ pub fn run(
         println!("{} {}", dim("Assignee:"), bold(assignee));
     }
     print!("{}", pin_rows(doc));
+    println!("{}", staleness_line(&compute(store, config, doc, git)));
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
             println!(
@@ -208,6 +228,7 @@ pub fn run_json(
     config: &Config,
     root: &Path,
     gh: &dyn GhIssueReader,
+    git: &dyn GitRefOps,
 ) -> Result<String> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
@@ -229,6 +250,7 @@ pub fn run_json(
     };
     json["body"] = serde_json::Value::String(body);
     json["comments"] = serde_json::Value::Array(fetch_comments_for_doc(doc, config, root, gh));
+    json["staleness"] = serde_json::to_value(compute(store, config, doc, git))?;
 
     Ok(serde_json::to_string_pretty(&json)?)
 }
@@ -353,11 +375,13 @@ fn spawn_open(action: OpenAction) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::TypeDef;
+    use crate::engine::config::{StalenessDriver, TypeDef};
     use crate::engine::document::{DocType, Status};
     use crate::engine::gh::test_support::MockGhClient;
     use crate::engine::gh::GhComment;
+    use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::issue_map::IssueMap;
+    use crate::engine::staleness::{Anchor, Band, Drift};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -461,6 +485,155 @@ mod tests {
         let out = pin_rows(&doc);
         assert!(out.contains("Governs:"), "got: {out}");
         assert!(!out.contains("Reviewed:"), "got: {out}");
+    }
+
+    fn staleness(anchor: Anchor, band: Band, driver: StalenessDriver, files: u64) -> Staleness {
+        Staleness {
+            band,
+            driver,
+            anchor,
+            age_days: 140,
+            drift: Drift {
+                files,
+                insertions: 310,
+                deletions: 85,
+            },
+        }
+    }
+
+    // STORY-272 AC6: the line RFC-069 publishes, verbatim.
+    #[test]
+    fn the_staleness_line_reads_as_rfc_069_writes_it() {
+        assert_eq!(
+            staleness_line(&staleness(
+                Anchor::Sha("0123456".to_string()),
+                Band::Stale,
+                StalenessDriver::Drift,
+                12,
+            )),
+            "staleness: stale (drift, 12 files since 0123456, 140d)"
+        );
+    }
+
+    // AC6 for a document with no review anchor: the same line, anchored on the
+    // frontmatter date instead of a sha.
+    #[test]
+    fn a_date_anchored_document_prints_its_date_in_the_same_line() {
+        assert_eq!(
+            staleness_line(&staleness(
+                Anchor::Date(chrono::NaiveDate::from_ymd_opt(2026, 4, 21).unwrap()),
+                Band::Aging,
+                StalenessDriver::Age,
+                0,
+            )),
+            "staleness: aging (age, 0 files since 2026-04-21, 140d)"
+        );
+    }
+
+    // AC4: a drift type is a fallback to age, so both fields vary independently
+    // and the line reports the driver that actually banded it.
+    #[test]
+    fn a_fresh_document_prints_its_band_and_driver() {
+        assert_eq!(
+            staleness_line(&staleness(
+                Anchor::Sha("abc".to_string()),
+                Band::Fresh,
+                StalenessDriver::Drift,
+                0,
+            )),
+            "staleness: fresh (drift, 0 files since abc, 140d)"
+        );
+    }
+
+    const REVIEWED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn config_driven_by(driver: StalenessDriver) -> Config {
+        let mut config = Config::default();
+        for type_def in &mut config.documents.types {
+            type_def.staleness = driver;
+        }
+        config
+    }
+
+    fn rfc_store(governs: &str, reviewed: &str, age_days: i64) -> (TempDir, Store) {
+        let date = chrono::Utc::now().date_naive() - chrono::Duration::days(age_days);
+        let doc = format!(
+            "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {date}\ntags: []\n{governs}{reviewed}related: []\n---\n\nbody\n"
+        );
+        crate::engine::store::test_support::store_from_with_config(
+            &[("docs/rfcs/RFC-001-engine.md", &doc)],
+            &Config::default(),
+        )
+    }
+
+    fn staleness_json(store: &Store, config: &Config, git: &MockGitRefClient) -> serde_json::Value {
+        let output = run_json(
+            store,
+            "RFC-001",
+            false,
+            25,
+            &crate::engine::fs::RealFileSystem,
+            config,
+            store.root(),
+            &MockGhClient::new(),
+            git,
+        )
+        .unwrap();
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["staleness"].clone()
+    }
+
+    // STORY-272 AC1: a pinned drift-type document, with commits under its globs
+    // since its anchor, in the object RFC-069 publishes.
+    #[test]
+    fn run_json_carries_the_drift_object() {
+        let (_tmp, store) = rfc_store(
+            "governs:\n  - \"src/engine/**\"\n",
+            &format!("reviewed: {REVIEWED}\n"),
+            0,
+        );
+        let git = MockGitRefClient::new()
+            .with_diff_stat(Drift {
+                files: 12,
+                insertions: 310,
+                deletions: 85,
+            })
+            .with_read_commit_timestamp_result(
+                Ok(chrono::Utc::now() - chrono::Duration::days(140)),
+            );
+
+        assert_eq!(
+            staleness_json(&store, &config_driven_by(StalenessDriver::Drift), &git),
+            serde_json::json!({
+                "band": "stale",
+                "driver": "drift",
+                "anchor": REVIEWED,
+                "age_days": 140,
+                "drift": {"files": 12, "insertions": 310, "deletions": 85},
+            })
+        );
+    }
+
+    // AC3 and AC5 on the same surface: an unpinned document bands on the age
+    // thresholds, anchored on its own date, and reports zero drift.
+    #[test]
+    fn run_json_carries_the_age_object_for_an_unpinned_document() {
+        let (_tmp, store) = rfc_store("governs: []\n", "", 100);
+        let anchor = chrono::Utc::now().date_naive() - chrono::Duration::days(100);
+
+        assert_eq!(
+            staleness_json(
+                &store,
+                &config_driven_by(StalenessDriver::Age),
+                &MockGitRefClient::new()
+            ),
+            serde_json::json!({
+                "band": "aging",
+                "driver": "age",
+                "anchor": anchor.to_string(),
+                "age_days": 100,
+                "drift": {"files": 0, "insertions": 0, "deletions": 0},
+            })
+        );
     }
 
     // AC4: a filesystem-backed type never triggers a comment fetch.

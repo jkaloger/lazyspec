@@ -420,6 +420,101 @@ fn read_commit_timestamp_returns_correct_time() {
     );
 }
 
+/// The invariant RFC-069 rests on: the files `diff_stat` counts are exactly the
+/// files `Store::governing` considers governed. Both sides are asserted here,
+/// against the same globs over the same changed paths -- a test that only
+/// checked git's side would pass while the two dialects disagreed, which is how
+/// `*` crossing a `/`, brace alternates and a bare directory name each got past
+/// review. `governs` globs compile with `globset`'s defaults, so `*` does span
+/// separators, `{a,b}` is an alternation, and a bare `src` is a file named
+/// `src` -- none of which a git pathspec would agree on.
+#[test]
+fn diff_stat_counts_exactly_the_files_a_governs_glob_matches() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+
+    let commit_all = |message: &str| {
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(fixture.root())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(fixture.root())
+            .output()
+            .unwrap();
+    };
+
+    let changed = [
+        "src/top.rs",
+        "src/deep/nested.rs",
+        "src/cli/a.rs",
+        "docs.md",
+    ];
+    for path in changed {
+        let file = fixture.root().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+    }
+    commit_all("base");
+    let base = git.head(fixture.root()).unwrap();
+
+    for path in changed {
+        std::fs::write(fixture.root().join(path), "one\n").unwrap();
+    }
+    commit_all("touch every file");
+
+    for glob in ["src/*", "src/**", "src/{cli,deep}/**", "src", "*.md"] {
+        let matcher = globset::Glob::new(glob).unwrap().compile_matcher();
+        let governed = changed.iter().filter(|p| matcher.is_match(p)).count();
+
+        let drift = git
+            .diff_stat(fixture.root(), &base, "HEAD", &[glob.to_string()])
+            .unwrap();
+
+        assert_eq!(
+            drift.files as usize, governed,
+            "`{glob}` counted {} files but governs {governed}",
+            drift.files
+        );
+        assert_eq!(drift.insertions as usize, governed, "one line per file");
+    }
+}
+
+/// No globs is the whole tree, not nothing.
+#[test]
+fn diff_stat_without_globs_counts_every_changed_file() {
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let git = GitCli;
+
+    let commit_all = |message: &str| {
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(fixture.root())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(fixture.root())
+            .output()
+            .unwrap();
+    };
+
+    std::fs::write(fixture.root().join("a.txt"), "").unwrap();
+    std::fs::write(fixture.root().join("b.txt"), "").unwrap();
+    commit_all("base");
+    let base = git.head(fixture.root()).unwrap();
+
+    std::fs::write(fixture.root().join("a.txt"), "one\n").unwrap();
+    std::fs::write(fixture.root().join("b.txt"), "two\n").unwrap();
+    commit_all("touch both");
+
+    let drift = git.diff_stat(fixture.root(), &base, "HEAD", &[]).unwrap();
+    assert_eq!(drift.files, 2);
+    assert_eq!(drift.insertions, 2);
+}
+
 #[test]
 fn create_ref_commit_fails_if_ref_exists() {
     let (fixture, _bare) = TestFixture::with_git_remote();

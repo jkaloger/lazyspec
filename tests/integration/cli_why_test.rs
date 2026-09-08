@@ -2,6 +2,9 @@
 
 use crate::common::TestFixture;
 use lazyspec::cli::why;
+use lazyspec::engine::config::Config;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
+use lazyspec::engine::staleness::Drift;
 use lazyspec::engine::store::Store;
 use std::path::Path;
 
@@ -11,8 +14,33 @@ fn spec(governs: &str, reviewed: &str) -> String {
     )
 }
 
+/// A git double reporting no drift: the AC1-AC3 assertions are about the glob
+/// match, and a double keeps them off both a real subprocess and the question of
+/// whether the fixture's temp root happens to sit inside a repository.
+fn no_drift() -> MockGitRefClient {
+    MockGitRefClient::new()
+}
+
+fn drifting(files: u64) -> MockGitRefClient {
+    MockGitRefClient::new().with_diff_stat(Drift {
+        files,
+        insertions: 3,
+        deletions: 1,
+    })
+}
+
+fn results_with(store: &Store, path: &str, git: &MockGitRefClient) -> Vec<serde_json::Value> {
+    serde_json::from_str(&why::run_json(
+        store,
+        &Config::default(),
+        Path::new(path),
+        git,
+    ))
+    .unwrap()
+}
+
 fn results(store: &Store, path: &str) -> Vec<serde_json::Value> {
-    serde_json::from_str(&why::run_json(store, Path::new(path))).unwrap()
+    results_with(store, path, &no_drift())
 }
 
 // AC1: a pinned document is reported with its id, type, title, status,
@@ -81,7 +109,13 @@ fn unmatched_path_is_an_empty_list() {
     let store = fixture.store();
 
     assert_eq!(
-        why::run_json(&store, Path::new("src/cli/show.rs")).trim(),
+        why::run_json(
+            &store,
+            &Config::default(),
+            Path::new("src/cli/show.rs"),
+            &no_drift()
+        )
+        .trim(),
         "[]"
     );
     assert!(results(&store, "src/cli/show.rs").is_empty());
@@ -101,4 +135,57 @@ fn reviewed_is_null_when_unset() {
     let found = results(&store, "src/engine/context/resolve.rs");
     assert_eq!(found.len(), 1, "got: {found:?}");
     assert!(found[0]["reviewed"].is_null());
+}
+
+// STORY-272 AC7: governed files moved since the record's `reviewed`.
+#[test]
+fn a_record_whose_governed_files_moved_since_review_is_drifted() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/specs/SPEC-001-context.md",
+        &spec("src/engine/context/**", "0123456789abcdef"),
+    );
+    let store = fixture.store();
+
+    let found = results_with(&store, "src/engine/context/resolve.rs", &drifting(2));
+
+    assert_eq!(found.len(), 1, "got: {found:?}");
+    assert_eq!(found[0]["drifted"], serde_json::json!(true));
+}
+
+// AC7: nothing moved under the globs since the anchor.
+#[test]
+fn a_record_with_nothing_changed_since_review_is_not_drifted() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/specs/SPEC-001-context.md",
+        &spec("src/engine/context/**", "0123456789abcdef"),
+    );
+    let store = fixture.store();
+
+    let found = results_with(&store, "src/engine/context/resolve.rs", &drifting(0));
+
+    assert_eq!(found[0]["drifted"], serde_json::json!(false));
+}
+
+// AC7's second half: no anchor is nothing to diff, so the record is not drifted
+// -- and git is never asked, since there is no range to ask about.
+#[test]
+fn a_record_with_no_reviewed_anchor_is_not_drifted_and_asks_git_nothing() {
+    let fixture = TestFixture::new();
+    fixture.write_doc(
+        "docs/specs/SPEC-001-context.md",
+        "---\ntitle: \"Context\"\ntype: spec\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\ngoverns:\n  - src/engine/context/**\n---\n\nBody.\n",
+    );
+    let store = fixture.store();
+    let git = no_drift();
+
+    let found = results_with(&store, "src/engine/context/resolve.rs", &git);
+
+    assert_eq!(found[0]["drifted"], serde_json::json!(false));
+    assert!(
+        git.calls.borrow().is_empty(),
+        "nothing to diff: {:?}",
+        git.calls.borrow()
+    );
 }

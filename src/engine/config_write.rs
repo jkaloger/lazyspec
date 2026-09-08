@@ -96,6 +96,7 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
         authorship_str(&def.authorship),
         "assisted",
     );
+    set_str_defaulted(entry, "staleness", &def.staleness.to_string(), "age");
     set_opt_str(entry, "github_issue_tag", def.github_issue_tag.as_deref());
     set_opt_str(entry, "github_issue_type", def.github_issue_type.as_deref());
     set_opt_str(entry, "status_authority", def.status_authority.as_deref());
@@ -883,8 +884,8 @@ fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, new: Value) {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        CertificationOverride, Config, EdgeDef, RelSelector, RelationshipDef, StoreBackend,
-        Traversal, TypeDef, TypeSelector,
+        CertificationOverride, Config, EdgeDef, RelSelector, RelationshipDef, StalenessDriver,
+        StoreBackend, Traversal, TypeDef, TypeSelector,
     };
 
     const SRC: &str = r#"# lazyspec configuration
@@ -1131,6 +1132,7 @@ severity = "error"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                staleness: Default::default(),
                 status_authority: None,
                 clickup_list_id: None,
                 clickup_task_type: None,
@@ -1225,6 +1227,7 @@ name = "related-to"
                 label_override: None,
                 github_issue_tag: None,
                 github_issue_type: None,
+                staleness: Default::default(),
                 status_authority: None,
                 clickup_list_id: None,
                 clickup_task_type: None,
@@ -1579,6 +1582,49 @@ inverse = "implemented-by"
         assert_eq!(
             reparsed.documents.types[0].status_authority.as_deref(),
             Some("PROJECT-7")
+        );
+    }
+
+    #[test]
+    fn unchanged_staleness_driver_survives_a_rewrite_with_its_decor() {
+        const DRIFT_SRC: &str = r#"[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+# governed code moving is what makes a spec stale
+staleness = "drift"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let buffer = Config::parse(DRIFT_SRC).unwrap();
+
+        let out = write_config_in_place(DRIFT_SRC, &buffer).unwrap();
+
+        assert_eq!(out, DRIFT_SRC);
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.documents.types[0].staleness,
+            StalenessDriver::Drift
+        );
+    }
+
+    #[test]
+    fn setting_the_staleness_driver_writes_the_key() {
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.types[0].staleness = StalenessDriver::Drift;
+            c
+        };
+
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.documents.types[0].staleness,
+            StalenessDriver::Drift
         );
     }
 

@@ -269,10 +269,19 @@ fn main() -> anyhow::Result<()> {
                     &config,
                     &cwd,
                     &gh,
+                    &GitCli,
                 )?;
                 println!("{}", output);
             } else {
-                lazyspec::cli::show::run(&store, &id, expand_references, max_ref_lines, &fs)?;
+                lazyspec::cli::show::run(
+                    &store,
+                    &id,
+                    expand_references,
+                    max_ref_lines,
+                    &fs,
+                    &config,
+                    &GitCli,
+                )?;
             }
         }
         Some(Commands::Update {
@@ -512,7 +521,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Why { path, json }) => {
             let store = Store::load(&cwd, &config)?;
-            lazyspec::cli::why::run(&store, &path, json);
+            lazyspec::cli::why::run(&store, &config, &path, json, &GitCli);
         }
         Some(Commands::Status { json }) => {
             let store = Store::load(&cwd, &config)?;

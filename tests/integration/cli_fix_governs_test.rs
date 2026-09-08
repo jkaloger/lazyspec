@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use lazyspec::engine::fs::{FileSystem, RealFileSystem};
 use lazyspec::engine::git_ref::GitRefOps;
+use lazyspec::engine::staleness::Drift;
 
 use crate::common::TestFixture;
 
@@ -34,6 +35,9 @@ impl RenamingGit {
 impl GitRefOps for RenamingGit {
     fn renames(&self, _root: &Path, _from: &str, _to: &str) -> Result<Vec<(String, String)>> {
         Ok(self.0.clone())
+    }
+    fn diff_stat(&self, _root: &Path, _from: &str, _to: &str, _paths: &[String]) -> Result<Drift> {
+        unreachable!("fix --governs diffs nothing")
     }
     fn resolve_ref(&self, _root: &Path, _refname: &str) -> Result<Option<String>> {
         unreachable!("fix --governs resolves no refs")

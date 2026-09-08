@@ -1,5 +1,7 @@
+use crate::engine::staleness::Drift;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -53,6 +55,14 @@ pub trait GitRefOps {
     /// relative to `root` (RFC-068). Paths that moved in or out of `root` are
     /// not pairs there and are omitted.
     fn renames(&self, root: &Path, from: &str, to: &str) -> Result<Vec<(String, String)>>;
+    /// How much changed between two commits under `paths`, as file, insertion
+    /// and deletion counts (RFC-069). `paths` are `governs` globs relative to
+    /// `root`, matched with `globset` exactly as [`Store::governing`] matches
+    /// them, so the counted set is the governed set; an empty list counts the
+    /// whole tree.
+    ///
+    /// [`Store::governing`]: crate::engine::store::Store::governing
+    fn diff_stat(&self, root: &Path, from: &str, to: &str, paths: &[String]) -> Result<Drift>;
 }
 
 /// The git-ref client seam as an object-safe trait for `GitRefStore`'s boxed
@@ -354,6 +364,69 @@ impl GitRefOps for GitCli {
         }
         Ok(parse_renames(&String::from_utf8_lossy(&output.stdout)))
     }
+
+    fn diff_stat(&self, root: &Path, from: &str, to: &str, paths: &[String]) -> Result<Drift> {
+        // The globs are never handed to git. A pathspec is matched in git's own
+        // wildmatch dialect, which agrees with `globset` on `*` and `**` but not
+        // on brace alternates (`src/{cli,tui}/**` matches nothing there) nor on
+        // a bare directory (`src` is its whole subtree there, one missing file
+        // here) -- so git only names the files that changed, and the same
+        // `globset` matchers `Store::governing` uses decide which are governed.
+        //
+        // `--numstat` is the per-file form of `--shortstat`; `--relative`
+        // reports paths relative to `root`, as `governs` globs read; and
+        // `--no-renames` keeps every row a single path.
+        let range = format!("{}..{}", from, to);
+        let governed = governed_matcher(paths)?;
+        let args = ["diff", "--numstat", "--relative", "--no-renames", &range];
+        let output = self.run_git(root, &args)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git diff --numstat failed: {}", stderr.trim());
+        }
+        Ok(sum_numstat(
+            &String::from_utf8_lossy(&output.stdout),
+            governed.as_ref(),
+        ))
+    }
+}
+
+/// The `governs` globs as one matcher, or `None` for an empty list, which counts
+/// every changed file rather than none. Compiled the same way the loader
+/// compiles them (`store::loader::compile_governs`), so a glob that governs a
+/// file here governs it there.
+fn governed_matcher(paths: &[String]) -> Result<Option<GlobSet>> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GlobSetBuilder::new();
+    for glob in paths {
+        builder.add(Glob::new(glob).with_context(|| format!("invalid governs glob '{glob}'"))?);
+    }
+    Ok(Some(builder.build()?))
+}
+
+/// The rows of `git diff --numstat`: insertions, deletions and path, tab
+/// separated, with `-` for both counts of a binary file -- which still changed,
+/// so it counts as a file and contributes no lines, exactly as `--shortstat`
+/// reports it.
+fn sum_numstat(stdout: &str, governed: Option<&GlobSet>) -> Drift {
+    let mut drift = Drift::default();
+    for line in stdout.lines() {
+        let mut fields = line.split('\t');
+        let (Some(insertions), Some(deletions), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if governed.is_some_and(|set| !set.is_match(path)) {
+            continue;
+        }
+        drift.files += 1;
+        drift.insertions += insertions.parse().unwrap_or(0);
+        drift.deletions += deletions.parse().unwrap_or(0);
+    }
+    drift
 }
 
 /// The rename rows of `git diff -M --name-status` output: status `R<score>`
@@ -373,7 +446,7 @@ fn parse_renames(stdout: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use chrono::{DateTime, Utc};
@@ -406,6 +479,12 @@ pub mod test_support {
         /// Makes `renames` fail on every call, standing in for a `reviewed` sha
         /// the repository cannot resolve.
         pub renames_error: RefCell<Option<String>>,
+        /// What `diff_stat` reports, on every call -- not a queue, for the same
+        /// reason `renames_pairs` is not one.
+        pub diff_stat_drift: RefCell<Drift>,
+        /// Makes `diff_stat` fail on every call, standing in for a range git
+        /// cannot resolve.
+        pub diff_stat_error: RefCell<Option<String>>,
         pub calls: RefCell<Vec<String>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
@@ -438,6 +517,8 @@ pub mod test_support {
                 head_results: RefCell::new(vec![]),
                 renames_pairs: RefCell::new(vec![]),
                 renames_error: RefCell::new(None),
+                diff_stat_drift: RefCell::new(Drift::default()),
+                diff_stat_error: RefCell::new(None),
                 calls: RefCell::new(vec![]),
                 committed_blobs: RefCell::new(vec![]),
             }
@@ -523,6 +604,16 @@ pub mod test_support {
 
         pub fn with_renames_error(self, message: &str) -> Self {
             *self.renames_error.borrow_mut() = Some(message.to_string());
+            self
+        }
+
+        pub fn with_diff_stat(self, drift: Drift) -> Self {
+            *self.diff_stat_drift.borrow_mut() = drift;
+            self
+        }
+
+        pub fn with_diff_stat_error(self, message: &str) -> Self {
+            *self.diff_stat_error.borrow_mut() = Some(message.to_string());
             self
         }
 
@@ -698,6 +789,24 @@ pub mod test_support {
                 bail!("{}", message);
             }
             Ok(self.renames_pairs.borrow().clone())
+        }
+
+        fn diff_stat(&self, root: &Path, from: &str, to: &str, paths: &[String]) -> Result<Drift> {
+            // Root, range and pathspecs all logged: which repository was
+            // diffed, in which direction, over which globs is the whole of
+            // what a caller gets wrong, and the counts replayed below would
+            // look identical for every wrong answer.
+            self.calls.borrow_mut().push(format!(
+                "diff_stat:{}:{}..{}:{}",
+                root.display(),
+                from,
+                to,
+                paths.join(",")
+            ));
+            if let Some(message) = self.diff_stat_error.borrow().as_deref() {
+                bail!("{}", message);
+            }
+            Ok(*self.diff_stat_drift.borrow())
         }
     }
 }
@@ -910,6 +1019,95 @@ mod tests {
                 ("src/a/x.rs".to_string(), "src/b/x.rs".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn mock_diff_stat_replays_its_counts_and_records_the_range_and_paths() {
+        let drift = Drift {
+            files: 12,
+            insertions: 310,
+            deletions: 85,
+        };
+        let mock = MockGitRefClient::new().with_diff_stat(drift);
+        let paths = vec!["src/engine/**".to_string(), "src/cli.rs".to_string()];
+
+        let first = mock
+            .diff_stat(&dummy_root(), "abc123", "HEAD", &paths)
+            .unwrap();
+        let second = mock
+            .diff_stat(&dummy_root(), "abc123", "HEAD", &paths)
+            .unwrap();
+
+        assert_eq!(first, drift);
+        assert_eq!(second, first, "every call sees the same fixture");
+        assert_eq!(
+            mock.calls.borrow()[0],
+            format!(
+                "diff_stat:{}:abc123..HEAD:src/engine/**,src/cli.rs",
+                dummy_root().display()
+            )
+        );
+    }
+
+    #[test]
+    fn mock_diff_stat_returns_its_configured_error() {
+        let mock = MockGitRefClient::new().with_diff_stat_error("bad revision");
+        let result = mock.diff_stat(&dummy_root(), "abc123", "HEAD", &[]);
+        assert!(result.unwrap_err().to_string().contains("bad revision"));
+    }
+
+    const NUMSTAT: &str = "10\t2\tsrc/top.rs\n300\t83\tsrc/deep/nested.rs\n-\t-\tdocs/logo.png\n";
+
+    #[test]
+    fn sum_numstat_totals_every_row_when_nothing_is_governed() {
+        assert_eq!(
+            sum_numstat(NUMSTAT, None),
+            Drift {
+                files: 3,
+                insertions: 310,
+                deletions: 85
+            }
+        );
+    }
+
+    #[test]
+    fn sum_numstat_counts_a_binary_row_as_a_file_and_no_lines() {
+        assert_eq!(
+            sum_numstat("-\t-\tdocs/logo.png\n", None),
+            Drift {
+                files: 1,
+                insertions: 0,
+                deletions: 0
+            }
+        );
+    }
+
+    #[test]
+    fn sum_numstat_skips_the_rows_the_globs_do_not_match() {
+        let governed = governed_matcher(&["src/deep/**".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sum_numstat(NUMSTAT, Some(&governed)),
+            Drift {
+                files: 1,
+                insertions: 300,
+                deletions: 83
+            }
+        );
+    }
+
+    #[test]
+    fn sum_numstat_of_an_unchanged_range_is_zero() {
+        assert_eq!(sum_numstat("", None), Drift::default());
+    }
+
+    /// An uncompilable glob errors rather than silently governing nothing, which
+    /// would read as a document nothing has touched.
+    #[test]
+    fn governed_matcher_rejects_a_glob_that_does_not_compile() {
+        let error = governed_matcher(&["src/[".to_string()]).unwrap_err();
+        assert!(error.to_string().contains("invalid governs glob 'src/['"));
     }
 
     #[test]

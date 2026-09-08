@@ -442,6 +442,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             &config,
             flat_root,
             &flat_gh,
+            &lazyspec::engine::git_ref::GitCli,
         )
         .unwrap(),
     )
@@ -456,6 +457,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             &config,
             nested_root,
             &nested_gh,
+            &lazyspec::engine::git_ref::GitCli,
         )
         .unwrap(),
     )

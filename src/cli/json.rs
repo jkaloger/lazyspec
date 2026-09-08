@@ -185,6 +185,24 @@ mod tests {
         );
     }
 
+    // STORY-272 AC8: the shape `list`, `context`, `status` and `search` share
+    // carries no staleness. A band costs a git subprocess per document, so only
+    // the surfaces that name one (`show`, `why`) may compute it -- and they add
+    // it on top of this object rather than here.
+    #[test]
+    fn doc_to_json_carries_no_staleness() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.governs = vec!["src/engine/**".to_string()];
+        meta.reviewed = Some("0123456789abcdef".to_string());
+
+        let json = doc_to_json(&meta);
+
+        assert!(
+            json.get("staleness").is_none(),
+            "a shared shape with a band would make every command pay for git: {json}"
+        );
+    }
+
     // A non-milestone document (no counts) has no percent_complete key.
     #[test]
     fn ordinary_doc_has_no_percent_complete() {

@@ -407,6 +407,21 @@ Each document entry in `show --json` and `status --json` (under `documents[]`) i
 
 `show` prints a `Governs:` row listing the document's globs, joined by commas, and a `Reviewed:` row carrying its review anchor. A row is omitted when its field is unset. Every command that emits a document as JSON, `show --json` and `status --json` among them, carries `governs` and `reviewed`. `governs` is a list of glob strings, empty when the document declares none; `reviewed` is a string, or `null` when the document declares none. `reviewed` is spelled and encoded the same way in [`why --json`](#why). `governs` has no counterpart there: a `why` entry is one document-and-glob pair, so it carries `glob`, the single string that matched, not the document's whole list. See [Governed files](#governed-files).
 
+`show` prints one `staleness:` line for every document, and `show --json` carries the same facts under a `staleness` key:
+
+```sh
+lazyspec show SPEC-001
+# staleness: stale (drift, 12 files since 0123456, 140d)
+
+lazyspec show SPEC-001 --json | jq .staleness
+# { "band": "stale", "driver": "drift", "anchor": "0123456", "age_days": 140,
+#   "drift": { "files": 12, "insertions": 310, "deletions": 85 } }
+```
+
+`band` is `fresh`, `aging` or `stale` and `driver` is what banded it; see [Staleness](#staleness) for the thresholds and the per-type driver. `anchor` is the document's `reviewed` sha when it has one and its `date` when it does not, and `age_days` counts from that anchor's commit time or from that date. `drift` is what `git diff` counts between the anchor and `HEAD` for the files the document's `governs` globs match — reported as a fact even for a document banded by age, and zero when there is nothing to diff. Both surfaces carry the line for every document, pinned or not.
+
+The band is computed on demand by the commands that show it, never at load and never cached, so nothing else pays for the git subprocess and nothing is written back to the document. The globs are never handed to git as pathspecs: git only names the files that changed, and those names are matched with the same globs, in the same dialect, that decide which document [governs a file](#governed-files). A file that drifts a document is exactly a file the document governs.
+
 `show --json` and `status --json` also include a read-only `comments` array. For documents whose type uses the `github-issues` store, this fetches the issue's GitHub comment thread live (each entry `{ "author", "body", "timestamp" }`); for all other documents it is an empty array. Comments are never written back to GitHub, never merged into `body`, and never cached. The field is always present.
 
 ### `context` flags
@@ -440,7 +455,7 @@ lazyspec why src/engine/context/resolve.rs
 lazyspec why src/engine/context/resolve.rs --json
 ```
 
-Each `--json` entry carries `id`, `type`, `title`, `status`, `reviewed` and `glob`. `reviewed` is `null` on a document that declares none. A path no glob matches prints an empty array and exits zero.
+Each `--json` entry carries `id`, `type`, `title`, `status`, `reviewed`, `glob` and `drifted`. `reviewed` is `null` on a document that declares none. `drifted` is `true` when files under that document's globs have changed since its `reviewed` commit — the document may describe code that has moved on — and `false` when nothing has changed since, or when the document declares no `reviewed` to measure from. It is a `--json` field only; the human listing is unchanged. For the full band behind it, see [`show` flags](#show-flags). A path no glob matches prints an empty array and exits zero.
 
 ### `provenance` subcommands
 
@@ -991,6 +1006,41 @@ lazyspec validate --json | jq -r '[.errors[], .warnings[]] | map(select(.rule ==
 The check is off by default because turning it on in an unpinned repository emits one finding per file under `scope`. Seed pins first, then narrow `scope` to the modules you want owned.
 
 Both `governs` rules read one walk, bounded to the directories the globs name literally: `scope = ["src/**"]` reads `src` and nothing else. That literal prefix is the only bound, so a glob's matches never depend on what other documents pinned. A glob whose first component is already a wildcard (`**/*.rs`) has no such bound and reads the whole code root, build and version-control directories included.
+
+### Staleness
+
+Every document carries a staleness band: `fresh`, `aging` or `stale`. The optional `[staleness]` table sets the two age thresholds the band steps at:
+
+```toml
+[staleness]
+aging = "90d"
+stale = "180d"
+```
+
+| Key     | Value                                                                                          |
+| ------- | ---------------------------------------------------------------------------------------------- |
+| `aging` | Age at which a document stops being `fresh`. Defaults to `90d`                                 |
+| `stale` | Age at which a document becomes `stale`. Defaults to `180d`                                    |
+
+Both are a whole number of days, written `<n>d`. Any other spelling is a config error. An absent table applies the defaults.
+
+A type declares what drives its band with `staleness`:
+
+```toml
+[[types]]
+name = "spec"
+prefix = "SPEC"
+staleness = "drift"
+```
+
+| Value     | Band                                                                                              |
+| --------- | ------------------------------------------------------------------------------------------------- |
+| `age`     | The `[staleness]` thresholds, measured from the document's review anchor. The default              |
+| `drift`   | Any change under the document's `governs` globs since its `reviewed` commit makes it `stale`       |
+
+A `drift` type falls back to `age` for a document that declares no `governs` globs, or no `reviewed` anchor: there is nothing to diff. Any other value is a config error.
+
+`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). No other command computes a band, so nothing else pays for the git call one costs.
 
 ### Numbering
 
