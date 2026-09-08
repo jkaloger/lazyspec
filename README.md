@@ -208,6 +208,8 @@ Running `lazyspec` with no subcommand opens the interactive dashboard. It provid
 | `?`                 | Toggle keybindings help                             |
 | `q` / `Ctrl-c`      | Quit                                                |
 
+The preview header carries the selected document's staleness band — the same line `show` prints, coloured by band. It is computed in a background worker when the selection changes, never on the render path, so holding `j` down a long list does not queue keystrokes behind a `git diff`. The slot reads `computing…` until the result lands, and a result that arrives after the selection has moved on is dropped rather than shown against the wrong document. Only the selected document is banded: list rows carry none. See [Staleness](#staleness).
+
 ### Settings view
 
 Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config. An invalid config is reported and not written.
@@ -1054,7 +1056,7 @@ A `drift` type falls back to `age` for a document that declares no `governs` glo
 
 The anchor is reset by the two commands that mean "I have checked this document against the code": `pin <id>`, which stamps without moving the document, and `update --status`, which stamps as part of the move. A local status transition is a human looking at the document and deciding it is still true, so it writes `reviewed` with the current `HEAD` in the same frontmatter write as the status. The TUI status picker is the same path and stamps the same way. Where `pin` refuses to run at all when `HEAD` cannot be read, `update --status` is best-effort: in a repository with no commits the transition still succeeds, silently, and `reviewed` is left exactly as it was. Only filesystem- and `github-issues`-backed documents are stamped — a `github-issues` document carries the anchor in its issue body, and the other backends' cache files have nowhere to hold one. A status arriving through `fetch` never stamps, whatever the store; see [Lifecycle](#lifecycle). `reviewed` cannot be set by hand, and `--attr reviewed=` is refused.
 
-`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). `validate` bands every document to emit its `stale` findings, unless `finding = "off"` — and so does anything that embeds `validate`'s result, notably `status --json`. No other command computes a band, so nothing else pays for the git call one costs.
+`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). `validate` bands every document to emit its `stale` findings, unless `finding = "off"` — and so does anything that embeds `validate`'s result, notably `status --json`. No other command computes a band, so nothing else pays for the git call one costs. The TUI bands the selected document only, off the render path; see [TUI](#tui).
 
 ### Numbering
 

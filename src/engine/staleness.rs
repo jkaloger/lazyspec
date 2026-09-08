@@ -9,11 +9,11 @@
 
 use chrono::{NaiveDate, Utc};
 use serde::Serialize;
+use std::path::Path;
 
 use crate::engine::config::{Config, StalenessConfig, StalenessDriver};
 use crate::engine::document::DocMeta;
 use crate::engine::git_ref::GitRefOps;
-use crate::engine::store::Store;
 
 /// How much a document should be trusted at a glance. Three values, never a
 /// score: a reader can argue with a band.
@@ -93,7 +93,16 @@ impl std::fmt::Display for Staleness {
 /// no `reviewed` anchor, no `governs` globs, or a git that could not answer --
 /// and reports `driver: age` so the fallback is visible rather than being
 /// mistaken for a document that nothing has touched.
-pub fn compute(store: &Store, config: &Config, doc: &DocMeta, git: &dyn GitRefOps) -> Staleness {
+///
+/// Takes `governs_root` rather than the `Store` it came from: that is the only
+/// thing a computation reads off the store, and a path can cross a thread
+/// boundary to the TUI's staleness worker (STORY-275) where a `Store` cannot.
+pub fn compute(
+    governs_root: &Path,
+    config: &Config,
+    doc: &DocMeta,
+    git: &dyn GitRefOps,
+) -> Staleness {
     let anchor = doc
         .reviewed
         .clone()
@@ -103,9 +112,7 @@ pub fn compute(store: &Store, config: &Config, doc: &DocMeta, git: &dyn GitRefOp
     // docs-repo split is not the docs root, and `reviewed` is stamped from that
     // same root's HEAD -- so the anchor commit is read there too.
     let drift = match (&doc.reviewed, doc.governs.is_empty()) {
-        (Some(sha), false) => git
-            .diff_stat(store.governs_root(), sha, "HEAD", &doc.governs)
-            .ok(),
+        (Some(sha), false) => git.diff_stat(governs_root, sha, "HEAD", &doc.governs).ok(),
         _ => None,
     };
 
@@ -116,7 +123,7 @@ pub fn compute(store: &Store, config: &Config, doc: &DocMeta, git: &dyn GitRefOp
 
     let age_days = match &anchor {
         Anchor::Sha(sha) => git
-            .read_commit_timestamp(store.governs_root(), sha)
+            .read_commit_timestamp(governs_root, sha)
             .map_or_else(|_| days_since(doc.date), |ts| days_since(ts.date_naive())),
         Anchor::Date(date) => days_since(*date),
     };
@@ -165,6 +172,7 @@ mod tests {
     use super::*;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::store::test_support::store_from_with_config;
+    use crate::engine::store::Store;
     use chrono::Duration;
     use tempfile::TempDir;
 
@@ -202,7 +210,7 @@ mod tests {
 
     fn compute_in(store: &Store, config: &Config, git: &MockGitRefClient) -> Staleness {
         let doc = store.docs.values().next().expect("one document loaded");
-        compute(store, config, doc, git)
+        compute(store.governs_root(), config, doc, git)
     }
 
     fn mock_with_drift(drift: Drift) -> MockGitRefClient {

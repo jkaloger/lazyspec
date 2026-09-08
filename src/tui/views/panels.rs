@@ -26,7 +26,9 @@ use crate::tui::state::{
     FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
 };
 
-use super::colors::{status_color, tag_color, StatusPalette};
+use crate::engine::staleness::Staleness;
+
+use super::colors::{band_color, status_color, tag_color, StatusPalette};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
 /// Rounded panel border shared by the doc list, graph, and sidebars. `focused`
@@ -1076,6 +1078,7 @@ pub(super) fn build_preview_header_lines(
     doc: &DocMeta,
     expanding: bool,
     colors: &StatusPalette,
+    staleness: Option<&Staleness>,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
@@ -1139,6 +1142,26 @@ pub(super) fn build_preview_header_lines(
         ]));
     }
 
+    // Unconditional, unlike the pin rows above: the band is computed off the
+    // render path (STORY-275), and a line that appeared only once the worker
+    // answered would reflow the header under the reader. The placeholder is the
+    // badge's slot, held empty. Wording is `Staleness`'s own `Display`, the same
+    // string `show` prints -- the TUI renders a band, it never decides one.
+    let (text, style) = match staleness {
+        Some(staleness) => (
+            staleness.to_string(),
+            Style::default().fg(band_color(staleness.band)),
+        ),
+        None => (
+            "computing…".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    };
+    lines.push(Line::from(vec![
+        Span::raw(" Staleness: "),
+        Span::styled(text, style),
+    ]));
+
     if !doc.provenance.is_empty() {
         let mut spans: Vec<Span<'static>> = vec![Span::raw(" Provenance: ")];
         for (idx, entry) in doc.provenance.iter().enumerate() {
@@ -1192,7 +1215,8 @@ pub fn render_document_preview(
         .unwrap_or_default();
 
     let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
-    let header_lines = build_preview_header_lines(doc, expanding, colors);
+    let header_lines =
+        build_preview_header_lines(doc, expanding, colors, app.staleness_for(&doc.path));
     let mut lines = header_lines.clone();
 
     let body_hash = crate::engine::cache::DiskCache::body_hash(&body);
@@ -3067,7 +3091,7 @@ mod tests {
     fn preview_header_shows_assignee_when_set() {
         let mut doc = fixture_doc_meta();
         doc.assignee = Some("alice".to_string());
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         let assignee_line = lines
             .iter()
             .find(|l| line_text(l).contains("Assignee:"))
@@ -3079,12 +3103,142 @@ mod tests {
     #[test]
     fn preview_header_omits_assignee_when_none() {
         let doc = fixture_doc_meta();
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         for line in &lines {
             assert!(
                 !line_text(line).contains("Assignee:"),
                 "no Assignee line when unset"
             );
+        }
+    }
+
+    fn fixture_staleness() -> crate::engine::staleness::Staleness {
+        use crate::engine::staleness::{Anchor, Band, Drift, Staleness};
+        Staleness {
+            band: Band::Stale,
+            driver: crate::engine::config::StalenessDriver::Drift,
+            anchor: Anchor::Sha("0123456".to_string()),
+            age_days: 140,
+            drift: Drift {
+                files: 12,
+                insertions: 310,
+                deletions: 85,
+            },
+        }
+    }
+
+    fn staleness_line_index(lines: &[Line<'static>]) -> usize {
+        lines
+            .iter()
+            .position(|l| line_text(l).contains("Staleness:"))
+            .expect("the header always carries a staleness line")
+    }
+
+    // STORY-275 AC1: the computed band and its facts reach the preview header
+    // verbatim from `Display`, so the TUI cannot word the band differently from
+    // `show`.
+    #[test]
+    fn preview_header_shows_the_computed_band_and_its_facts() {
+        let doc = fixture_doc_meta();
+        let staleness = fixture_staleness();
+
+        let lines =
+            build_preview_header_lines(&doc, false, &StatusPalette::default(), Some(&staleness));
+
+        let text = line_text(&lines[staleness_line_index(&lines)]);
+        assert!(
+            text.contains(&staleness.to_string()),
+            "expected the Display string, got: {text}"
+        );
+    }
+
+    // STORY-275 AC1: the band picks the colour, so `stale` is not merely legible
+    // but alarming at a glance.
+    #[test]
+    fn the_band_colours_the_staleness_line() {
+        use crate::engine::staleness::Band;
+        let doc = fixture_doc_meta();
+
+        let colours: Vec<Option<Color>> = [Band::Fresh, Band::Aging, Band::Stale]
+            .into_iter()
+            .map(|band| {
+                let staleness = crate::engine::staleness::Staleness {
+                    band,
+                    ..fixture_staleness()
+                };
+                let lines = build_preview_header_lines(
+                    &doc,
+                    false,
+                    &StatusPalette::default(),
+                    Some(&staleness),
+                );
+                let idx = staleness_line_index(&lines);
+                lines[idx].spans.last().unwrap().style.fg
+            })
+            .collect();
+
+        assert_eq!(
+            colours,
+            vec![Some(Color::Green), Some(Color::Yellow), Some(Color::Red)]
+        );
+    }
+
+    // STORY-275 AC4: until the worker answers, the badge's slot holds a
+    // placeholder. The line count is identical either way, so the header does
+    // not reflow under a reader when the result lands a beat later.
+    #[test]
+    fn preview_header_holds_the_badges_place_until_the_band_lands() {
+        let doc = fixture_doc_meta();
+
+        let pending = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
+        let settled = build_preview_header_lines(
+            &doc,
+            false,
+            &StatusPalette::default(),
+            Some(&fixture_staleness()),
+        );
+
+        assert_eq!(pending.len(), settled.len());
+        assert_eq!(
+            staleness_line_index(&pending),
+            staleness_line_index(&settled),
+            "the placeholder sits where the band will"
+        );
+        let text = line_text(&pending[staleness_line_index(&pending)]);
+        assert!(
+            !["fresh", "aging", "stale"]
+                .iter()
+                .any(|band| text.contains(band)),
+            "the placeholder claims no band, got: {text}"
+        );
+    }
+
+    // STORY-275 AC6 (TUI): no list row carries a band. `doc_row_cells` is not
+    // given a `Staleness` to render, and nothing it does derive one from --
+    // status, tags, provenance -- puts a band word in a cell. RFC-069 Decision 6
+    // rejected list-row badges; this is the fence, not a note.
+    #[test]
+    fn no_list_row_cell_carries_a_staleness_band() {
+        let cells = doc_row_cells_for_test(
+            "RFC-001",
+            "Title",
+            &Status::new("draft"),
+            &["alpha".to_string()],
+            &["Alice".to_string()],
+            false,
+            false,
+            "rfc",
+            &StatusPalette::default(),
+        );
+
+        for cell in &cells {
+            let text = cell_text(cell);
+            for band in ["fresh", "aging", "stale"] {
+                assert!(
+                    !text.contains(band),
+                    "a list row must carry no band, found {band} in: {text}"
+                );
+            }
         }
     }
 
@@ -3210,7 +3364,7 @@ mod tests {
     fn preview_header_includes_provenance_when_present() {
         let mut doc = fixture_doc_meta();
         doc.provenance = vec!["X".to_string(), "Y".to_string()];
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         let prov_line = lines
             .iter()
             .find(|l| line_text(l).contains("Provenance:"))
@@ -3226,7 +3380,7 @@ mod tests {
         let mut doc = fixture_doc_meta();
         doc.governs = vec!["src/engine/**".to_string(), "src/cli/**".to_string()];
         doc.reviewed = Some("0123456789abcdef".to_string());
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         let governs = lines
             .iter()
             .find(|l| line_text(l).contains("Governs:"))
@@ -3246,7 +3400,7 @@ mod tests {
     #[test]
     fn preview_header_omits_governs_and_reviewed_when_unset() {
         let doc = fixture_doc_meta();
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         assert!(!lines.iter().any(|l| line_text(l).contains("Governs:")));
         assert!(!lines.iter().any(|l| line_text(l).contains("Reviewed:")));
     }
@@ -3261,7 +3415,7 @@ mod tests {
             "owner".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("ada".to_string())),
         );
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         let estimate = lines
             .iter()
             .find(|l| line_text(l).contains("estimate:"))
@@ -3283,10 +3437,11 @@ mod tests {
             let mut doc = fixture_doc_meta();
             doc.attributes
                 .insert("estimate".to_string(), AttrValue::Int(5));
-            build_preview_header_lines(&doc, false, &StatusPalette::default()).len()
+            build_preview_header_lines(&doc, false, &StatusPalette::default(), None).len()
         };
         let empty = fixture_doc_meta();
-        let without = build_preview_header_lines(&empty, false, &StatusPalette::default()).len();
+        let without =
+            build_preview_header_lines(&empty, false, &StatusPalette::default(), None).len();
         assert_eq!(without + 1, with_attrs);
     }
 
@@ -3636,7 +3791,7 @@ mod tests {
     #[test]
     fn preview_header_omits_provenance_when_empty() {
         let doc = fixture_doc_meta();
-        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default());
+        let lines = build_preview_header_lines(&doc, false, &StatusPalette::default(), None);
         for line in &lines {
             assert!(
                 !line_text(line).contains("Provenance:"),

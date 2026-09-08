@@ -38,7 +38,7 @@ pub fn run_json(store: &Store, config: &Config, path: &Path, git: &dyn GitRefOps
             // the documents that answer for this path, so nothing else is diffed.
             // A document with no `reviewed` has nothing to diff and reads as
             // undrifted, which is what an unpinned document honestly is.
-            let drifted = compute(store, config, doc, git).drift.files > 0;
+            let drifted = compute(store.governs_root(), config, doc, git).drift.files > 0;
             entry(doc, glob, drifted)
         })
         .collect();

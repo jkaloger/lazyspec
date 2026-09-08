@@ -568,6 +568,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         } => {
             app.apply_search_results(generation, results);
         }
+        AppEvent::StalenessComputed {
+            generation,
+            staleness,
+        } => {
+            app.apply_staleness(generation, staleness);
+        }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
             if app.create_form.active && app.create_form.loading {
@@ -697,6 +703,36 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     });
 
+    // Background staleness worker (STORY-275): `compute` shells out to
+    // `git diff`, which on the render path stalls every cursor move. Same shape
+    // as the search worker above -- an owned request, drained to the newest
+    // before computing, results carrying their generation -- with its own
+    // `GitCli`, because `App.git` is a `Box<dyn GitRefOps>` that cannot cross a
+    // thread boundary.
+    let (staleness_tx, staleness_rx) =
+        crossbeam_channel::unbounded::<crate::tui::state::StalenessRequest>();
+    app.staleness_tx = staleness_tx;
+    let staleness_result_tx = tx.clone();
+    std::thread::spawn(move || {
+        let git = crate::engine::git_ref::GitCli;
+        while let Ok(mut req) = staleness_rx.recv() {
+            while let Ok(newer) = staleness_rx.try_recv() {
+                req = newer;
+            }
+            let staleness =
+                crate::engine::staleness::compute(&req.governs_root, &req.config, &req.doc, &git);
+            if staleness_result_tx
+                .send(AppEvent::StalenessComputed {
+                    generation: req.generation,
+                    staleness,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
     let shared_gh_store: Option<Arc<Mutex<GithubIssuesStore>>> =
         if crate::tui::has_pollable_types(&config) {
             let gh_config = config.documents.github.as_ref();
@@ -786,6 +822,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 
         let t = Instant::now();
         app.request_expansion(&tx);
+        app.request_staleness(&config);
 
         if let Some(meta) = app.selected_doc_meta() {
             if let Some(body) = app.expanded_body_cache.get(&meta.path) {

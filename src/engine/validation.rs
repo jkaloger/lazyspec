@@ -1213,7 +1213,12 @@ impl Checker for StaleRule {
         docs.sort_by(|a, b| a.path.cmp(&b.path));
 
         docs.into_iter()
-            .map(|doc| (&doc.path, compute(store, config, doc, self.git.as_ref())))
+            .map(|doc| {
+                (
+                    &doc.path,
+                    compute(store.governs_root(), config, doc, self.git.as_ref()),
+                )
+            })
             .filter(|(_, staleness)| staleness.band == Band::Stale)
             .map(|(path, staleness)| {
                 (

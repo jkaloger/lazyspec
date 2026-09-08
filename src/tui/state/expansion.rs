@@ -1,11 +1,13 @@
 use crate::engine::cache::DiskCache;
+use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
 use crate::engine::refs::RefExpander;
+use crate::engine::staleness::Staleness;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::{App, AppEvent};
+use super::{App, AppEvent, StalenessRequest};
 
 impl App {
     pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
@@ -84,6 +86,74 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Dispatch the selected document's staleness band to the background worker
+    /// (STORY-275). `compute` shells out to `git diff`, so running it on the
+    /// render path would stall every cursor move -- the same reason BUG-011 took
+    /// search off the event loop.
+    ///
+    /// Called once per frame beside [`App::request_expansion`], which is why
+    /// none of the eleven-odd ways `selected_doc` moves has to know staleness
+    /// exists. The dedupe key is `(path, reviewed)`: a status change stamps
+    /// `reviewed` in place (STORY-274), and a path-only key would leave the
+    /// pre-stamp band on screen.
+    pub fn request_staleness(&mut self, config: &Config) {
+        let Some(doc) = self.selected_doc_for_view().cloned() else {
+            return;
+        };
+        let key = (doc.path.clone(), doc.reviewed.clone());
+        if self.staleness_key.as_ref() == Some(&key) {
+            return;
+        }
+
+        self.staleness_key = Some(key);
+        self.staleness = None;
+        self.staleness_generation = self.staleness_generation.wrapping_add(1);
+        let _ = self.staleness_tx.send(StalenessRequest {
+            governs_root: self.store.governs_root().to_path_buf(),
+            config: config.clone(),
+            doc,
+            generation: self.staleness_generation,
+        });
+    }
+
+    /// Apply a worker result, dropping it when the generation has moved on. The
+    /// selection may have left the document and come back while git was
+    /// running, so a path match is not evidence the result is current -- the
+    /// generation is.
+    pub fn apply_staleness(&mut self, generation: u64, staleness: Staleness) {
+        if generation != self.staleness_generation {
+            return;
+        }
+        self.staleness = Some(staleness);
+    }
+
+    /// The band, but only for the document it was computed for. Dispatch runs
+    /// once a frame, *after* the draw, so the frame that follows a view switch
+    /// or a selection jump renders with the previous document's band still in
+    /// the slot. Re-keying by path at the read site is what `expanded_body_cache`
+    /// already does, and is what makes AC5 hold on every surface rather than
+    /// only on the one dispatch happens to agree with.
+    pub fn staleness_for(&self, path: &std::path::Path) -> Option<&Staleness> {
+        match &self.staleness_key {
+            Some((key_path, _)) if key_path == path => self.staleness.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Test-only synchronous staleness: dispatch, then compute inline through
+    /// `self.git` and apply, so a test exercises the production path without a
+    /// worker thread. `App::run_search_now` is the shape.
+    #[cfg(test)]
+    pub(crate) fn run_staleness_now(&mut self, config: &Config) {
+        self.request_staleness(config);
+        let Some(doc) = self.selected_doc_for_view().cloned() else {
+            return;
+        };
+        let staleness =
+            crate::engine::staleness::compute(self.store.governs_root(), config, &doc, &*self.git);
+        self.apply_staleness(self.staleness_generation, staleness);
     }
 
     pub fn request_diagram_render(
@@ -165,6 +235,19 @@ impl App {
             self.filtered_docs();
         }
         self.filtered_docs_cache.as_ref().map_or(0, |c| c.len())
+    }
+
+    /// The document the preview panel actually renders. Both selections are
+    /// indexed by `selected_doc`, but the Filters view draws from
+    /// `filtered_docs_cache` (every type, status/tag-filtered) and every other
+    /// view from the type-scoped `doc_tree`, so the two diverge. Anything
+    /// dispatched for "the selection" has to ask which list is on screen;
+    /// `open_status_picker` and the link editor already branch the same way.
+    pub fn selected_doc_for_view(&mut self) -> Option<&DocMeta> {
+        if self.view_mode == crate::tui::state::ViewMode::Filters {
+            return self.selected_filtered_doc();
+        }
+        self.selected_doc_meta()
     }
 
     pub fn selected_filtered_doc(&mut self) -> Option<&DocMeta> {

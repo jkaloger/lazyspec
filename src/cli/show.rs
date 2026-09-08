@@ -156,7 +156,10 @@ pub fn run(
         println!("{} {}", dim("Assignee:"), bold(assignee));
     }
     print!("{}", pin_rows(doc));
-    println!("{}", staleness_line(&compute(store, config, doc, git)));
+    println!(
+        "{}",
+        staleness_line(&compute(store.governs_root(), config, doc, git))
+    );
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
             println!(
@@ -243,7 +246,7 @@ pub fn run_json(
     };
     json["body"] = serde_json::Value::String(body);
     json["comments"] = serde_json::Value::Array(fetch_comments_for_doc(doc, config, root, gh));
-    json["staleness"] = serde_json::to_value(compute(store, config, doc, git))?;
+    json["staleness"] = serde_json::to_value(compute(store.governs_root(), config, doc, git))?;
 
     Ok(serde_json::to_string_pretty(&json)?)
 }

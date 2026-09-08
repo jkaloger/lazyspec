@@ -1,12 +1,13 @@
 ---
 title: Show the staleness band where documents are inspected
 type: story
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - implements: RFC-069
+reviewed: 1a7db94929dbfe5c9b1a0520e12cb9927ac6803d
 ---
 
 As a reader browsing documents in the TUI or web view, I want the selected document's detail surface to show its staleness band, so that I can judge whether to trust what I am reading without dropping to the CLI.

@@ -22,6 +22,7 @@ use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
 use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::reservation::ReservationProgress;
+use crate::engine::staleness::Staleness;
 use crate::engine::store::{Filter, Store};
 #[cfg(feature = "agent")]
 use crate::tui::agent::{load_all_records, AgentSpawner};
@@ -308,6 +309,17 @@ pub struct SearchRequest {
     pub generation: u64,
 }
 
+/// One selection's worth of work for the background staleness worker
+/// (STORY-275). Every field is owned, because `compute` runs on a thread that
+/// can borrow neither the `Store` nor the `App`; the governed root is the only
+/// thing it ever read off the store.
+pub struct StalenessRequest {
+    pub governs_root: PathBuf,
+    pub config: Config,
+    pub doc: DocMeta,
+    pub generation: u64,
+}
+
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
@@ -331,6 +343,10 @@ pub enum AppEvent {
     SearchResults {
         generation: u64,
         results: Vec<PathBuf>,
+    },
+    StalenessComputed {
+        generation: u64,
+        staleness: Staleness,
     },
     CacheRefresh {
         warnings: Vec<String>,
@@ -585,6 +601,24 @@ pub struct App {
     /// throwaway channel at construction; the event loop rebinds it when it
     /// spawns the worker, so state code just sends and ignores errors.
     pub search_tx: crossbeam_channel::Sender<SearchRequest>,
+    /// The selected document's band once the worker answers (RFC-069 Decision
+    /// 6). One slot for one selection, not a cache: it is cleared the moment
+    /// [`App::request_staleness`] sees a new key, so a band can never be shown
+    /// against a document it was not computed for.
+    pub staleness: Option<Staleness>,
+    /// Monotonic id stamped onto each dispatched computation; a result carrying
+    /// an older generation is dropped, so a git subprocess that outlives its
+    /// selection cannot repaint the badge.
+    pub staleness_generation: u64,
+    /// The `(path, reviewed)` the current slot belongs to, and the dedupe key
+    /// that keeps a re-render from re-dispatching. `reviewed` is in the key
+    /// because a TUI status change stamps it in place (STORY-274): keyed on
+    /// path alone, the pre-stamp band would sit on screen until the cursor left
+    /// the document and came back.
+    pub staleness_key: Option<(PathBuf, Option<String>)>,
+    /// Sender to the background staleness worker, rebound by the event loop
+    /// exactly as `search_tx` is.
+    pub staleness_tx: crossbeam_channel::Sender<StalenessRequest>,
     pub show_help: bool,
     pub help_scroll: u16,
     /// Maximum legal `help_scroll` for the current help content + viewport,
@@ -744,6 +778,7 @@ impl App {
     ) -> Self {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
+        let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
         #[cfg(feature = "agent")]
@@ -776,6 +811,10 @@ impl App {
             search_pending: false,
             search_generation: 0,
             search_tx,
+            staleness: None,
+            staleness_generation: 0,
+            staleness_key: None,
+            staleness_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -3845,6 +3884,7 @@ pub(crate) mod parity_seed {
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
+        let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
         #[cfg(feature = "agent")]
         let agent_spawner = AgentSpawner::new(store.root());
         let config = Config::default();
@@ -3868,6 +3908,10 @@ pub(crate) mod parity_seed {
             search_pending: false,
             search_generation: 0,
             search_tx,
+            staleness: None,
+            staleness_generation: 0,
+            staleness_key: None,
+            staleness_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4335,6 +4379,7 @@ mod tests {
 
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
+        let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
         #[cfg(feature = "agent")]
@@ -4360,6 +4405,10 @@ mod tests {
             search_pending: false,
             search_generation: 0,
             search_tx,
+            staleness: None,
+            staleness_generation: 0,
+            staleness_key: None,
+            staleness_tx,
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -5897,6 +5946,269 @@ mod tests {
             app.search_results.is_empty(),
             "late results for the pre-clear query stay dropped"
         );
+    }
+
+    /// A doc whose frontmatter carries `extra` lines verbatim, so a staleness
+    /// test can stamp `reviewed` the way a status transition does (STORY-274).
+    fn rfc_doc(title: &str, extra: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\n{extra}---\n\nbody\n"
+        )
+    }
+
+    /// A band distinguishable from every other fixture band by its file count,
+    /// so an assertion says *which* computation landed, not merely that one did.
+    fn band_with_files(files: u64) -> crate::engine::staleness::Staleness {
+        use crate::engine::staleness::{Anchor, Band, Drift, Staleness};
+        Staleness {
+            band: Band::Stale,
+            driver: crate::engine::config::StalenessDriver::Drift,
+            anchor: Anchor::Sha("0123456".to_string()),
+            age_days: 140,
+            drift: Drift {
+                files,
+                insertions: 0,
+                deletions: 0,
+            },
+        }
+    }
+
+    // STORY-275 AC3/AC4: a new selection clears the badge and puts exactly one
+    // request on the worker channel, stamped with the generation it bumped to.
+    // A second frame over the same `(path, reviewed)` dispatches nothing, so a
+    // still cursor costs one git subprocess, not one per render.
+    #[test]
+    fn request_staleness_dispatches_once_per_selection_key() {
+        let config = Config::default();
+        let (_tmp, mut app) = app_with_store(&[("docs/rfcs/RFC-001-a.md", &rfc_doc("A", ""))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.staleness_tx = tx;
+        select_rfc_doc(&mut app);
+        app.staleness = Some(band_with_files(1));
+
+        app.request_staleness(&config);
+
+        assert!(
+            app.staleness.is_none(),
+            "the badge clears until the new document's band lands"
+        );
+        let req = rx.try_recv().expect("one request is dispatched");
+        assert_eq!(req.generation, app.staleness_generation);
+        assert_eq!(req.doc.path, PathBuf::from("docs/rfcs/RFC-001-a.md"));
+
+        app.request_staleness(&config);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the same (path, reviewed) dispatches nothing"
+        );
+    }
+
+    // STORY-275 AC3: the dedupe key carries `reviewed`, because a TUI status
+    // change stamps it in place (STORY-274) and reloads the document. Keyed on
+    // path alone, the pre-stamp band would sit on screen against a new anchor.
+    #[test]
+    fn a_reviewed_stamp_re_dispatches_the_same_document() {
+        let config = Config::default();
+        let (tmp, mut app) = app_with_store(&[("docs/rfcs/RFC-001-a.md", &rfc_doc("A", ""))]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.staleness_tx = tx;
+        select_rfc_doc(&mut app);
+        app.request_staleness(&config);
+        rx.try_recv().expect("the first selection dispatches");
+
+        std::fs::write(
+            tmp.path().join("docs/rfcs/RFC-001-a.md"),
+            rfc_doc("A", "reviewed: abc1234\n"),
+        )
+        .unwrap();
+        app.store = Store::load(tmp.path(), &config).unwrap();
+        app.build_doc_tree();
+
+        app.request_staleness(&config);
+
+        let req = rx.try_recv().expect("the stamp is a new key");
+        assert_eq!(req.doc.reviewed.as_deref(), Some("abc1234"));
+    }
+
+    // STORY-275 AC5: a result stamped with a superseded generation is dropped;
+    // the live one is applied.
+    #[test]
+    fn a_superseded_staleness_result_is_dropped() {
+        let config = Config::default();
+        let (_tmp, mut app) = app_with_store(&[("docs/rfcs/RFC-001-a.md", &rfc_doc("A", ""))]);
+        select_rfc_doc(&mut app);
+        app.request_staleness(&config);
+        let live = app.staleness_generation;
+
+        app.apply_staleness(live.wrapping_sub(1), band_with_files(1));
+        assert!(app.staleness.is_none(), "a superseded result is dropped");
+
+        app.apply_staleness(live, band_with_files(2));
+        assert_eq!(app.staleness.map(|s| s.drift.files), Some(2));
+    }
+
+    // STORY-275 AC5, the case a path-keyed guard would get wrong: the selection
+    // moves off the document and back before the first computation lands. The
+    // generation has moved twice, so the first result is dropped rather than
+    // being accidentally correct-by-path -- it was computed against an anchor
+    // the document may no longer carry.
+    #[test]
+    fn a_result_from_before_the_selection_left_and_returned_is_dropped() {
+        let config = Config::default();
+        let (_tmp, mut app) = app_with_store(&[
+            ("docs/rfcs/RFC-001-a.md", &rfc_doc("A", "")),
+            ("docs/rfcs/RFC-002-b.md", &rfc_doc("B", "")),
+        ]);
+        select_rfc_doc(&mut app);
+
+        app.request_staleness(&config);
+        let first = app.staleness_generation;
+        app.selected_doc = 1;
+        app.request_staleness(&config);
+        app.selected_doc = 0;
+        app.request_staleness(&config);
+        let current = app.staleness_generation;
+        assert_ne!(first, current, "the generation moved twice");
+
+        app.apply_staleness(first, band_with_files(1));
+        assert!(
+            app.staleness.is_none(),
+            "the pre-move computation is dropped even though the path matches again"
+        );
+
+        app.apply_staleness(current, band_with_files(9));
+        assert_eq!(app.staleness.map(|s| s.drift.files), Some(9));
+    }
+
+    // STORY-275 AC6 (TUI): a long list costs one computation for the selection,
+    // never one per row. RFC-069 Decision 6 rejected list-row badges outright.
+    #[test]
+    fn a_long_list_issues_one_computation_for_the_selection_only() {
+        let config = Config::default();
+        let files: Vec<(String, String)> = (0..50)
+            .map(|i| {
+                (
+                    format!("docs/rfcs/RFC-{i:03}-doc.md"),
+                    rfc_doc(&format!("Doc {i}"), ""),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let (_tmp, mut app) = app_with_store(&refs);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.staleness_tx = tx;
+        select_rfc_doc(&mut app);
+        assert_eq!(app.doc_tree.len(), 50, "all fifty rows are in the tree");
+
+        app.request_staleness(&config);
+        assert_eq!(rx.len(), 1, "one frame over fifty rows: one request");
+
+        app.request_staleness(&config);
+        assert_eq!(rx.len(), 1, "a re-render over fifty rows: no new request");
+
+        app.selected_doc = 1;
+        app.request_staleness(&config);
+        assert_eq!(rx.len(), 2, "one cursor move: exactly one more");
+    }
+
+    // STORY-275 AC1 + AC5 in the Filters view, whose preview header renders from
+    // `selected_filtered_doc` (all types) while the Types view renders from the
+    // type-scoped `doc_tree`. Both index by `selected_doc`, so dispatching for
+    // the tree while rendering the filtered list put one document's band under
+    // another document's header -- the failure AC5 names.
+    #[test]
+    fn the_filters_view_bands_the_document_it_renders() {
+        let config = Config::default();
+        let (_tmp, mut app) = app_with_store(&[
+            ("docs/rfcs/RFC-001-a.md", &rfc_doc("A", "")),
+            (
+                "docs/specs/SPEC-001-b.md",
+                "---\ntitle: \"B\"\ntype: spec\nstatus: draft\nauthor: t\ndate: 2025-01-01\ntags: []\n---\n\nbody\n",
+            ),
+        ]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.staleness_tx = tx;
+        select_rfc_doc(&mut app);
+        app.view_mode = ViewMode::Filters;
+
+        let tree_path = app
+            .selected_doc_meta()
+            .expect("a tree selection")
+            .path
+            .clone();
+        let rendered_path = app
+            .selected_filtered_doc()
+            .expect("a filtered selection")
+            .path
+            .clone();
+        assert_ne!(
+            tree_path, rendered_path,
+            "the two selections must diverge for this to test anything"
+        );
+
+        app.request_staleness(&config);
+
+        let req = rx.try_recv().expect("one request is dispatched");
+        assert_eq!(
+            req.doc.path, rendered_path,
+            "computed for the document the Filters header renders"
+        );
+
+        app.apply_staleness(app.staleness_generation, band_with_files(3));
+        assert_eq!(
+            app.staleness_for(&rendered_path).map(|s| s.drift.files),
+            Some(3),
+            "the rendered document gets its band"
+        );
+        assert!(
+            app.staleness_for(&tree_path).is_none(),
+            "no band against a document it was not computed for"
+        );
+    }
+
+    // STORY-275 AC1, end to end bar the git subprocess: the governed root and
+    // the selected document go into the engine's `compute`, and the band that
+    // comes back is the one the header will render. Only the git seam is a
+    // double -- the TUI never decides a band, it only carries one.
+    #[test]
+    fn the_selected_documents_band_comes_back_from_the_engine() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+        use crate::engine::staleness::{Anchor, Band, Drift};
+
+        let mut config = Config::default();
+        for type_def in &mut config.documents.types {
+            type_def.staleness = crate::engine::config::StalenessDriver::Drift;
+        }
+        let (_tmp, mut app) = app_with_store_config(
+            &[(
+                "docs/rfcs/RFC-001-a.md",
+                &rfc_doc("A", "governs:\n  - \"src/engine/**\"\nreviewed: abc1234\n"),
+            )],
+            &config,
+        );
+        select_rfc_doc(&mut app);
+        app.git = Box::new(
+            MockGitRefClient::new()
+                .with_diff_stat(Drift {
+                    files: 12,
+                    insertions: 310,
+                    deletions: 85,
+                })
+                .with_read_commit_timestamp_result(Ok(chrono::Utc::now())),
+        );
+
+        app.run_staleness_now(&config);
+
+        let staleness = app
+            .staleness
+            .expect("the band lands on the live generation");
+        assert_eq!(staleness.band, Band::Stale);
+        assert_eq!(staleness.drift.files, 12);
+        assert_eq!(staleness.anchor, Anchor::Sha("abc1234".to_string()));
     }
 
     // AC: the characters that matched are visually highlighted in the rendered

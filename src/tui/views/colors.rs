@@ -114,6 +114,17 @@ pub fn tag_color(tag: &str) -> Color {
     hash_palette_color(tag)
 }
 
+/// The staleness band's colour (RFC-069). Not user-configurable: three fixed
+/// values whose whole point is that they read the same everywhere.
+pub fn band_color(band: crate::engine::staleness::Band) -> Color {
+    use crate::engine::staleness::Band;
+    match band {
+        Band::Fresh => Color::Green,
+        Band::Aging => Color::Yellow,
+        Band::Stale => Color::Red,
+    }
+}
+
 /// Map a semantic spinner [`FrameColour`] to a ratatui style. Accent is the
 /// terminal default foreground; success/error carry the conventional
 /// green/red; dim is a modifier so it tracks the terminal's own palette.
