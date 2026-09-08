@@ -375,6 +375,12 @@ Every finding about a document names it in a field: `path` on most rules, `sourc
 
 `governs-unowned` is the one finding about a source file rather than a document: it names the file in `file` and no document at all, because the absence of one is what it reports. See [Governed files](#governed-files).
 
+`stale` reports a document whose band is `stale`. It carries `path` and `staleness`, the same object `show --json` prints — `band`, `driver`, `anchor`, `age_days` and `drift`. Its severity is configurable, `[staleness] finding`, so like `unsatisfied-edge` it reaches either array; `finding = "off"` emits none. See [Staleness](#staleness).
+
+```sh
+lazyspec validate --json | jq '[.errors[], .warnings[]] | map(select(.rule == "stale") | {path, band: .staleness.band, age_days: .staleness.age_days})'
+```
+
 One warning is about the environment rather than a document and so names none: `gh-auth`, raised when the project declares a `github-issues` type and the `gh` CLI is missing, unauthenticated, or unreadable. It carries `rule` and `message` and no other field. Filtering `warnings` on a document field silently drops it, so select it by `rule` if you care about it. It appears only in `validate --json`, never in `status --json`.
 
 `validate --json` also reports a third array, `parse_errors`: files under a document directory that would not load — malformed frontmatter, or a `governs` glob that would not compile. Its entries are not findings, so no `rule` selects them; each is `{ "path", "error" }`. A non-empty `parse_errors` exits 2, the same as an error. `status --json` carries the same array, but at its top level beside `validation` rather than inside it.
@@ -1013,16 +1019,20 @@ Every document carries a staleness band: `fresh`, `aging` or `stale`. The option
 
 ```toml
 [staleness]
-aging = "90d"
-stale = "180d"
+aging   = "90d"
+stale   = "180d"
+finding = "warning"
 ```
 
-| Key     | Value                                                                                          |
-| ------- | ---------------------------------------------------------------------------------------------- |
-| `aging` | Age at which a document stops being `fresh`. Defaults to `90d`                                 |
-| `stale` | Age at which a document becomes `stale`. Defaults to `180d`                                    |
+| Key       | Value                                                                                          |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| `aging`   | Age at which a document stops being `fresh`. Defaults to `90d`                                 |
+| `stale`   | Age at which a document becomes `stale`. Defaults to `180d`                                    |
+| `finding` | Severity `validate` reports a stale document at: `off`, `warning` or `error`. Defaults to `warning` |
 
-Both are a whole number of days, written `<n>d`. Any other spelling is a config error. An absent table applies the defaults.
+`aging` and `stale` are a whole number of days, written `<n>d`. Any other spelling is a config error. An absent table applies the defaults.
+
+`finding` is on by default, so documentation rot is reported unless a project opts out. Opting out is written, not omitted: `finding = "off"` is the only spelling that turns the check off, and with it set `validate` bands no document and costs no git call for it — `show` and `why` still report a band. Only the `stale` band is a finding; `aging` is a fact `show` reports and never a warning. Any value other than the three is a config error.
 
 A type declares what drives its band with `staleness`:
 
@@ -1040,7 +1050,7 @@ staleness = "drift"
 
 A `drift` type falls back to `age` for a document that declares no `governs` globs, or no `reviewed` anchor: there is nothing to diff. Any other value is a config error.
 
-`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). No other command computes a band, so nothing else pays for the git call one costs.
+`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). `validate` bands every document to emit its `stale` findings, unless `finding = "off"` — and so does anything that embeds `validate`'s result, notably `status --json`. No other command computes a band, so nothing else pays for the git call one costs.
 
 ### Numbering
 

@@ -2,8 +2,10 @@
 //! review anchor and what moved under the document's `governs` globs since it.
 //!
 //! Nothing here is stored. [`compute`] is called by the surfaces that show a
-//! band and by nobody else, so a command that never mentions staleness never
-//! pays for a git subprocess.
+//! band -- `show` and `why` -- and by `StaleRule` on the `validate_full` path,
+//! so `validate`, `status --json` and the TUI validation refresh pay for it
+//! too, unless `[staleness] finding = "off"` gates the rule out before it runs.
+//! A command on neither path issues no git subprocess for staleness.
 
 use chrono::{NaiveDate, Utc};
 use serde::Serialize;
@@ -67,6 +69,19 @@ pub struct Staleness {
     pub anchor: Anchor,
     pub age_days: u64,
     pub drift: Drift,
+}
+
+/// The band and the facts behind it, as RFC-069 writes them. Lives on the type
+/// because two surfaces print it -- `show`'s `staleness:` line and the `stale`
+/// validation finding -- and one wording cannot drift from itself.
+impl std::fmt::Display for Staleness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({}, {} files since {}, {}d)",
+            self.band, self.driver, self.drift.files, self.anchor, self.age_days
+        )
+    }
 }
 
 /// The band, and the facts behind it, for one document.

@@ -66,7 +66,8 @@ fn warnings_dont_affect_exit_code() {
 fn validate_json_has_separate_arrays() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
+    let output =
+        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert!(parsed["errors"].is_array());
@@ -78,7 +79,12 @@ fn validate_json_has_separate_arrays() {
 fn validate_without_warnings_flag_hides_warnings() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), false, &[]);
+    let output = lazyspec::cli::validate::run_human(
+        &store,
+        &store.validate_full(&fixture.config()),
+        false,
+        &[],
+    );
 
     assert!(!output.contains("superseded"));
 }
@@ -87,7 +93,12 @@ fn validate_without_warnings_flag_hides_warnings() {
 fn validate_with_warnings_flag_shows_warnings() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), true, &[]);
+    let output = lazyspec::cli::validate::run_human(
+        &store,
+        &store.validate_full(&fixture.config()),
+        true,
+        &[],
+    );
 
     assert!(output.contains("superseded"));
 }

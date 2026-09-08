@@ -95,9 +95,13 @@ impl ConfigFixture {
             format!("related:\n{links}")
         };
         let title = Path::new(path).file_stem().unwrap().to_str().unwrap();
+        // Dated today, because these tests name the migrated project's whole
+        // finding set and a fixed date would age into a `stale` finding
+        // (RFC-069) on a wall clock the test does not control.
+        let date = chrono::Utc::now().date_naive();
         let body = format!(
             "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: \"test\"\n\
-             date: 2026-01-01\ntags: []\n{related_block}---\nbody\n"
+             date: {date}\ntags: []\n{related_block}---\nbody\n"
         );
         std::fs::write(self.root().join(path), body).unwrap();
     }

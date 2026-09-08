@@ -4731,6 +4731,41 @@ mod tests {
         assert_eq!(app.validation_errors, messages);
     }
 
+    /// STORY-273 AC5: the `stale` finding reaches the validation panel by the
+    /// same route every other rule takes -- `refresh_validation` renders each
+    /// finding's `message` and knows no rule by name.
+    #[test]
+    fn refresh_validation_carries_the_stale_finding_into_the_panel() {
+        use crate::engine::config::Config;
+        use chrono::{Duration, Utc};
+
+        let date = Utc::now().date_naive() - Duration::days(200);
+        let doc = format!(
+            "---\ntitle: \"Rotted\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {date}\ntags: []\ngoverns: []\nrelated: []\n---\n\nbody\n"
+        );
+        let config = Config::default();
+        let (_tmp, store) = crate::engine::store::test_support::store_from_with_config(
+            &[("docs/rfcs/RFC-001-rotted.md", &doc)],
+            &config,
+        );
+
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.refresh_validation(&config);
+
+        let message = crate::engine::validation::validate_full(&app.store, &config)
+            .warnings
+            .iter()
+            .find(|w| w.rule() == "stale")
+            .expect("a 200-day-old document is stale")
+            .to_string();
+        assert!(
+            app.validation_warnings.contains(&message),
+            "expected the stale finding's message in the panel, got: {:?}",
+            app.validation_warnings
+        );
+    }
+
     #[test]
     fn refresh_validation_folds_in_gh_fetch_warnings() {
         use crate::engine::config::Config;

@@ -111,14 +111,7 @@ fn pin_rows(doc: &DocMeta) -> String {
 /// the wording is the contract `show --json` carries the same facts under
 /// (DICTUM-006).
 fn staleness_line(staleness: &Staleness) -> String {
-    format!(
-        "staleness: {} ({}, {} files since {}, {}d)",
-        staleness.band,
-        staleness.driver,
-        staleness.drift.files,
-        staleness.anchor,
-        staleness.age_days,
-    )
+    format!("staleness: {staleness}")
 }
 
 pub fn run(

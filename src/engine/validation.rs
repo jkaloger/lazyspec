@@ -3,6 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
+use crate::engine::staleness::{compute, Band, Staleness};
 use globset::{Glob, GlobMatcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -149,6 +150,14 @@ pub enum ValidationIssue {
     GovernsUnowned {
         file: PathBuf,
     },
+    /// A document whose band is `stale` (RFC-069): its review anchor is old
+    /// enough, or enough has moved under its `governs` globs since, that it can
+    /// no longer be trusted to describe the code. `aging` is a fact `show`
+    /// reports and never a finding. Severity comes from `[staleness] finding`.
+    Stale {
+        path: PathBuf,
+        staleness: Staleness,
+    },
 }
 
 impl ValidationIssue {
@@ -183,6 +192,7 @@ impl ValidationIssue {
             ValidationIssue::StatusAuthorityNotABoard { .. } => "status-authority-not-a-board",
             ValidationIssue::GovernsNoMatch { .. } => "governs-no-match",
             ValidationIssue::GovernsUnowned { .. } => "governs-unowned",
+            ValidationIssue::Stale { .. } => "stale",
         }
     }
 
@@ -467,6 +477,9 @@ impl std::fmt::Display for ValidationIssue {
                     "{} is in [governs] scope but no document governs it",
                     file.display()
                 )
+            }
+            ValidationIssue::Stale { path, staleness } => {
+                write!(f, "{} is {}", path.display(), staleness)
             }
         }
     }
@@ -1161,6 +1174,60 @@ impl Checker for GovernsUnownedRule {
     }
 }
 
+/// Every document whose band is `stale` (RFC-069), at `[staleness] finding`
+/// severity. `aging` is a fact `show` reports and never a finding.
+pub struct StaleRule {
+    /// The git seam [`compute`] reads drift and anchor times through. Owned by
+    /// the rule because [`Checker::check`] is handed store and config and
+    /// nothing else, exactly as [`GovernsNoMatchRule`] owns its own
+    /// (DICTUM-002, DICTUM-004).
+    git: Box<dyn GitRefOps>,
+}
+
+impl StaleRule {
+    pub fn new(git: Box<dyn GitRefOps>) -> Self {
+        Self { git }
+    }
+}
+
+impl Checker for StaleRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        // The gate before the walk, not a filter after it: `finding = "off"`
+        // means no document is banded at all, so `validate` costs no git
+        // subprocess a project opted out of.
+        let Some(severity) = config.staleness.finding.severity() else {
+            return Vec::new();
+        };
+
+        // Sorted, because `store.docs` is a map and the order findings print in
+        // should not be its iteration order.
+        let mut docs: Vec<&DocMeta> = store
+            .docs
+            .values()
+            .filter(|meta| !meta.validate_ignore)
+            .collect();
+        docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+        docs.into_iter()
+            .map(|doc| (&doc.path, compute(store, config, doc, self.git.as_ref())))
+            .filter(|(_, staleness)| staleness.band == Band::Stale)
+            .map(|(path, staleness)| {
+                (
+                    severity,
+                    ValidationIssue::Stale {
+                        path: path.clone(),
+                        staleness,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 pub struct TypeConstraintChecker;
 
 impl Checker for TypeConstraintChecker {
@@ -1539,6 +1606,7 @@ fn default_checkers() -> Vec<Box<dyn Checker>> {
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
+        Box::new(StaleRule::new(Box::new(GitCli))),
     ]
 }
 
@@ -2232,6 +2300,14 @@ mod edge_tests {
         Config {
             relationships,
             edges,
+            // Off, because these tests read `validate_full`'s whole output and
+            // an edge fixture's frontmatter date is arbitrary: on, every one of
+            // them would age into a `stale` warning on a wall clock nothing
+            // here controls.
+            staleness: crate::engine::config::StalenessConfig {
+                finding: crate::engine::config::StalenessFinding::Off,
+                ..Default::default()
+            },
             ..Config::default()
         }
     }
@@ -3474,8 +3550,241 @@ mod governs_unowned_tests {
 }
 
 #[cfg(test)]
+mod stale_tests {
+    use super::*;
+    use crate::engine::config::{StalenessConfig, StalenessDriver, StalenessFinding};
+    use crate::engine::git_ref::test_support::MockGitRefClient;
+    use crate::engine::staleness::Drift;
+    use crate::engine::store::test_support::store_from_with_config;
+    use crate::engine::store::Store;
+    use chrono::{Duration, Utc};
+
+    const REVIEWED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn config_with(finding: StalenessFinding) -> Config {
+        Config {
+            staleness: StalenessConfig {
+                finding,
+                ..StalenessConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    /// A document `age_days` old, banded by the default `age` driver off its own
+    /// date -- so the band is the fixture's to choose without any git in play.
+    fn dated_doc(title: &str, age_days: i64, extra: &str) -> String {
+        let date = Utc::now().date_naive() - Duration::days(age_days);
+        format!(
+            "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {date}\ntags: []\ngoverns: []\nrelated: []\n{extra}---\n\nbody\n"
+        )
+    }
+
+    /// One document per band, plus a stale one the author has excused.
+    fn store_with_one_of_each_band(config: &Config) -> (tempfile::TempDir, Store) {
+        store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-fresh.md", &dated_doc("Fresh", 10, "")),
+                ("docs/rfcs/RFC-002-aging.md", &dated_doc("Aging", 100, "")),
+                ("docs/rfcs/RFC-003-stale.md", &dated_doc("Stale", 200, "")),
+                (
+                    "docs/rfcs/RFC-004-excused.md",
+                    &dated_doc("Excused", 200, "validate-ignore: true\n"),
+                ),
+            ],
+            config,
+        )
+    }
+
+    fn findings(config: &Config, store: &Store) -> Vec<(Severity, String, Band)> {
+        StaleRule::new(Box::new(MockGitRefClient::new()))
+            .check(store, config)
+            .into_iter()
+            .map(|(severity, issue)| match issue {
+                ValidationIssue::Stale { path, staleness } => {
+                    (severity, path.display().to_string(), staleness.band)
+                }
+                other => panic!("unexpected finding {other:?}"),
+            })
+            .collect()
+    }
+
+    // AC1 and AC6: only the stale band is a finding, and it carries the
+    // computed staleness. Fresh and aging are facts `show` reports, not rot.
+    #[test]
+    fn only_the_stale_document_is_a_finding() {
+        let config = config_with(StalenessFinding::Warning);
+        let (_tmp, store) = store_with_one_of_each_band(&config);
+
+        assert_eq!(
+            findings(&config, &store),
+            vec![(
+                Severity::Warning,
+                "docs/rfcs/RFC-003-stale.md".to_string(),
+                Band::Stale
+            )]
+        );
+    }
+
+    // AC6: nothing stale, nothing reported.
+    #[test]
+    fn a_project_with_nothing_stale_reports_nothing() {
+        let config = config_with(StalenessFinding::Warning);
+        let (_tmp, store) = store_from_with_config(
+            &[("docs/rfcs/RFC-001-fresh.md", &dated_doc("Fresh", 10, ""))],
+            &config,
+        );
+
+        assert_eq!(findings(&config, &store), Vec::new());
+    }
+
+    // AC2's half that lives on the rule: the configured severity is the
+    // finding's severity. The exit code it drives is the next slice.
+    #[test]
+    fn the_configured_finding_severity_is_the_findings_severity() {
+        for (finding, expected) in [
+            (StalenessFinding::Warning, Severity::Warning),
+            (StalenessFinding::Error, Severity::Error),
+        ] {
+            let config = config_with(finding);
+            let (_tmp, store) = store_with_one_of_each_band(&config);
+
+            assert_eq!(
+                findings(&config, &store)
+                    .into_iter()
+                    .map(|(severity, _, _)| severity)
+                    .collect::<Vec<_>>(),
+                vec![expected],
+                "for {finding:?}"
+            );
+        }
+    }
+
+    /// The message RFC-069 writes, once: the path, then `show`'s own staleness
+    /// parenthetical.
+    #[test]
+    fn the_message_is_the_path_and_the_staleness_line() {
+        let staleness = crate::engine::staleness::Staleness {
+            band: Band::Stale,
+            driver: StalenessDriver::Drift,
+            anchor: crate::engine::staleness::Anchor::Sha("0123456".to_string()),
+            age_days: 140,
+            drift: Drift {
+                files: 12,
+                insertions: 310,
+                deletions: 85,
+            },
+        };
+
+        assert_eq!(
+            ValidationIssue::Stale {
+                path: PathBuf::from("docs/specs/SPEC-001-store.md"),
+                staleness,
+            }
+            .to_string(),
+            "docs/specs/SPEC-001-store.md is stale (drift, 12 files since 0123456, 140d)"
+        );
+    }
+
+    /// One document that would cost two git calls to band: a `reviewed` anchor
+    /// to date and `governs` globs to diff. What the off case must not do is
+    /// only visible against what the on case does.
+    fn store_with_a_pinned_document(config: &Config) -> (tempfile::TempDir, Store) {
+        store_from_with_config(
+            &[(
+                "docs/rfcs/RFC-001-engine.md",
+                &format!(
+                    "---\ntitle: \"Engine\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {}\ntags: []\ngoverns:\n  - \"src/engine/**\"\nreviewed: {REVIEWED}\nrelated: []\n---\n\nbody\n",
+                    Utc::now().date_naive() - Duration::days(200)
+                ),
+            )],
+            config,
+        )
+    }
+
+    /// The findings and everything git was asked, for one `finding` setting.
+    fn check_over(finding: StalenessFinding) -> (usize, Vec<String>) {
+        let config = config_with(finding);
+        let (_tmp, store) = store_with_a_pinned_document(&config);
+        let git = MockGitRefClient::new()
+            .with_diff_stat(Drift {
+                files: 3,
+                insertions: 9,
+                deletions: 1,
+            })
+            .with_read_commit_timestamp_result(Ok(Utc::now() - Duration::days(200)));
+        let calls = git.call_log();
+
+        let count = StaleRule::new(Box::new(git)).check(&store, &config).len();
+
+        let calls = calls.borrow().clone();
+        (count, calls)
+    }
+
+    // AC4: with the finding off, no staleness is computed at all. Asserted off
+    // the git call log, because an empty finding list is equally consistent with
+    // computing every band and discarding the lot.
+    #[test]
+    fn the_finding_off_computes_no_staleness_at_all() {
+        let logs = [
+            check_over(StalenessFinding::Warning),
+            check_over(StalenessFinding::Off),
+        ];
+
+        let (on_count, on_calls) = &logs[0];
+        assert_eq!(*on_count, 1, "the pinned document is stale when on");
+        assert!(
+            on_calls.iter().any(|c| c.starts_with("diff_stat:"))
+                && on_calls
+                    .iter()
+                    .any(|c| c.starts_with("read_commit_timestamp:")),
+            "the on case must actually cost git calls, or off proves nothing: {on_calls:?}"
+        );
+
+        let (off_count, off_calls) = &logs[1];
+        assert_eq!(*off_count, 0);
+        assert_eq!(
+            off_calls,
+            &Vec::<String>::new(),
+            "off is a gate before the walk, not a filter after it"
+        );
+    }
+
+    /// A document the author excused is not rot anyone is asking about, so it is
+    /// not banded either.
+    #[test]
+    fn a_validate_ignored_document_is_never_stale() {
+        let config = config_with(StalenessFinding::Warning);
+        let (_tmp, store) = store_from_with_config(
+            &[(
+                "docs/rfcs/RFC-004-excused.md",
+                &dated_doc("Excused", 200, "validate-ignore: true\n"),
+            )],
+            &config,
+        );
+
+        assert_eq!(findings(&config, &store), Vec::new());
+    }
+
+    #[test]
+    fn the_rule_is_registered() {
+        let config = config_with(StalenessFinding::Warning);
+        let (_tmp, store) = store_with_one_of_each_band(&config);
+
+        let result = validate_full(&store, &config);
+
+        assert!(
+            result.warnings.iter().any(|i| i.rule() == "stale"),
+            "no stale finding from validate_full"
+        );
+    }
+}
+
+#[cfg(test)]
 mod finding_shape_tests {
     use super::*;
+    use crate::engine::config::StalenessDriver;
+    use crate::engine::staleness::{Anchor, Drift};
 
     /// One sample per variant, maintained by hand.
     /// [`every_variant_has_a_sample`] is what keeps it honest: a new variant
@@ -3587,6 +3896,20 @@ mod finding_shape_tests {
             },
             ValidationIssue::GovernsUnowned {
                 file: PathBuf::from("src/engine/orphan.rs"),
+            },
+            ValidationIssue::Stale {
+                path: path(),
+                staleness: Staleness {
+                    band: Band::Stale,
+                    driver: StalenessDriver::Drift,
+                    anchor: Anchor::Sha("0123456".to_string()),
+                    age_days: 140,
+                    drift: Drift {
+                        files: 12,
+                        insertions: 310,
+                        deletions: 85,
+                    },
+                },
             },
         ]
     }

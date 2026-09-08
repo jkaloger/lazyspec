@@ -1,7 +1,7 @@
 ---
 title: Report stale documents as validation findings
 type: story
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-08
 tags: []

@@ -2,6 +2,7 @@ use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
 use crate::engine::store::Store;
+use crate::engine::validation::ValidationResult;
 use console::{colors_enabled, Style};
 
 fn success_message() -> String {
@@ -44,10 +45,10 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
     };
 
     if json {
-        let output = run_json(store, config, &gh_warnings);
+        let output = run_json(store, &result, &gh_warnings);
         println!("{}", output);
     } else {
-        let output = run_human(store, config, warnings, &gh_warnings);
+        let output = run_human(store, &result, warnings, &gh_warnings);
         if output.is_empty() {
             println!("{}", success_message());
         } else {
@@ -68,8 +69,10 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
 /// shape and one slug for all of them.
 pub const GH_AUTH_RULE: &str = "gh-auth";
 
-pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> String {
-    let result = store.validate_full(config);
+/// Renders the result [`run_full`] already computed. Both renders take it
+/// rather than a [`Config`] to validate against a second time: with the `stale`
+/// rule live, a re-validation is another `git diff` per pinned document.
+pub fn run_json(store: &Store, result: &ValidationResult, extra_warnings: &[String]) -> String {
     let errors: Vec<_> = result.errors.iter().map(|e| e.to_json()).collect();
     let mut warnings: Vec<_> = result.warnings.iter().map(|w| w.to_json()).collect();
     warnings.extend(
@@ -92,11 +95,10 @@ pub fn run_json(store: &Store, config: &Config, extra_warnings: &[String]) -> St
 
 pub fn run_human(
     store: &Store,
-    config: &Config,
+    result: &ValidationResult,
     show_warnings: bool,
     extra_warnings: &[String],
 ) -> String {
-    let result = store.validate_full(config);
     let mut output = String::new();
 
     for pe in store.parse_errors() {
@@ -120,6 +122,111 @@ pub fn run_human(
     }
 
     output
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+    use crate::engine::config::{StalenessConfig, StalenessFinding};
+    use chrono::{Duration, Utc};
+
+    /// One document per band, banded by the default `age` driver off its own
+    /// date -- so no git subprocess runs and the bands are the fixture's to
+    /// choose. Mirrors the engine's own stale fixture.
+    fn one_of_each_band(config: &Config) -> (tempfile::TempDir, Store) {
+        let dated = |title: &str, age_days: i64| {
+            let date = Utc::now().date_naive() - Duration::days(age_days);
+            format!(
+                "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: {date}\ntags: []\ngoverns: []\nrelated: []\n---\n\nbody\n"
+            )
+        };
+        crate::engine::store::test_support::store_from_with_config(
+            &[
+                ("docs/rfcs/RFC-001-fresh.md", &dated("Fresh", 10)),
+                ("docs/rfcs/RFC-002-aging.md", &dated("Aging", 100)),
+                ("docs/rfcs/RFC-003-stale.md", &dated("Stale", 200)),
+            ],
+            config,
+        )
+    }
+
+    fn config_with(finding: StalenessFinding) -> Config {
+        Config {
+            staleness: StalenessConfig {
+                finding,
+                ..StalenessConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    fn findings_of(output: &serde_json::Value, array: &str) -> Vec<serde_json::Value> {
+        output[array]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["rule"] == "stale")
+            .cloned()
+            .collect()
+    }
+
+    /// AC1: of three bands only `stale` is a finding, and the object it carries
+    /// is `rule`, the document's `path`, and the same `staleness` object
+    /// `show --json` prints -- flat beside them, not nested under the variant.
+    #[test]
+    fn run_json_gives_the_stale_document_its_rule_path_and_staleness() {
+        let config = config_with(StalenessFinding::Warning);
+        let (_tmp, store) = one_of_each_band(&config);
+        let result = store.validate_full(&config);
+
+        let output: serde_json::Value =
+            serde_json::from_str(&run_json(&store, &result, &[])).unwrap();
+
+        let stale = findings_of(&output, "warnings");
+        assert_eq!(stale.len(), 1, "got {:?}", output["warnings"]);
+        assert_eq!(stale[0]["path"], "docs/rfcs/RFC-003-stale.md");
+        assert_eq!(stale[0]["staleness"]["band"], "stale");
+        assert_eq!(stale[0]["staleness"]["driver"], "age");
+        assert_eq!(stale[0]["staleness"]["age_days"], 200);
+        assert_eq!(
+            stale[0]["staleness"]["drift"],
+            serde_json::json!({"files": 0, "insertions": 0, "deletions": 0})
+        );
+        assert!(findings_of(&output, "errors").is_empty());
+
+        let issue = result
+            .warnings
+            .iter()
+            .find(|w| w.rule() == "stale")
+            .expect("the stale document reaches validate_full");
+        assert_eq!(stale[0]["message"], issue.to_string());
+    }
+
+    /// AC2: `finding` picks the array and, with it, the exit code. Human render
+    /// too, because a warning-only run prints nothing without `--warnings`.
+    #[test]
+    fn the_configured_finding_severity_decides_the_array_and_the_exit_code() {
+        for (finding, array, exit) in [
+            (StalenessFinding::Warning, "warnings", 0),
+            (StalenessFinding::Error, "errors", 2),
+        ] {
+            let config = config_with(finding);
+            let (_tmp, store) = one_of_each_band(&config);
+            let result = store.validate_full(&config);
+
+            let output: serde_json::Value =
+                serde_json::from_str(&run_json(&store, &result, &[])).unwrap();
+            assert_eq!(
+                findings_of(&output, array).len(),
+                1,
+                "{finding:?}: {output}"
+            );
+
+            assert_eq!(run_full(&store, &config, true, false), exit, "{finding:?}");
+            assert!(run_human(&store, &result, true, &[])
+                .contains("docs/rfcs/RFC-003-stale.md is stale"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,7 +265,7 @@ mod tests {
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-        let output = run_human(&store, &config, true, &extra);
+        let output = run_human(&store, &store.validate_full(&config), true, &extra);
         assert!(output.contains("gh CLI is not installed"));
     }
 
@@ -168,7 +275,7 @@ mod tests {
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-        let output = run_human(&store, &config, false, &extra);
+        let output = run_human(&store, &store.validate_full(&config), false, &extra);
         assert!(!output.contains("gh CLI is not installed"));
     }
 
@@ -181,7 +288,7 @@ mod tests {
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh not installed warning".to_string()];
         let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &config, &extra)).unwrap();
+            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &extra)).unwrap();
 
         let warning = &output["warnings"][0];
         assert_eq!(warning["rule"], GH_AUTH_RULE);
@@ -205,7 +312,7 @@ mod tests {
         let store = Store::load(tmp.path(), &config).unwrap();
 
         let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &config, &[])).unwrap();
+            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &[])).unwrap();
 
         let finding = output["warnings"]
             .as_array()
@@ -244,7 +351,7 @@ mod tests {
         let store = Store::load(tmp.path(), &config).unwrap();
 
         let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &config, &[])).unwrap();
+            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &[])).unwrap();
 
         let unowned: Vec<&serde_json::Value> = output["warnings"]
             .as_array()

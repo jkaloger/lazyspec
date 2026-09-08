@@ -485,7 +485,10 @@ pub mod test_support {
         /// Makes `diff_stat` fail on every call, standing in for a range git
         /// cannot resolve.
         pub diff_stat_error: RefCell<Option<String>>,
-        pub calls: RefCell<Vec<String>>,
+        /// Shared, so a test that hands the mock to something owning it -- a
+        /// `Box<dyn GitRefOps>` on a validation rule -- can still read back what
+        /// was asked of git. See [`MockGitRefClient::call_log`].
+        pub calls: std::rc::Rc<RefCell<Vec<String>>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
         /// `calls` string log (parent SHA only) does not capture.
@@ -519,9 +522,14 @@ pub mod test_support {
                 renames_error: RefCell::new(None),
                 diff_stat_drift: RefCell::new(Drift::default()),
                 diff_stat_error: RefCell::new(None),
-                calls: RefCell::new(vec![]),
+                calls: std::rc::Rc::new(RefCell::new(vec![])),
                 committed_blobs: RefCell::new(vec![]),
             }
+        }
+
+        /// A handle on the call log that outlives handing the mock away.
+        pub fn call_log(&self) -> std::rc::Rc<RefCell<Vec<String>>> {
+            std::rc::Rc::clone(&self.calls)
         }
 
         pub fn with_resolve_result(self, result: Result<Option<String>>) -> Self {

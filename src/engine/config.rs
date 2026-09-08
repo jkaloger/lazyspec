@@ -1310,6 +1310,37 @@ pub struct StalenessConfig {
     pub aging: Days,
     #[serde(default = "default_stale")]
     pub stale: Days,
+    #[serde(default)]
+    pub finding: StalenessFinding,
+}
+
+/// Whether `validate` reports stale documents, and how loudly (RFC-069).
+///
+/// Three written values rather than `Option<Severity>`, because the default is
+/// on: absence already means `warning`, so opting out needs a spelling of its
+/// own. `[governs] unowned` can spell off as absence only because its default
+/// is off. [`severity`](StalenessFinding::severity) is what the rule reads, and
+/// that is the `Option<Severity>` RFC-069 §Interfaces publishes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StalenessFinding {
+    Off,
+    #[default]
+    Warning,
+    Error,
+}
+
+impl StalenessFinding {
+    /// The severity a stale document is reported at, or `None` when the check is
+    /// off -- which is a gate on computing staleness at all, not a filter over
+    /// findings already computed.
+    pub fn severity(&self) -> Option<Severity> {
+        match self {
+            StalenessFinding::Off => None,
+            StalenessFinding::Warning => Some(Severity::Warning),
+            StalenessFinding::Error => Some(Severity::Error),
+        }
+    }
 }
 
 pub fn default_aging() -> Days {
@@ -1325,6 +1356,7 @@ impl Default for StalenessConfig {
         StalenessConfig {
             aging: default_aging(),
             stale: default_stale(),
+            finding: StalenessFinding::default(),
         }
     }
 }
@@ -4060,6 +4092,40 @@ aging = "ninety"
             err.contains("90d") && err.contains("ninety"),
             "unhelpful error: {err}"
         );
+    }
+
+    // RFC-069 / STORY-273 AC3: absent means on, at warning. Off has to be
+    // written, because absence is already spent on the default.
+    #[test]
+    fn staleness_finding_defaults_to_warning() {
+        let config = Config::parse(TYPES).unwrap();
+        assert_eq!(config.staleness.finding, StalenessFinding::Warning);
+        assert_eq!(config.staleness.finding.severity(), Some(Severity::Warning));
+    }
+
+    #[test]
+    fn staleness_finding_parses_its_three_values() {
+        for (written, expected, severity) in [
+            ("error", StalenessFinding::Error, Some(Severity::Error)),
+            (
+                "warning",
+                StalenessFinding::Warning,
+                Some(Severity::Warning),
+            ),
+            ("off", StalenessFinding::Off, None),
+        ] {
+            let toml_str = format!("{TYPES}\n[staleness]\nfinding = \"{written}\"\n");
+            let config = Config::parse(&toml_str).unwrap();
+            assert_eq!(config.staleness.finding, expected, "for {written:?}");
+            assert_eq!(config.staleness.finding.severity(), severity);
+        }
+    }
+
+    #[test]
+    fn unknown_staleness_finding_is_a_config_error() {
+        let toml_str = format!("{TYPES}\n[staleness]\nfinding = \"loud\"\n");
+        let err = Config::parse(&toml_str).unwrap_err().to_string();
+        assert!(err.contains("loud"), "unhelpful error: {err}");
     }
 
     #[test]

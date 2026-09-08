@@ -53,7 +53,7 @@ fn load_with_edges(fixture: &crate::common::TestFixture, edges: &str) -> anyhow:
 
 fn validate_json(fixture: &crate::common::TestFixture, config: &Config) -> serde_json::Value {
     let store = Store::load(fixture.root(), config).expect("store loads");
-    let output = lazyspec::cli::validate::run_json(&store, config, &[]);
+    let output = lazyspec::cli::validate::run_json(&store, &store.validate_full(config), &[]);
     serde_json::from_str(&output).expect("validate --json emits JSON")
 }
 

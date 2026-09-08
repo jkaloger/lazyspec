@@ -84,7 +84,8 @@ fn validate_json_includes_parse_errors() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
+    let output =
+        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["parse_errors"].as_array().unwrap();
@@ -143,7 +144,8 @@ fn validate_duplicate_id_json_output() {
     fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
+    let output =
+        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -163,7 +165,12 @@ fn validate_duplicate_id_human_output() {
     fixture.write_rfc("RFC-040-two.md", "Two", "draft");
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_human(&store, &fixture.config(), true, &[]);
+    let output = lazyspec::cli::validate::run_human(
+        &store,
+        &store.validate_full(&fixture.config()),
+        true,
+        &[],
+    );
 
     assert!(
         output.contains("duplicate id: RFC-040"),
@@ -274,7 +281,8 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
     );
 
     let store = fixture.store();
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &[]);
+    let output =
+        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -608,7 +616,17 @@ fn one_error_one_warning() -> (crate::common::TestFixture, Config) {
     fixture.write_rfc("RFC-030-alpha.md", "Alpha", "draft");
     fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
     fixture.write_story("STORY-001-unlinked.md", "Unlinked", "draft", None);
-    (fixture, config_with_starter_edges())
+    // Staleness off, because these tests zip the arrays finding by finding and
+    // the fixture's date is arbitrary: on, every document would age into a
+    // second warning (RFC-069) on a wall clock the test does not control.
+    let config = Config {
+        staleness: lazyspec::engine::config::StalenessConfig {
+            finding: lazyspec::engine::config::StalenessFinding::Off,
+            ..Default::default()
+        },
+        ..config_with_starter_edges()
+    };
+    (fixture, config)
 }
 
 // AC1 + AC2: each finding is an object whose `rule` is the variant's slug and
@@ -619,7 +637,7 @@ fn validate_json_findings_carry_the_rule_slug_and_the_rendered_message() {
     let store = fixture.store_with(&config);
     let result = store.validate_full(&config);
 
-    let output = lazyspec::cli::validate::run_json(&store, &config, &[]);
+    let output = lazyspec::cli::validate::run_json(&store, &result, &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     for (key, issues) in [("errors", &result.errors), ("warnings", &result.warnings)] {
@@ -642,7 +660,7 @@ fn validate_json_findings_carry_the_rule_slug_and_the_rendered_message() {
 fn validate_json_findings_carry_the_variants_own_fields() {
     let (fixture, config) = one_error_one_warning();
     let store = fixture.store_with(&config);
-    let output = lazyspec::cli::validate::run_json(&store, &config, &[]);
+    let output = lazyspec::cli::validate::run_json(&store, &store.validate_full(&config), &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let error = &parsed["errors"][0];
@@ -667,7 +685,8 @@ fn validate_json_gives_a_gh_auth_warning_the_same_object_shape() {
     let fixture = crate::common::TestFixture::new();
     let store = fixture.store();
     let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-    let output = lazyspec::cli::validate::run_json(&store, &fixture.config(), &extra);
+    let output =
+        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &extra);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["warnings"][0]["rule"], "gh-auth", "got: {output}");
@@ -680,7 +699,8 @@ fn validate_json_gives_a_gh_auth_warning_the_same_object_shape() {
 fn validate_human_output_is_unchanged_by_the_finding_object_shape() {
     let (fixture, config) = one_error_one_warning();
     let store = fixture.store_with(&config);
-    let output = lazyspec::cli::validate::run_human(&store, &config, true, &[]);
+    let output =
+        lazyspec::cli::validate::run_human(&store, &store.validate_full(&config), true, &[]);
 
     assert_eq!(
         output,
