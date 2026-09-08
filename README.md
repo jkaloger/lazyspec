@@ -616,7 +616,7 @@ A config gaining its first `[[edges]]` block gets it directly after the `[[relat
 
 ### Inspecting and editing the config
 
-`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape.
+`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape. Each type in the JSON carries `resolved_dir`, the absolute directory its documents are read from: `dir` joined to the project root and normalised for a `filesystem` type, or `.lazyspec/cache/<name>` for a cache-backed store, which ignores `dir`.
 
 ```sh
 lazyspec config --json                      # print the resolved config as JSON
@@ -679,6 +679,8 @@ Every `[[types]]` block has a `store` (default `filesystem`) that decides where 
 | `github-projects`      | Existing Projects v2 boards (associate only)          | `gh auth login`, `-s project` |
 | `git-ref`              | Docs in git custom refs, pushed live to the remote    | a writable git remote         |
 | `clickup-tasks`        | Tasks in one bound ClickUp List (read/write)          | `lazyspec setup clickup`      |
+
+A `filesystem` type's `dir` may point outside the project, either as an absolute path or as a relative path that escapes the root (`../shared-specs`). Both spell the same location, so `config --json` reports one `resolved_dir` for it and `list`/`show` report its documents as normalised absolute paths whatever the spelling. If an absolute `dir` does not exist, every command that reads the type prints a `warning:` on stderr naming the resolved path; a missing relative `dir` is skipped silently, since an unpopulated local docs dir between `init` and the first `create` is normal.
 
 Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`.
 

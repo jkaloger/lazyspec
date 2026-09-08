@@ -3705,6 +3705,7 @@ impl App {
 
     pub fn total_warnings_count(&self) -> usize {
         self.store.parse_errors().len()
+            + self.store.warnings().len()
             + self.validation_errors.len()
             + self.validation_warnings.len()
     }
@@ -4428,6 +4429,7 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
@@ -4779,6 +4781,7 @@ mod tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),

@@ -1,7 +1,9 @@
 use crate::common::TestFixture;
+use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::document::{DocType, Status};
-use lazyspec::engine::store::{extract_id_from_name, Filter, ResolveError};
-use std::path::PathBuf;
+use lazyspec::engine::store::{doc_root, extract_id_from_name, Filter, ResolveError};
+use std::path::{Component, PathBuf};
+use tempfile::TempDir;
 
 fn setup_fixture() -> TestFixture {
     let fixture = TestFixture::new();
@@ -935,4 +937,131 @@ fn extract_id_folder_based_sqids_via_store_load() {
     let doc = doc.unwrap();
     assert_eq!(doc.title, "Folder Doc");
     assert_eq!(doc.id, "RFC-a1b");
+}
+
+// STORY-283 AC3/AC5: one path shape per type whatever the `dir` spelling.
+
+const SHARED_DOC: &str =
+    "---\ntitle: \"Shared\"\ntype: shared\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n";
+
+/// A `TempDir` beside the fixture's project root, so `../<name>` from the
+/// project resolves to it. Holds one flat doc, one folder doc and one virtual
+/// folder, so every `strip_prefix` site in the loader sees it.
+fn shared_sibling() -> TempDir {
+    let shared = TempDir::new().unwrap();
+    std::fs::write(shared.path().join("SHARED-001-flat.md"), SHARED_DOC).unwrap();
+    std::fs::create_dir_all(shared.path().join("SHARED-002-folder")).unwrap();
+    std::fs::write(shared.path().join("SHARED-002-folder/index.md"), SHARED_DOC).unwrap();
+    std::fs::create_dir_all(shared.path().join("SHARED-003-virtual")).unwrap();
+    std::fs::write(
+        shared.path().join("SHARED-003-virtual/notes.md"),
+        SHARED_DOC,
+    )
+    .unwrap();
+    shared
+}
+
+fn shared_type(dir: &str, subdirectory: bool) -> TypeDef {
+    TypeDef {
+        dir: dir.to_string(),
+        subdirectory,
+        ..TypeDef::test_fixture("shared", StoreBackend::Filesystem)
+    }
+}
+
+fn config_with_type(type_def: TypeDef) -> Config {
+    let mut config = Config::default();
+    config.documents.types.push(type_def);
+    config
+}
+
+fn relative_spelling(project: &TestFixture, shared: &TempDir) -> String {
+    let sibling = shared.path().file_name().unwrap().to_string_lossy();
+    assert_eq!(
+        project.root().parent(),
+        shared.path().parent(),
+        "both temp dirs must share a parent for `..` to reach the sibling"
+    );
+    format!("../{sibling}")
+}
+
+fn shared_paths(project: &TestFixture, type_def: TypeDef) -> Vec<PathBuf> {
+    let store = project.store_with(&config_with_type(type_def));
+    let filter = Filter {
+        doc_type: Some(DocType::new("shared")),
+        ..Default::default()
+    };
+    let mut paths: Vec<PathBuf> = store.list(&filter).iter().map(|d| d.path.clone()).collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn escaping_relative_dir_lists_the_same_absolute_paths_as_the_absolute_spelling() {
+    let project = TestFixture::new();
+    let shared = shared_sibling();
+    let relative = relative_spelling(&project, &shared);
+    let absolute = shared.path().to_string_lossy().to_string();
+
+    for subdirectory in [false, true] {
+        let via_relative = shared_paths(&project, shared_type(&relative, subdirectory));
+        let via_absolute = shared_paths(&project, shared_type(&absolute, subdirectory));
+
+        assert_eq!(via_relative.len(), 4, "flat, folder, child, virtual parent");
+        assert_eq!(via_relative, via_absolute, "subdirectory = {subdirectory}");
+        for path in &via_relative {
+            assert!(path.is_absolute(), "{} is not absolute", path.display());
+            assert!(
+                !path.components().any(|c| c == Component::ParentDir),
+                "{} carries `..`",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn every_list_and_get_path_resolves_under_its_types_doc_root() {
+    let project = TestFixture::new();
+    let shared = shared_sibling();
+    project.write_doc(
+        "docs/rfcs/RFC-001-local.md",
+        "---\ntitle: \"Local\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\n",
+    );
+    let absolute_dir = TempDir::new().unwrap();
+    std::fs::write(
+        absolute_dir.path().join("EXTERNAL-001-abs.md"),
+        SHARED_DOC.replace("type: shared", "type: external"),
+    )
+    .unwrap();
+
+    let mut config = config_with_type(shared_type(&relative_spelling(&project, &shared), true));
+    config.documents.types.push(TypeDef {
+        dir: absolute_dir.path().to_string_lossy().to_string(),
+        ..TypeDef::test_fixture("external", StoreBackend::Filesystem)
+    });
+    let store = project.store_with(&config);
+
+    for type_def in &config.documents.types {
+        let filter = Filter {
+            doc_type: Some(DocType::new(&type_def.name)),
+            ..Default::default()
+        };
+        let listed = store.list(&filter);
+        if type_def.name == "rfc" || type_def.name == "shared" || type_def.name == "external" {
+            assert!(!listed.is_empty(), "{} lists nothing", type_def.name);
+        }
+        let root_for_type = doc_root(project.root(), type_def);
+        for meta in listed {
+            let fetched = store.get(&meta.path).expect("listed path is gettable");
+            for path in [&meta.path, &fetched.path] {
+                assert!(
+                    project.root().join(path).starts_with(&root_for_type),
+                    "{} is not under {}",
+                    path.display(),
+                    root_for_type.display()
+                );
+            }
+        }
+    }
 }

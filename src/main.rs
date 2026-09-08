@@ -180,7 +180,7 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let pb = lazyspec::cli::spinner::op_spinner(format!("creating {}", doc_type), json);
             if json {
                 let result = lazyspec::cli::create::run_json_with_body(
@@ -244,7 +244,7 @@ fn main() -> anyhow::Result<()> {
             status,
             json,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             lazyspec::cli::list::run(&store, doc_type.as_deref(), status.as_deref(), json);
         }
         Some(Commands::Show {
@@ -255,7 +255,7 @@ fn main() -> anyhow::Result<()> {
             open,
         }) => {
             refresh_github_cache(&cwd, &config);
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             if open {
                 lazyspec::cli::show::run_open(&store, &id, &config, &cwd, json)?;
             } else if json {
@@ -298,7 +298,7 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {
@@ -326,7 +326,7 @@ fn main() -> anyhow::Result<()> {
                 &GitCli,
             )?;
             if json {
-                let store = Store::load(&cwd, &config)?;
+                let store = load_store(&cwd, &config)?;
                 let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
                 let mut json_val = lazyspec::cli::json::doc_to_json(doc);
                 lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
@@ -339,7 +339,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Delete { path, json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             let push_outcome =
                 lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
@@ -365,7 +365,7 @@ fn main() -> anyhow::Result<()> {
             to,
             json,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let outcome = lazyspec::cli::link::link_with_config(
                 &cwd,
                 &store,
@@ -402,7 +402,7 @@ fn main() -> anyhow::Result<()> {
             to,
             json,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let outcome = lazyspec::cli::link::unlink_with_config(
                 &cwd,
                 &store,
@@ -435,7 +435,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Tag { action }) => match action {
             TagAction::Add { id, tags, json } => {
-                let store = Store::load(&cwd, &config)?;
+                let store = load_store(&cwd, &config)?;
                 let push_outcome = lazyspec::cli::tag::tag_add_with_config(
                     &cwd,
                     &store,
@@ -445,7 +445,7 @@ fn main() -> anyhow::Result<()> {
                     Some(&config),
                 )?;
                 if json {
-                    let store = Store::load(&cwd, &config)?;
+                    let store = load_store(&cwd, &config)?;
                     let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
                     let mut json_val = lazyspec::cli::json::doc_to_json(doc);
                     lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
@@ -458,7 +458,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             TagAction::Remove { id, tags, json } => {
-                let store = Store::load(&cwd, &config)?;
+                let store = load_store(&cwd, &config)?;
                 let push_outcome = lazyspec::cli::tag::tag_remove_with_config(
                     &cwd,
                     &store,
@@ -468,7 +468,7 @@ fn main() -> anyhow::Result<()> {
                     Some(&config),
                 )?;
                 if json {
-                    let store = Store::load(&cwd, &config)?;
+                    let store = load_store(&cwd, &config)?;
                     let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &id)?;
                     let mut json_val = lazyspec::cli::json::doc_to_json(doc);
                     lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
@@ -482,7 +482,7 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Some(Commands::Ignore { path, json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::ignore::ignore(&cwd, &store, &path, &fs)?;
             if json {
@@ -499,7 +499,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Unignore { path, json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
             lazyspec::cli::ignore::unignore(&cwd, &store, &path, &fs)?;
             if json {
@@ -520,15 +520,15 @@ fn main() -> anyhow::Result<()> {
             doc_type,
             json,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             lazyspec::cli::search::run(&store, &query, doc_type.as_deref(), json, &fs);
         }
         Some(Commands::Why { path, json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             lazyspec::cli::why::run(&store, &path, json, &GitCli);
         }
         Some(Commands::Status { json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             if json {
                 let gh = GhCli::new();
                 println!(
@@ -551,7 +551,7 @@ fn main() -> anyhow::Result<()> {
             json,
         }) => {
             refresh_github_cache(&cwd, &config);
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             match id {
                 Some(id) => {
                     if json {
@@ -580,7 +580,7 @@ fn main() -> anyhow::Result<()> {
             tags,
             json,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             if json {
                 let output = lazyspec::cli::convention::run_json(
                     &store,
@@ -610,7 +610,7 @@ fn main() -> anyhow::Result<()> {
             config: _,
             governs,
         }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let fs = lazyspec::engine::fs::RealFileSystem;
             if governs {
                 let exit_code = lazyspec::cli::fix::run_governs(
@@ -648,14 +648,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Validate { json, warnings }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
         }
         Some(Commands::Pin { id, json }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             lazyspec::cli::pin::run(&store, &config, &GitCli, &fs, &id, json)?;
         }
         Some(Commands::Reservations { command }) => match command {
@@ -663,7 +663,7 @@ fn main() -> anyhow::Result<()> {
                 lazyspec::cli::reservations::run_list(&cwd, &config, json)?;
             }
             ReservationsCommand::Prune { dry_run, json } => {
-                let store = Store::load(&cwd, &config)?;
+                let store = load_store(&cwd, &config)?;
                 let pb = lazyspec::cli::spinner::op_spinner("pruning reservations", json);
                 let result = lazyspec::cli::reservations::run_prune(
                     &cwd,
@@ -686,7 +686,7 @@ fn main() -> anyhow::Result<()> {
             use lazyspec::cli::config::ConfigCommand;
             match command {
                 None | Some(ConfigCommand::Show { .. }) => {
-                    println!("{}", lazyspec::cli::config::run_show_json(&config)?);
+                    println!("{}", lazyspec::cli::config::run_show_json(&cwd, &config)?);
                 }
                 Some(ConfigCommand::Schema { .. }) => {
                     // Dispatched before `Config::load` above; kept for exhaustiveness.
@@ -892,7 +892,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Provenance { command }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let mut stdout = std::io::stdout();
             match command {
                 ProvenanceCommand::Add { id, citation, json } => {
@@ -924,7 +924,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "web")]
         Some(Commands::Serve { port }) => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             let coords = lazyspec::engine::github_url::resolve_repo_coords(&config, &cwd);
             if coords.is_none() {
                 eprintln!("lazyspec serve: repo coordinates unresolved (no origin remote or [web] override); GitHub deep-links disabled");
@@ -947,12 +947,22 @@ fn main() -> anyhow::Result<()> {
             lazyspec::web::serve(state, port)?;
         }
         None => {
-            let store = Store::load(&cwd, &config)?;
+            let store = load_store(&cwd, &config)?;
             lazyspec::tui::run(store, &config)?;
         }
     }
 
     Ok(())
+}
+
+/// `Store::load` plus its load-time warnings on stderr, so `--json` stdout
+/// stays parseable (STORY-283 AC6).
+fn load_store(cwd: &std::path::Path, config: &Config) -> anyhow::Result<Store> {
+    let store = Store::load(cwd, config)?;
+    for warning in store.warnings() {
+        eprintln!("warning: {}", warning);
+    }
+    Ok(store)
 }
 
 /// Refreshes stale github-issues cache entries. Failures are non-fatal and print warnings to stderr.

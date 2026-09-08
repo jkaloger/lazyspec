@@ -266,7 +266,7 @@ pub fn doc_count_component(app: &App) -> Option<Span<'static>> {
 }
 
 pub fn warnings_component(app: &App) -> Option<Span<'static>> {
-    let count = app.validation_warnings.len();
+    let count = app.validation_warnings.len() + app.store.warnings().len();
     if count == 0 {
         return None;
     }

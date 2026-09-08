@@ -1,7 +1,7 @@
 ---
 title: Resolve every type's doc root to one path shape
 type: story
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
@@ -9,6 +9,7 @@ related:
 - implements: RFC-072
 - blocks: STORY-281
 - blocks: STORY-284
+reviewed: ead6302e2ac8d5f3cfc0277ede6907ec26112f68
 ---
 
 ## Context

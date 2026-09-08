@@ -1363,8 +1363,9 @@ impl Checker for TypeConstraintChecker {
                 doc_type: Some(DocType::new(&type_def.name)),
                 ..Default::default()
             });
+            let parent_root = super::store::doc_root(&store.root, parent_type_def);
             for doc in docs {
-                if !doc.path.starts_with(&parent_type_def.dir) {
+                if !store.root.join(&doc.path).starts_with(&parent_root) {
                     issues.push((
                         Severity::Error,
                         ValidationIssue::ParentTypeViolation {
@@ -1745,6 +1746,7 @@ mod attr_schema_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             // No hierarchy declared, in either place that declares one: every
             // assertion in this module is about one document's attributes.
             traversal_walk: TraversalWalk::default(),
@@ -1844,6 +1846,7 @@ mod attr_schema_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             // As `store_with` above: no hierarchy, none read.
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
@@ -1997,6 +2000,7 @@ mod unknown_relationship_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             // No hierarchy declared: this module asserts only on the
             // relationship vocabulary a document's `related` keys are checked
             // against, which no traversal role takes part in.
@@ -2321,6 +2325,7 @@ mod edge_tests {
             children: HashMap::new(),
             parent_of: HashMap::new(),
             parse_errors: Vec::new(),
+            warnings: Vec::new(),
             traversal_walk: TraversalWalk::default(),
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),

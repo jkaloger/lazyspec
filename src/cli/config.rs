@@ -5,6 +5,7 @@ use crate::engine::config::{
 };
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::fs::FileSystem;
+use crate::engine::store::doc_root;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use std::path::Path;
@@ -204,12 +205,29 @@ pub struct EdgeEdit {
 /// `Config::edges` is skipped when empty so the TOML writer never emits a bare
 /// `edges = []` above the tables, but the JSON contract is an always-present
 /// array: an agent reading `edges` should never have to branch on null.
-pub fn run_show_json(config: &Config) -> Result<String> {
+///
+/// Each type also carries `resolved_dir`, the engine's [`doc_root`] against
+/// `root` (STORY-283). It is injected here rather than held on `TypeDef`, which
+/// round-trips to `.lazyspec.toml` through every config writer.
+pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
     let mut value = serde_json::to_value(config)?;
     if let Some(object) = value.as_object_mut() {
         object
             .entry("edges")
             .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    if let Some(types) = value
+        .get_mut("types")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for (type_def, entry) in config.documents.types.iter().zip(types) {
+            if let Some(object) = entry.as_object_mut() {
+                object.insert(
+                    "resolved_dir".to_string(),
+                    serde_json::to_value(doc_root(root, type_def))?,
+                );
+            }
+        }
     }
     Ok(serde_json::to_string_pretty(&value)?)
 }
@@ -1251,7 +1269,7 @@ inverse = "implemented-by"
 
     fn show(src: &str) -> Value {
         let config = Config::parse(src).unwrap();
-        serde_json::from_str(&run_show_json(&config).unwrap()).unwrap()
+        serde_json::from_str(&run_show_json(Path::new("/a/b"), &config).unwrap()).unwrap()
     }
 
     fn type_named<'a>(json: &'a Value, name: &str) -> &'a Value {
@@ -1291,6 +1309,56 @@ inverse = "implemented-by"
     #[test]
     fn show_json_emits_an_empty_edge_array_when_none_are_declared() {
         assert_eq!(show(SRC)["edges"], serde_json::json!([]));
+    }
+
+    // STORY-283 AC1/AC2/AC4: every type carries `resolved_dir`, the engine's
+    // `doc_root` against the project root, beside its raw `dir`.
+    #[test]
+    fn show_json_emits_resolved_dir_beside_raw_dir_for_every_type() {
+        let src = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "/tmp/x/specs"
+prefix = "SPEC"
+
+[[types]]
+name = "shared"
+plural = "shared"
+dir = "../shared-specs"
+prefix = "SHARED"
+
+[[types]]
+name = "issue"
+plural = "issues"
+dir = "docs/issues"
+prefix = "ISSUE"
+store = "github-issues"
+
+[github]
+repo = "octo-org/repo"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+"#;
+        let json = show(src);
+        for (name, dir, resolved) in [
+            ("rfc", "docs/rfcs", "/a/b/docs/rfcs"),
+            ("spec", "/tmp/x/specs", "/tmp/x/specs"),
+            ("shared", "../shared-specs", "/a/shared-specs"),
+            ("issue", "docs/issues", "/a/b/.lazyspec/cache/issue"),
+        ] {
+            let ty = type_named(&json, name);
+            assert_eq!(ty["dir"], dir, "raw dir survives for {name}");
+            assert_eq!(ty["resolved_dir"], resolved, "resolved_dir for {name}");
+        }
     }
 
     // AC1: every type serializes with all three STORY-145 axes, and the lifecycle
@@ -1370,8 +1438,8 @@ inverse = "implemented-by"
         assert_eq!(spike["intent"], "throwaway exploration");
         assert_eq!(spike["authorship"], "generated");
 
-        let first = run_show_json(&Config::parse(&after).unwrap()).unwrap();
-        let second = run_show_json(&Config::parse(&after).unwrap()).unwrap();
+        let first = run_show_json(Path::new("/a/b"), &Config::parse(&after).unwrap()).unwrap();
+        let second = run_show_json(Path::new("/a/b"), &Config::parse(&after).unwrap()).unwrap();
         assert_eq!(first, second);
     }
 

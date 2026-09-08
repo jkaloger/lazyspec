@@ -4,7 +4,7 @@ mod loader;
 pub use links::Link;
 
 use crate::engine::cache_lock::CacheLock;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::document::{DocMeta, DocType, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
@@ -38,6 +38,10 @@ pub struct Store {
     pub(crate) children: HashMap<PathBuf, Vec<PathBuf>>,
     pub(crate) parent_of: HashMap<PathBuf, PathBuf>,
     pub(crate) parse_errors: Vec<ParseError>,
+    /// Load-time conditions that are not parse errors and not fatal: today, an
+    /// absolute external `dir` that does not exist (STORY-283 AC6). The engine
+    /// records them; CLI and TUI print them.
+    pub(crate) warnings: Vec<String>,
     /// Which (source type, relationship, target type) triples form the
     /// parent-child DAG walked by
     /// [`resolve_chain`](crate::engine::context::resolve_chain) and
@@ -106,6 +110,21 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
         .map(|(entry, _)| entry.as_str())
 }
 
+/// Where a type's documents live, as an absolute path with no `..` (RFC-072
+/// "Resolution, not a second store"). `root` is absolute, and `Path::join`
+/// discards it for an absolute `dir`, so every `filesystem` spelling resolves
+/// to the same shape. Cache-backed stores ignore `dir` entirely.
+pub fn doc_root(root: &Path, type_def: &TypeDef) -> PathBuf {
+    match type_def.store {
+        StoreBackend::Filesystem => normalize(&root.join(&type_def.dir)),
+        StoreBackend::GithubIssues
+        | StoreBackend::GithubMilestones
+        | StoreBackend::GithubProjects
+        | StoreBackend::GitRef
+        | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
+    }
+}
+
 impl Store {
     pub fn load(root: &Path, config: &Config) -> Result<Self> {
         let git_cli = crate::engine::git_ref::GitCli;
@@ -122,16 +141,10 @@ impl Store {
         let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut parse_errors: Vec<ParseError> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
         for type_def in &config.documents.types {
-            let full_path = match type_def.store {
-                StoreBackend::GithubIssues
-                | StoreBackend::GithubMilestones
-                | StoreBackend::GithubProjects
-                | StoreBackend::GitRef
-                | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
-                _ => root.join(&type_def.dir),
-            };
+            let full_path = doc_root(root, type_def);
 
             if !fs.exists(&full_path) {
                 if type_def.store == StoreBackend::GitRef {
@@ -140,6 +153,17 @@ impl Store {
                     }
                 }
                 if !fs.exists(&full_path) {
+                    // A relative dir that is missing is an unpopulated local
+                    // docs dir; an absolute one that is missing is a typo.
+                    if type_def.store == StoreBackend::Filesystem
+                        && Path::new(&type_def.dir).is_absolute()
+                    {
+                        warnings.push(format!(
+                            "type `{}` dir does not exist: {}",
+                            type_def.name,
+                            full_path.display()
+                        ));
+                    }
                     continue;
                 }
             } else if type_def.store == StoreBackend::GitRef {
@@ -183,6 +207,7 @@ impl Store {
             children,
             parent_of,
             parse_errors,
+            warnings,
             traversal_walk: TraversalWalk::from_config(config),
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: normalize(&root.join(&config.governs.root)),
@@ -199,6 +224,10 @@ impl Store {
 
     pub fn parse_errors(&self) -> &[ParseError] {
         &self.parse_errors
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Every document whose `governs` globs match `path`, paired with the glob
@@ -1154,6 +1183,58 @@ mod tests {
         assert_eq!(doc2.unwrap().id, "RFC-002");
     }
 
+    fn load_single_missing_type(type_def: TypeDef) -> Store {
+        let mut config = Config::default();
+        config.documents.types = vec![type_def];
+        Store::load_with_fs(
+            Path::new("/fake/root"),
+            &config,
+            &InMemoryFileSystem::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    // STORY-283 AC6: a typo in an absolute external `dir` is not an empty
+    // directory. The engine records it; CLI and TUI decide how to show it.
+    #[test]
+    fn missing_absolute_dir_records_one_warning_naming_the_resolved_path() {
+        let store = load_single_missing_type(TypeDef {
+            dir: "/shared/../elsewhere/specs".to_string(),
+            ..TypeDef::test_fixture("spec", StoreBackend::Filesystem)
+        });
+
+        assert!(store.docs.is_empty());
+        assert_eq!(store.warnings().len(), 1);
+        assert!(
+            store.warnings()[0].contains("/elsewhere/specs"),
+            "warning names the resolved path: {}",
+            store.warnings()[0]
+        );
+    }
+
+    // STORY-283 AC7: an unpopulated local docs dir between `init` and the
+    // first `create` stays silent.
+    #[test]
+    fn missing_relative_dir_records_no_warning() {
+        let store =
+            load_single_missing_type(TypeDef::test_fixture("spec", StoreBackend::Filesystem));
+
+        assert!(store.docs.is_empty());
+        assert!(store.warnings().is_empty());
+    }
+
+    #[test]
+    fn missing_cache_dir_records_no_warning() {
+        let store = load_single_missing_type(TypeDef {
+            dir: "/shared/specs".to_string(),
+            ..TypeDef::test_fixture("ticket", StoreBackend::ClickupTasks)
+        });
+
+        assert!(store.docs.is_empty());
+        assert!(store.warnings().is_empty());
+    }
+
     /// Build an in-memory store of RFC documents from `(filename, title, tags, body)`
     /// tuples, so the fuzzy `search` tests can control every match surface.
     fn search_store(entries: &[(&str, &str, &[&str], &str)]) -> (Store, InMemoryFileSystem) {
@@ -1402,6 +1483,52 @@ mod tests {
             store.search("fuzzy", &fs).is_empty(),
             "the old body token no longer matches after reload"
         );
+    }
+
+    // STORY-283 AC1/AC2: one resolution for every `filesystem` spelling, absolute
+    // and without `..`, so a consumer never re-derives lazyspec's path arithmetic.
+    #[test]
+    fn doc_root_resolves_every_filesystem_spelling_to_an_absolute_path() {
+        let root = Path::new("/a/b");
+        let filesystem = |dir: &str| TypeDef {
+            dir: dir.to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        };
+
+        assert_eq!(
+            doc_root(root, &filesystem("docs/rfcs")),
+            PathBuf::from("/a/b/docs/rfcs")
+        );
+        assert_eq!(
+            doc_root(root, &filesystem("/tmp/x/specs")),
+            PathBuf::from("/tmp/x/specs")
+        );
+        assert_eq!(
+            doc_root(root, &filesystem("../shared-specs")),
+            PathBuf::from("/a/shared-specs")
+        );
+    }
+
+    // STORY-283 AC4: cache-backed stores resolve to the cache and ignore `dir`.
+    #[test]
+    fn doc_root_ignores_dir_for_cache_backed_stores() {
+        let root = Path::new("/a/b");
+        for store in [
+            StoreBackend::GithubIssues,
+            StoreBackend::GithubMilestones,
+            StoreBackend::GithubProjects,
+            StoreBackend::GitRef,
+            StoreBackend::ClickupTasks,
+        ] {
+            let type_def = TypeDef {
+                dir: "/nonsense/../elsewhere".to_string(),
+                ..TypeDef::test_fixture("ticket", store)
+            };
+            assert_eq!(
+                doc_root(root, &type_def),
+                PathBuf::from("/a/b/.lazyspec/cache/ticket")
+            );
+        }
     }
 
     fn github_issues_config() -> Config {

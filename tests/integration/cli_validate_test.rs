@@ -94,6 +94,33 @@ fn validate_json_includes_parse_errors() {
     assert!(errors[0]["error"].is_string());
 }
 
+// STORY-283 AC6: a missing absolute `dir` is a load-time warning on the store,
+// not a validation issue. `validate --json` stays parseable and carries no row
+// for it; the exit code is unaffected.
+#[test]
+fn validate_json_carries_no_row_for_a_missing_absolute_dir() {
+    let fixture = crate::common::TestFixture::new();
+    fixture.write_rfc("RFC-001.md", "Good", "draft");
+    let missing = fixture.root().join("nowhere/specs");
+    let config = config_with_extra_types(vec![TypeDef {
+        dir: missing.to_string_lossy().to_string(),
+        ..TypeDef::test_fixture("external", Default::default())
+    }]);
+
+    let store = fixture.store_with(&config);
+    let result = store.validate_full(&config);
+    let output = lazyspec::cli::validate::run_json(&store, &result, &[]);
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(
+        !output.contains(&*missing.to_string_lossy()),
+        "validate output names the missing dir: {output}"
+    );
+    assert!(parsed["parse_errors"].as_array().unwrap().is_empty());
+    assert_eq!(store.warnings().len(), 1);
+}
+
 #[test]
 fn validate_passes_linked_iteration() {
     let fixture = crate::common::TestFixture::new();
@@ -454,6 +481,88 @@ fn parent_type_outside_dir_error() {
             assert_eq!(type_name, "dictum");
             assert_eq!(expected_dir, "docs/convention");
             assert!(path.to_string_lossy().contains("DICT-001"));
+        }
+        _ => unreachable!(),
+    }
+}
+
+// STORY-283 AC8: containment compares resolved paths, so a parent whose `dir`
+// lives outside the project raises no false violation.
+
+const EXTERNAL_CONV: &str =
+    "---\ntitle: \"Main Convention\"\ntype: convention\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n";
+const EXTERNAL_DICT: &str =
+    "---\ntitle: \"A Dictum\"\ntype: dictum\nstatus: draft\nauthor: test\ndate: 2026-01-01\ntags: []\n---\n";
+
+fn parent_type_violations(
+    fixture: &crate::common::TestFixture,
+    config: &Config,
+) -> Vec<ValidationIssue> {
+    let store = lazyspec::engine::store::Store::load(fixture.root(), config).unwrap();
+    store
+        .validate_full(config)
+        .errors
+        .into_iter()
+        .filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. }))
+        .collect()
+}
+
+#[test]
+fn parent_type_external_absolute_dir_no_error() {
+    let fixture = crate::common::TestFixture::new();
+    let shared = tempfile::TempDir::new().unwrap();
+    let absolute = shared.path().to_string_lossy().to_string();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", &absolute, "CONV"),
+        child_type("dictum", &absolute, "DICT", "convention"),
+    ]);
+    std::fs::write(shared.path().join("CONV-001-main.md"), EXTERNAL_CONV).unwrap();
+    std::fs::write(shared.path().join("DICT-001-child.md"), EXTERNAL_DICT).unwrap();
+
+    assert!(parent_type_violations(&fixture, &config).is_empty());
+}
+
+#[test]
+fn parent_type_external_sibling_dir_no_error() {
+    let fixture = crate::common::TestFixture::new();
+    let shared = tempfile::TempDir::new().unwrap();
+    assert_eq!(
+        fixture.root().parent(),
+        shared.path().parent(),
+        "both temp dirs must share a parent for `..` to reach the sibling"
+    );
+    let sibling = format!(
+        "../{}",
+        shared.path().file_name().unwrap().to_string_lossy()
+    );
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", &sibling, "CONV"),
+        child_type("dictum", &sibling, "DICT", "convention"),
+    ]);
+    std::fs::write(shared.path().join("CONV-001-main.md"), EXTERNAL_CONV).unwrap();
+    std::fs::write(shared.path().join("DICT-001-child.md"), EXTERNAL_DICT).unwrap();
+
+    assert!(parent_type_violations(&fixture, &config).is_empty());
+}
+
+#[test]
+fn parent_type_external_dir_local_child_error_names_raw_dir() {
+    let fixture = crate::common::TestFixture::new();
+    let shared = tempfile::TempDir::new().unwrap();
+    let absolute = shared.path().to_string_lossy().to_string();
+    let config = config_with_extra_types(vec![
+        singleton_type("convention", &absolute, "CONV"),
+        child_type("dictum", "docs/dictums", "DICT", "convention"),
+    ]);
+    std::fs::write(shared.path().join("CONV-001-main.md"), EXTERNAL_CONV).unwrap();
+    std::fs::create_dir_all(fixture.root().join("docs/dictums")).unwrap();
+    fixture.write_doc("docs/dictums/DICT-001-stray.md", EXTERNAL_DICT);
+
+    let violations = parent_type_violations(&fixture, &config);
+    assert_eq!(violations.len(), 1);
+    match &violations[0] {
+        ValidationIssue::ParentTypeViolation { expected_dir, .. } => {
+            assert_eq!(expected_dir, &absolute);
         }
         _ => unreachable!(),
     }

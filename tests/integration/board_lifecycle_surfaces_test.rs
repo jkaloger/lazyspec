@@ -95,7 +95,7 @@ fn board_bound_project() -> TempDir {
 fn config_json_reports_the_board_derived_lifecycle_in_board_order() {
     let config = Config::parse(BOARD_BOUND_CONFIG).unwrap();
 
-    let json = lazyspec::cli::config::run_show_json(&config).unwrap();
+    let json = lazyspec::cli::config::run_show_json(std::path::Path::new("/a/b"), &config).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     let ticket = parsed["types"]

@@ -968,6 +968,20 @@ pub fn draw_warnings_panel(f: &mut Frame, app: &App) {
         items.push(ListItem::new(lines));
     }
 
+    for msg in app.store.warnings() {
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("  warn: {}", msg),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "    store warning".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        items.push(ListItem::new(lines));
+    }
+
     let list = List::new(items).block(block).highlight_style(
         Style::default()
             .fg(Color::Cyan)

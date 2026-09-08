@@ -787,3 +787,68 @@ max_clock_skew = "5m"
     let config = Config::parse(&toml_str).unwrap();
     assert_eq!(config.documents.types.len(), 1);
 }
+
+// STORY-283 AC1/AC2/AC4: `config --json` reports one absolute `resolved_dir`
+// per type, whatever the `dir` spelling, and the cache path for cache-backed
+// stores.
+#[test]
+fn config_json_reports_resolved_dir_for_every_spelling_and_store() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let external = root.join("external");
+    let toml_str = format!(
+        r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "{}"
+prefix = "SPEC"
+
+[[types]]
+name = "shared"
+plural = "shared"
+dir = "../shared-specs"
+prefix = "SHARED"
+
+[[types]]
+name = "issue"
+plural = "issues"
+dir = "docs/issues"
+prefix = "ISSUE"
+store = "github-issues"
+
+[github]
+repo = "octo-org/repo"
+{}"#,
+        external.display(),
+        RELATIONSHIPS
+    );
+    let config = Config::parse(&toml_str).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&lazyspec::cli::config::run_show_json(root, &config).unwrap())
+            .unwrap();
+    let resolved = |name: &str| {
+        json["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .map(|t| std::path::PathBuf::from(t["resolved_dir"].as_str().unwrap()))
+            .unwrap()
+    };
+
+    assert_eq!(resolved("rfc"), root.join("docs/rfcs"));
+    assert_eq!(resolved("spec"), external);
+    assert_eq!(
+        resolved("shared"),
+        root.parent().unwrap().join("shared-specs")
+    );
+    assert_eq!(resolved("issue"), root.join(".lazyspec/cache/issue"));
+}
