@@ -6,7 +6,7 @@ author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
-- related-to: RFC-069
+- implements: RFC-069
 ---
 
 As a maintainer reading the staleness code after the fact, I want the small inconsistencies the batch left behind cleaned up, so that the next person to touch it does not inherit three answers to the same question.
