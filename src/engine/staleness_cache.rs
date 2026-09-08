@@ -37,7 +37,7 @@ struct Memo {
     /// The `HEAD` every `drift` entry below was measured to. Empty for a memo
     /// that has never resolved one.
     head: String,
-    /// `<anchor sha> <glob>,<glob>` -> what moved between it and `head`.
+    /// `<anchor sha> ["<glob>", "<glob>"]` -> what moved between it and `head`.
     drift: BTreeMap<String, Drift>,
 }
 
@@ -131,7 +131,11 @@ impl StalenessCache {
         if !resolve_head(&mut state, git, root) {
             return git.diff_stat(root, from, "HEAD", globs);
         }
-        let key = format!("{from} {}", globs.join(","));
+        // Debug-formatted rather than joined: a separator a glob may contain --
+        // and a comma is legal in one -- makes `["a,b"]` and `["a", "b"]` the
+        // same key, and one root's drift would answer for the other's. `{:?}`
+        // quotes and escapes every element, so distinct lists key distinctly.
+        let key = format!("{from} {globs:?}");
         if let Some(cached) = state.memo.drift.get(&key) {
             return Ok(*cached);
         }
@@ -307,6 +311,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(git_calls(&git, "diff_stat:"), 2);
+    }
+
+    /// STORY-277: a comma is legal inside a glob, so a key that joins the list on
+    /// one files `["a,b"]` and `["a", "b"]` under the same entry -- and a warm
+    /// memo hands one governs root's drift back as the other's. Order counts as
+    /// distinct too: a redundant diff is cheap, a wrong answer is not.
+    #[test]
+    fn glob_lists_that_differ_only_in_splitting_or_order_are_different_entries() {
+        let tmp = TempDir::new().unwrap();
+        let git = git_answering(drift_of(3));
+        let cache = StalenessCache::load(tmp.path());
+
+        for globs in [
+            vec!["a,b".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+            vec!["b".to_string(), "a".to_string()],
+        ] {
+            cache.drift(&git, tmp.path(), ANCHOR, &globs).unwrap();
+        }
+
+        assert_eq!(git_calls(&git, "diff_stat:"), 3);
     }
 
     /// `off()` is the seam a call-log assertion needs: it must not quietly

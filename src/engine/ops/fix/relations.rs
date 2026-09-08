@@ -124,7 +124,7 @@ pub(super) fn collect_relation_fixes(
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::config::{Config, GithubConfig, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{Config, GithubConfig, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
 
@@ -141,29 +141,10 @@ mod tests {
 
     fn gh_config_with_rfc_type() -> Config {
         let issue_type = |name: &str, plural: &str, dir: &str, prefix: &str| TypeDef {
-            name: name.to_string(),
             plural: plural.to_string(),
             dir: dir.to_string(),
             prefix: prefix.to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture(name, StoreBackend::GithubIssues)
         };
         let mut config = Config::default();
         config.documents.types = vec![

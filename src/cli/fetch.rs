@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::engine::cache_lock::CacheLock;
     use crate::engine::clickup::{ClickupUser, FakeClickupClient};
-    use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{StoreBackend, TypeDef};
     use crate::engine::gh::{
         test_support::{assert_one_composed_round, ten_type_config_src, GhRequestCounter},
         GhComment, GhFieldValueInput, GhIssue, GhIssueReader, GhIssueWriter, GhMilestone,
@@ -688,7 +688,8 @@ name = "related-to"
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("abc123"));
         assert_eq!(lock.get("iteration/ITERATION-043"), Some("def456"));
 
-        let calls = mock.calls.borrow();
+        let log = mock.call_log();
+        let calls = log.borrow();
         assert_eq!(calls[0], "fetch_refs:origin:refs/lazyspec/iteration/*");
         assert_eq!(calls[1], "list_refs:refs/lazyspec/iteration/");
     }
@@ -772,7 +773,8 @@ name = "related-to"
         assert_eq!(counts.removed, 0);
 
         // read_ref_blob should not have been called
-        let calls = mock.calls.borrow();
+        let log = mock.call_log();
+        let calls = log.borrow();
         assert!(!calls.iter().any(|c| c.starts_with("read_ref_blob")));
     }
 
@@ -815,29 +817,8 @@ name = "related-to"
 
     fn git_ref_type(name: &str, prefix: &str) -> TypeDef {
         TypeDef {
-            name: name.to_string(),
-            plural: format!("{}s", name),
-            dir: format!("docs/{}", name),
             prefix: prefix.to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GitRef,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture(name, StoreBackend::GitRef)
         }
     }
 
@@ -951,7 +932,8 @@ name = "related-to"
         let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
         assert!(result.is_ok(), "fetch must exit zero: {result:?}");
 
-        let calls = mock.calls.borrow();
+        let log = mock.call_log();
+        let calls = log.borrow();
         assert!(
             calls
                 .iter()

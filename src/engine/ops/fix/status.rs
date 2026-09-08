@@ -85,7 +85,7 @@ fn repair_status(full_path: &Path, new_status: &str, fs: &dyn FileSystem) -> any
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::config::{Config, Lifecycle, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
 
@@ -105,19 +105,7 @@ mod tests {
     /// default-lifecycle (`draft`-first) type in the same config.
     fn config_with_bug_type() -> Config {
         let bug = TypeDef {
-            name: "bug".to_string(),
-            plural: "bugs".to_string(),
             dir: "docs/bugs".to_string(),
-            prefix: "BUG".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::Filesystem,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
             lifecycle: Lifecycle {
                 states: ["reported", "triaged", "in-progress", "fixed", "wontfix"]
                     .iter()
@@ -125,15 +113,7 @@ mod tests {
                     .collect(),
                 edges: Vec::new(),
             },
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("bug", StoreBackend::Filesystem)
         };
         let mut config = Config::default();
         config.documents.types.push(bug);

@@ -1,4 +1,4 @@
-use lazyspec::engine::config::{Config, NumberingStrategy, TypeDef};
+use lazyspec::engine::config::{Config, TypeDef};
 use lazyspec::engine::validation::ValidationIssue;
 use std::path::PathBuf;
 
@@ -309,57 +309,19 @@ fn config_with_extra_types(extra: Vec<TypeDef>) -> Config {
 
 fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
     TypeDef {
-        name: name.to_string(),
-        plural: format!("{}s", name),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
-        subdirectory: false,
-        store: Default::default(),
         singleton: true,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture(name, Default::default())
     }
 }
 
 fn child_type(name: &str, dir: &str, prefix: &str, parent: &str) -> TypeDef {
     TypeDef {
-        name: name.to_string(),
-        plural: format!("{}s", name),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
-        subdirectory: false,
-        store: Default::default(),
-        singleton: false,
         parent_type: Some(parent.to_string()),
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture(name, Default::default())
     }
 }
 
@@ -502,29 +464,9 @@ fn parent_type_references_non_singleton_error() {
     let fixture = crate::common::TestFixture::new();
 
     let non_singleton_parent = TypeDef {
-        name: "guideline".to_string(),
-        plural: "guidelines".to_string(),
         dir: "docs/guidelines".to_string(),
         prefix: "GUIDE".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
-        subdirectory: false,
-        store: Default::default(),
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("guideline", Default::default())
     };
     let config = config_with_extra_types(vec![
         non_singleton_parent,

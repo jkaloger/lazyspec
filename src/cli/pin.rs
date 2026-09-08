@@ -558,7 +558,7 @@ mod tests {
         pin_rfc_with(root, &git, &config).unwrap();
 
         assert_eq!(
-            git.calls.borrow().as_slice(),
+            git.call_log().borrow().as_slice(),
             [format!("head:{}", root.join("code").display())],
             "HEAD must be read from [governs] root"
         );

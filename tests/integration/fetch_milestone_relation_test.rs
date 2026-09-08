@@ -6,9 +6,7 @@
 //! in the map, the lookup returned `None`, and the relation was silently dropped.
 
 use anyhow::Result;
-use lazyspec::engine::config::{
-    Config, GithubConfig, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
-};
+use lazyspec::engine::config::{Config, GithubConfig, RelationshipDef, StoreBackend, TypeDef};
 use lazyspec::engine::gh::{
     test_support, GhComment, GhFieldValueInput, GhGraphql, GhIssue, GhIssueDependencyApi,
     GhIssueMilestone, GhIssueReader, GhIssueWriter, GhMilestone, GhMilestoneApi, GqlVar,
@@ -159,40 +157,15 @@ impl GhIssueDependencyApi for MilestoneGh {
 
 fn ticket_type() -> TypeDef {
     TypeDef {
-        name: "ticket".to_string(),
-        plural: "tickets".to_string(),
         dir: "docs/tickets".to_string(),
-        prefix: "TICKET".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::Incremental,
-        subdirectory: false,
-        store: StoreBackend::GithubIssues,
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("ticket", StoreBackend::GithubIssues)
     }
 }
 
 fn milestone_type() -> TypeDef {
     TypeDef {
-        name: "milestone".to_string(),
-        plural: "milestones".to_string(),
         dir: "docs/milestones".to_string(),
-        prefix: "MILESTONE".to_string(),
-        store: StoreBackend::GithubMilestones,
-        ..ticket_type()
+        ..TypeDef::test_fixture("milestone", StoreBackend::GithubMilestones)
     }
 }
 

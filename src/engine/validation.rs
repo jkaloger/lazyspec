@@ -3,7 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
-use crate::engine::staleness::{compute, Band, Staleness};
+use crate::engine::staleness::{compute, Band, Staleness, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
 use serde::Serialize;
@@ -1219,12 +1219,25 @@ pub fn stale_findings<'a>(
         .filter(|meta| !meta.validate_ignore)
         // Nothing an anchor could say would make these rot, so nothing is asked
         // of git for them -- which on an age-driven tree is most of it.
-        .filter(|meta| !crate::engine::staleness::cannot_be_stale(config, meta))
+        .filter(|meta| {
+            !crate::engine::staleness::cannot_be_stale(StalenessTerms::of(config, meta), meta)
+        })
         .collect();
     docs.sort_by(|a, b| a.path.cmp(&b.path));
 
     docs.into_iter()
-        .map(|doc| (&doc.path, compute(governs_root, config, doc, git, cache)))
+        .map(|doc| {
+            (
+                &doc.path,
+                compute(
+                    governs_root,
+                    StalenessTerms::of(config, doc),
+                    doc,
+                    git,
+                    cache,
+                ),
+            )
+        })
         .filter(|(_, staleness)| staleness.band == Band::Stale)
         .map(|(path, staleness)| {
             (

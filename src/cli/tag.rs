@@ -88,7 +88,7 @@ fn propagate_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{Config, StoreBackend, TypeDef};
     use crate::engine::fs::RealFileSystem;
     use crate::engine::store::Store;
 
@@ -101,33 +101,11 @@ mod tests {
     }
 
     fn fs_config() -> Config {
-        let rfc_type = TypeDef {
-            name: "rfc".to_string(),
-            plural: "rfcs".to_string(),
-            dir: "docs/rfcs".to_string(),
-            prefix: "RFC".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::Filesystem,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Vec::new(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
-        };
         let mut config = Config::default();
-        config.documents.types = vec![rfc_type];
+        config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        }];
         config
     }
 

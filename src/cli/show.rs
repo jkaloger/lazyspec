@@ -10,7 +10,7 @@ use crate::engine::github::resolve_repo;
 use crate::engine::github_url::resolve_repo_coords;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::open::{resolve_open_target, OpenTarget};
-use crate::engine::staleness::{compute, Staleness};
+use crate::engine::staleness::{compute, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::{ResolveError, Store};
@@ -107,15 +107,12 @@ fn pin_rows(doc: &DocMeta) -> String {
     out
 }
 
-/// RFC-069's one staleness line, unconditional: a document with neither a review
-/// anchor nor globs still reports a band, off its own date. Unstyled, because
-/// the wording is the contract `show --json` carries the same facts under
-/// (DICTUM-006).
-fn staleness_line(staleness: &Staleness) -> String {
-    format!("staleness: {staleness}")
-}
-
+/// Writes to `out` rather than straight to `println!` so a test can assert on
+/// the rendered document -- the staleness line included -- through the same path
+/// `main` takes.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
+    out: &mut dyn std::io::Write,
     store: &Store,
     id: &str,
     expand: bool,
@@ -140,8 +137,9 @@ pub fn run(
     };
 
     let colors = StatusColors::load(store.root()).unwrap_or_default();
-    println!("{}", title_box(&doc.title));
-    println!(
+    writeln!(out, "{}", title_box(&doc.title))?;
+    writeln!(
+        out,
         "{} {}  {} {}  {} {}",
         dim("Type:"),
         bold(&doc.doc_type.to_string()),
@@ -149,47 +147,53 @@ pub fn run(
         styled_status(&colors, doc.doc_type.as_str(), &doc.status),
         dim("Author:"),
         bold(&doc.author),
-    );
+    )?;
     if !doc.tags.is_empty() {
-        println!("{} {}", dim("Tags:"), doc.tags.join(", "));
+        writeln!(out, "{} {}", dim("Tags:"), doc.tags.join(", "))?;
     }
     if let Some(assignee) = &doc.assignee {
-        println!("{} {}", dim("Assignee:"), bold(assignee));
+        writeln!(out, "{} {}", dim("Assignee:"), bold(assignee))?;
     }
-    print!("{}", pin_rows(doc));
-    println!(
-        "{}",
-        staleness_line(&compute(
+    write!(out, "{}", pin_rows(doc))?;
+    // RFC-069's one staleness line, unconditional: a document with neither a
+    // review anchor nor globs still reports a band, off its own date. Unstyled,
+    // because the wording is the contract `show --json` carries the same facts
+    // under (DICTUM-006).
+    writeln!(
+        out,
+        "staleness: {}",
+        compute(
             store.governs_root(),
-            config,
+            StalenessTerms::of(config, doc),
             doc,
             git,
             &StalenessCache::load(store.root()),
-        ))
-    );
+        )
+    )?;
     if let Some(parent_path) = store.parent_of(&doc.path) {
         if let Some(parent) = store.get(parent_path) {
-            println!(
+            writeln!(
+                out,
                 "{} {} {}",
                 dim("Parent:"),
                 bold(&parent.title),
                 dim(&parent.path.to_string_lossy()),
-            );
+            )?;
         }
     }
-    println!("{}", separator());
+    writeln!(out, "{}", separator())?;
 
     let body = if expand {
         store.get_body_expanded(&doc.path, max_ref_lines, fs)?
     } else {
         store.get_body_raw(&doc.path, fs)?
     };
-    println!("{}", strip_html_comments(&body));
+    writeln!(out, "{}", strip_html_comments(&body))?;
 
     let child_paths = store.children_of(&doc.path);
     if !child_paths.is_empty() {
-        println!();
-        println!("{}", dim("Children:"));
+        writeln!(out)?;
+        writeln!(out, "{}", dim("Children:"))?;
         for cp in child_paths {
             if let Some(child) = store.get(cp) {
                 let parent_dir = cp.parent().and_then(|p| p.file_name()).unwrap_or_default();
@@ -199,7 +203,7 @@ pub fn run(
                     parent_dir.to_string_lossy(),
                     file_stem.to_string_lossy()
                 );
-                println!("  - {}  ({})", child.title, qualified_shorthand);
+                writeln!(out, "  - {}  ({})", child.title, qualified_shorthand)?;
             }
         }
     }
@@ -255,7 +259,7 @@ pub fn run_json(
     json["comments"] = serde_json::Value::Array(fetch_comments_for_doc(doc, config, root, gh));
     json["staleness"] = serde_json::to_value(compute(
         store.governs_root(),
-        config,
+        StalenessTerms::of(config, doc),
         doc,
         git,
         &StalenessCache::load(store.root()),
@@ -390,7 +394,7 @@ mod tests {
     use crate::engine::gh::GhComment;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::issue_map::IssueMap;
-    use crate::engine::staleness::{Anchor, Band, Drift};
+    use crate::engine::staleness::Drift;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -496,64 +500,6 @@ mod tests {
         assert!(!out.contains("Reviewed:"), "got: {out}");
     }
 
-    fn staleness(anchor: Anchor, band: Band, driver: StalenessDriver, files: u64) -> Staleness {
-        Staleness {
-            band,
-            driver,
-            anchor,
-            age_days: 140,
-            drift: Drift {
-                files,
-                insertions: 310,
-                deletions: 85,
-            },
-        }
-    }
-
-    // STORY-272 AC6: the line RFC-069 publishes, verbatim.
-    #[test]
-    fn the_staleness_line_reads_as_rfc_069_writes_it() {
-        assert_eq!(
-            staleness_line(&staleness(
-                Anchor::Sha("0123456".to_string()),
-                Band::Stale,
-                StalenessDriver::Drift,
-                12,
-            )),
-            "staleness: stale (drift, 12 files since 0123456, 140d)"
-        );
-    }
-
-    // AC6 for a document with no review anchor: the same line, anchored on the
-    // frontmatter date instead of a sha.
-    #[test]
-    fn a_date_anchored_document_prints_its_date_in_the_same_line() {
-        assert_eq!(
-            staleness_line(&staleness(
-                Anchor::Date(chrono::NaiveDate::from_ymd_opt(2026, 4, 21).unwrap()),
-                Band::Aging,
-                StalenessDriver::Age,
-                0,
-            )),
-            "staleness: aging (age, 0 files since 2026-04-21, 140d)"
-        );
-    }
-
-    // AC4: a drift type is a fallback to age, so both fields vary independently
-    // and the line reports the driver that actually banded it.
-    #[test]
-    fn a_fresh_document_prints_its_band_and_driver() {
-        assert_eq!(
-            staleness_line(&staleness(
-                Anchor::Sha("abc".to_string()),
-                Band::Fresh,
-                StalenessDriver::Drift,
-                0,
-            )),
-            "staleness: fresh (drift, 0 files since abc, 140d)"
-        );
-    }
-
     const REVIEWED: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn config_driven_by(driver: StalenessDriver) -> Config {
@@ -589,6 +535,91 @@ mod tests {
         )
         .unwrap();
         serde_json::from_str::<serde_json::Value>(&output).unwrap()["staleness"].clone()
+    }
+
+    /// What `show <id>` prints, through the same `run` `main` calls.
+    fn human_output(store: &Store, config: &Config, git: &MockGitRefClient) -> String {
+        let mut out = Vec::new();
+        run(
+            &mut out,
+            store,
+            "RFC-001",
+            false,
+            25,
+            &crate::engine::fs::RealFileSystem,
+            config,
+            git,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn staleness_line_of(store: &Store, config: &Config, git: &MockGitRefClient) -> String {
+        human_output(store, config, git)
+            .lines()
+            .find(|line| line.starts_with("staleness:"))
+            .expect("show prints a staleness line")
+            .to_string()
+    }
+
+    // STORY-272 AC6: the line RFC-069 publishes, verbatim, off `show <id>`.
+    #[test]
+    fn show_prints_the_staleness_line_as_rfc_069_writes_it() {
+        let (_tmp, store) = rfc_store(
+            "governs:\n  - \"src/engine/**\"\n",
+            &format!("reviewed: {REVIEWED}\n"),
+            0,
+        );
+        let git = MockGitRefClient::new()
+            .with_diff_stat(Drift {
+                files: 12,
+                insertions: 310,
+                deletions: 85,
+            })
+            .with_read_commit_timestamp_result(
+                Ok(chrono::Utc::now() - chrono::Duration::days(140)),
+            );
+
+        assert_eq!(
+            staleness_line_of(&store, &config_driven_by(StalenessDriver::Drift), &git),
+            format!("staleness: stale (drift, 12 files since {REVIEWED}, 140d)")
+        );
+    }
+
+    // STORY-277 AC2: an age-driven document bands on time, so the line quotes
+    // days rather than claiming `0 files` about code it never diffed.
+    #[test]
+    fn show_omits_the_drift_clause_for_an_age_driven_document() {
+        let (_tmp, store) = rfc_store("governs: []\n", "", 140);
+        let anchor = chrono::Utc::now().date_naive() - chrono::Duration::days(140);
+
+        assert_eq!(
+            staleness_line_of(
+                &store,
+                &config_driven_by(StalenessDriver::Age),
+                &MockGitRefClient::new()
+            ),
+            format!("staleness: aging (age, 140d since {anchor})")
+        );
+    }
+
+    // STORY-272 AC4: a drift type with nothing moved under its globs is fresh,
+    // and the line reports the driver that actually banded it.
+    #[test]
+    fn show_prints_a_fresh_band_for_a_drift_type_with_no_drift() {
+        let (_tmp, store) = rfc_store(
+            "governs:\n  - \"src/engine/**\"\n",
+            &format!("reviewed: {REVIEWED}\n"),
+            0,
+        );
+        let git = MockGitRefClient::new()
+            .with_diff_stat(Drift::default())
+            .with_read_commit_timestamp_result(Ok(chrono::Utc::now()));
+
+        assert_eq!(
+            staleness_line_of(&store, &config_driven_by(StalenessDriver::Drift), &git),
+            format!("staleness: fresh (drift, 0 files since {REVIEWED}, 0d)")
+        );
     }
 
     // STORY-272 AC1: a pinned drift-type document, with commits under its globs

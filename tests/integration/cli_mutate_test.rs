@@ -1,6 +1,6 @@
 use crate::common::TestFixture;
 use lazyspec::cli::json::doc_to_json;
-use lazyspec::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
+use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::issue_map::IssueMap;
@@ -15,29 +15,8 @@ fn milestones_fixture() -> (TestFixture, Config) {
     let fixture = TestFixture::new();
     let mut config = Config::default();
     config.documents.types = vec![TypeDef {
-        name: "milestone".to_string(),
-        plural: "milestones".to_string(),
         dir: "docs/milestones".to_string(),
-        prefix: "MILESTONE".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::Incremental,
-        subdirectory: false,
-        store: StoreBackend::GithubMilestones,
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("milestone", StoreBackend::GithubMilestones)
     }];
     config.documents.github = None;
 

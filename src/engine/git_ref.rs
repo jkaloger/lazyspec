@@ -488,7 +488,7 @@ pub mod test_support {
         /// Shared, so a test that hands the mock to something owning it -- a
         /// `Box<dyn GitRefOps>` on a validation rule -- can still read back what
         /// was asked of git. See [`MockGitRefClient::call_log`].
-        pub calls: std::rc::Rc<RefCell<Vec<String>>>,
+        calls: std::rc::Rc<RefCell<Vec<String>>>,
         /// The `doc.md` blob content passed to each `create_commit`, in call
         /// order. Lets tests assert what was serialized into the ref, which the
         /// `calls` string log (parent SHA only) does not capture.
@@ -834,7 +834,7 @@ mod tests {
         let mock = MockGitRefClient::new().with_resolve_result(Ok(Some("abc123".to_string())));
         let result = mock.resolve_ref(&dummy_root(), "refs/test").unwrap();
         assert_eq!(result, Some("abc123".to_string()));
-        assert_eq!(mock.calls.borrow()[0], "resolve_ref:refs/test");
+        assert_eq!(mock.call_log().borrow()[0], "resolve_ref:refs/test");
     }
 
     #[test]
@@ -872,7 +872,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, "danglingsha");
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             "create_commit:refs/test:parent=None"
         );
     }
@@ -891,7 +891,7 @@ mod tests {
         let mock = MockGitRefClient::new().with_update_ref_result(Ok(()));
         mock.update_ref(&dummy_root(), "refs/test", "new", "old")
             .unwrap();
-        assert_eq!(mock.calls.borrow()[0], "update_ref:refs/test:new:old");
+        assert_eq!(mock.call_log().borrow()[0], "update_ref:refs/test:new:old");
     }
 
     #[test]
@@ -904,7 +904,8 @@ mod tests {
         mock.delete_ref(&dummy_root(), "refs/b").unwrap();
         mock.push_ref(&dummy_root(), "origin", "refs/c").unwrap();
 
-        let calls = mock.calls.borrow();
+        let log = mock.call_log();
+        let calls = log.borrow();
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0], "resolve_ref:refs/a");
         assert_eq!(calls[1], "delete_ref:refs/b");
@@ -937,7 +938,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             "create_commit:refs/test:parent=Some(\"abc123\")"
         );
     }
@@ -954,7 +955,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             "push_ref_with_lease:origin:refs/test:new_sha=newsha:expected_old=Some(\"abc123\")"
         );
     }
@@ -965,7 +966,7 @@ mod tests {
         mock.push_ref_with_lease(&dummy_root(), "origin", "refs/test", "newsha", None)
             .unwrap();
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             "push_ref_with_lease:origin:refs/test:new_sha=newsha:expected_old=None"
         );
     }
@@ -986,7 +987,7 @@ mod tests {
         mock.create_commit(&dummy_root(), "refs/test", &[("f.txt", "data")], None)
             .unwrap();
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             "create_commit:refs/test:parent=None"
         );
     }
@@ -998,7 +999,7 @@ mod tests {
         let mock = MockGitRefClient::new().with_read_commit_timestamp_result(Ok(ts));
         let result = mock.read_commit_timestamp(&dummy_root(), "abc123").unwrap();
         assert_eq!(result, ts);
-        assert_eq!(mock.calls.borrow()[0], "read_commit_timestamp:abc123");
+        assert_eq!(mock.call_log().borrow()[0], "read_commit_timestamp:abc123");
     }
 
     #[test]
@@ -1013,7 +1014,7 @@ mod tests {
             vec![("src/a/mod.rs".to_string(), "src/b/mod.rs".to_string())]
         );
         assert_eq!(second, first, "every call sees the same fixture");
-        assert_eq!(mock.calls.borrow()[0], "renames:abc123..HEAD");
+        assert_eq!(mock.call_log().borrow()[0], "renames:abc123..HEAD");
     }
 
     #[test]
@@ -1049,7 +1050,7 @@ mod tests {
         assert_eq!(first, drift);
         assert_eq!(second, first, "every call sees the same fixture");
         assert_eq!(
-            mock.calls.borrow()[0],
+            mock.call_log().borrow()[0],
             format!(
                 "diff_stat:{}:abc123..HEAD:src/engine/**,src/cli.rs",
                 dummy_root().display()

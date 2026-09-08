@@ -724,7 +724,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             }
             let staleness = crate::engine::staleness::compute(
                 &req.governs_root,
-                &req.config,
+                req.terms,
                 &req.doc,
                 &git,
                 &crate::engine::staleness_cache::StalenessCache::load(&req.root),

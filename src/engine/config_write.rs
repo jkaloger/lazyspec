@@ -1114,29 +1114,9 @@ severity = "error"
         let buffer = {
             let mut c = Config::parse(SRC).unwrap();
             c.documents.types.push(TypeDef {
-                name: "adr".to_string(),
-                plural: "adrs".to_string(),
                 dir: "docs/adrs".to_string(),
-                prefix: "ADR".to_string(),
                 icon: Some("#".to_string()),
-                numbering: NumberingStrategy::default(),
-                subdirectory: false,
-                store: StoreBackend::default(),
-                singleton: false,
-                parent_type: None,
-                agents: Vec::new(),
-                intent: None,
-                authorship: Default::default(),
-                lifecycle: Default::default(),
-                attributes: Default::default(),
-                label_override: None,
-                github_issue_tag: None,
-                github_issue_type: None,
-                staleness: Default::default(),
-                status_authority: None,
-                clickup_list_id: None,
-                clickup_task_type: None,
-                clickup_custom_field_map: None,
+                ..TypeDef::test_fixture("adr", StoreBackend::default())
             });
             c
         };
@@ -1209,29 +1189,8 @@ name = "related-to"
         let buffer = {
             let mut c = Config::parse_lenient(RULES_SRC).unwrap();
             c.documents.types.push(TypeDef {
-                name: "spec".to_string(),
-                plural: "specs".to_string(),
                 dir: "docs/specs".to_string(),
-                prefix: "SPEC".to_string(),
-                icon: None,
-                numbering: NumberingStrategy::default(),
-                subdirectory: false,
-                store: StoreBackend::default(),
-                singleton: false,
-                parent_type: None,
-                agents: Vec::new(),
-                intent: None,
-                authorship: Default::default(),
-                lifecycle: Default::default(),
-                attributes: Default::default(),
-                label_override: None,
-                github_issue_tag: None,
-                github_issue_type: None,
-                staleness: Default::default(),
-                status_authority: None,
-                clickup_list_id: None,
-                clickup_task_type: None,
-                clickup_custom_field_map: None,
+                ..TypeDef::test_fixture("spec", StoreBackend::default())
             });
             c
         };

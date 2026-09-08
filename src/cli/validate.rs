@@ -56,6 +56,13 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
         }
     }
 
+    exit_code(store, &result)
+}
+
+/// The process exit code a validated store yields: anything that made it into
+/// `errors`, a severity the config chooses, fails the run. Separate from
+/// [`run_full`] so a test can assert it without a report on stdout.
+fn exit_code(store: &Store, result: &ValidationResult) -> i32 {
     if result.errors.is_empty() && store.parse_errors().is_empty() {
         0
     } else {
@@ -222,7 +229,7 @@ mod stale_tests {
                 "{finding:?}: {output}"
             );
 
-            assert_eq!(run_full(&store, &config, true, false), exit, "{finding:?}");
+            assert_eq!(exit_code(&store, &result), exit, "{finding:?}");
             assert!(run_human(&store, &result, true, &[])
                 .contains("docs/rfcs/RFC-003-stale.md is stale"));
         }

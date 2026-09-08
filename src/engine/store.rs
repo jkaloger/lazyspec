@@ -1405,32 +1405,12 @@ mod tests {
     }
 
     fn github_issues_config() -> Config {
-        use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+        use crate::engine::config::{StoreBackend, TypeDef};
 
         let issue_type = TypeDef {
-            name: "issue".to_string(),
-            plural: "issues".to_string(),
             dir: "docs/issues".to_string(),
-            prefix: "ISSUE".to_string(),
             icon: Some("◉".to_string()),
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("issue", StoreBackend::GithubIssues)
         };
 
         let mut config = Config::default();
@@ -1507,32 +1487,12 @@ mod tests {
     }
 
     fn git_ref_config() -> Config {
-        use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+        use crate::engine::config::{StoreBackend, TypeDef};
 
         let ref_type = TypeDef {
-            name: "note".to_string(),
-            plural: "notes".to_string(),
             dir: "docs/notes".to_string(),
-            prefix: "NOTE".to_string(),
             icon: Some("📝".to_string()),
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store: StoreBackend::GitRef,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("note", StoreBackend::GitRef)
         };
 
         let mut config = Config::default();
@@ -1730,7 +1690,8 @@ mod tests {
             "cache.lock should contain materialized entry"
         );
 
-        let calls = mock.calls.borrow();
+        let log = mock.call_log();
+        let calls = log.borrow();
         assert!(calls.iter().any(|c| c.starts_with("list_refs:")));
         assert!(calls.iter().any(|c| c.starts_with("read_ref_blob:")));
     }

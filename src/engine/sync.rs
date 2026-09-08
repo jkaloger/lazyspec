@@ -671,9 +671,7 @@ fn cache_doc_paths(cache_dir: &Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{
-        Config, NumberingStrategy, RelationshipDef, StoreBackend, TypeDef,
-    };
+    use crate::engine::config::{Config, RelationshipDef, StoreBackend, TypeDef};
     use crate::engine::gh::test_support::MockGhClient;
     use crate::engine::gh::{
         GhAuthor, GhIssue, GhIssueMilestone, GhLabel, GhMilestone, ProjectFieldValue, ProjectItem,
@@ -683,29 +681,8 @@ mod tests {
 
     fn type_def(name: &str, prefix: &str, store: StoreBackend) -> TypeDef {
         TypeDef {
-            name: name.to_string(),
-            plural: format!("{}s", name),
-            dir: format!("docs/{}", name),
             prefix: prefix.to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture(name, store)
         }
     }
 

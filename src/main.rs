@@ -274,6 +274,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", output);
             } else {
                 lazyspec::cli::show::run(
+                    &mut std::io::stdout(),
                     &store,
                     &id,
                     expand_references,

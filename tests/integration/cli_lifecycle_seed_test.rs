@@ -1,7 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{
-    starter_types, Config, Edge, Lifecycle, NumberingStrategy, StoreBackend, TypeDef,
-};
+use lazyspec::engine::config::{starter_types, Config, Edge, Lifecycle, StoreBackend, TypeDef};
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
@@ -18,19 +16,7 @@ fn bug_type() -> TypeDef {
         to: to.into(),
     };
     TypeDef {
-        name: "bug".to_string(),
-        plural: "bugs".to_string(),
         dir: "docs/bugs".to_string(),
-        prefix: "BUG".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::Incremental,
-        subdirectory: false,
-        store: StoreBackend::Filesystem,
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
         lifecycle: Lifecycle {
             states: ["reported", "triaged", "in-progress", "fixed", "wontfix"]
                 .iter()
@@ -44,15 +30,7 @@ fn bug_type() -> TypeDef {
                 edge("triaged", "wontfix"),
             ],
         },
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("bug", StoreBackend::Filesystem)
     }
 }
 

@@ -1,4 +1,4 @@
-use lazyspec::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
+use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::template;
 use std::fs;
 
@@ -10,29 +10,8 @@ use std::fs;
 fn milestones_only_config() -> Config {
     let mut config = Config::default();
     config.documents.types = vec![TypeDef {
-        name: "milestone".to_string(),
-        plural: "milestones".to_string(),
         dir: "docs/milestones".to_string(),
-        prefix: "MILESTONE".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::Incremental,
-        subdirectory: false,
-        store: StoreBackend::GithubMilestones,
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("milestone", StoreBackend::GithubMilestones)
     }];
     config.documents.github = None;
     config
@@ -40,29 +19,10 @@ fn milestones_only_config() -> Config {
 
 fn singleton_type(name: &str, dir: &str, prefix: &str) -> TypeDef {
     TypeDef {
-        name: name.to_string(),
-        plural: format!("{}s", name),
         dir: dir.to_string(),
         prefix: prefix.to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
-        subdirectory: false,
-        store: Default::default(),
         singleton: true,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture(name, Default::default())
     }
 }
 

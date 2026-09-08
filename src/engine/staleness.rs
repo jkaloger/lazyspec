@@ -74,6 +74,33 @@ pub struct Drift {
     pub deletions: u64,
 }
 
+/// The whole of the config a band is computed against: what drives the
+/// document's type, and the thresholds an age-driven band steps at.
+///
+/// Passed instead of the `Config` it came from because the TUI's staleness
+/// worker builds one per selection change and cannot borrow the config across
+/// the thread boundary -- and cloning the whole of it per keystroke, to read two
+/// `Copy` values off it, is a toll with nothing behind it (STORY-277).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StalenessTerms {
+    pub driver: StalenessDriver,
+    pub thresholds: StalenessConfig,
+}
+
+impl StalenessTerms {
+    /// The terms `doc` is banded under: its type's driver, or the default for a
+    /// type the config does not name.
+    pub fn of(config: &Config, doc: &DocMeta) -> Self {
+        Self {
+            driver: config
+                .type_by_name(doc.doc_type.as_str())
+                .map(|t| t.staleness)
+                .unwrap_or_default(),
+            thresholds: config.staleness,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Staleness {
     pub band: Band,
@@ -86,13 +113,26 @@ pub struct Staleness {
 /// The band and the facts behind it, as RFC-069 writes them. Lives on the type
 /// because two surfaces print it -- `show`'s `staleness:` line and the `stale`
 /// validation finding -- and one wording cannot drift from itself.
+///
+/// The file count is only quoted under the `drift` driver, which is the one that
+/// bands on it. An age-driven document reports `0 files` whenever it has no pin
+/// to diff, and a reader cannot tell that from code nothing has touched.
 impl std::fmt::Display for Staleness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} ({}, {} files since {}, {}d)",
-            self.band, self.driver, self.drift.files, self.anchor, self.age_days
-        )
+        match self.driver {
+            StalenessDriver::Drift => write!(
+                f,
+                "{} (drift, {} files since {}, {}d)",
+                self.band, self.drift.files, self.anchor, self.age_days
+            ),
+            StalenessDriver::Age => {
+                write!(
+                    f,
+                    "{} (age, {}d since {})",
+                    self.band, self.age_days, self.anchor
+                )
+            }
+        }
     }
 }
 
@@ -111,7 +151,7 @@ impl std::fmt::Display for Staleness {
 /// boundary to the TUI's staleness worker (STORY-275) where a `Store` cannot.
 pub fn compute(
     governs_root: &Path,
-    config: &Config,
+    terms: StalenessTerms,
     doc: &DocMeta,
     git: &dyn GitRefOps,
     cache: &StalenessCache,
@@ -124,7 +164,7 @@ pub fn compute(
     let drift = drift_of(governs_root, doc, git, cache);
 
     let driver = match drift {
-        Some(_) => configured_driver(config, doc),
+        Some(_) => terms.driver,
         None => StalenessDriver::Age,
     };
 
@@ -139,7 +179,7 @@ pub fn compute(
     let band = match driver {
         StalenessDriver::Drift if drift.files == 0 => Band::Fresh,
         StalenessDriver::Drift => Band::Stale,
-        StalenessDriver::Age => band_by_age(age_days, config.staleness),
+        StalenessDriver::Age => band_by_age(age_days, terms.thresholds),
     };
 
     Staleness {
@@ -194,16 +234,8 @@ pub fn drifted(
 /// turns out to be. Only sound under the `age` driver, which bands on time --
 /// drift bands on what moved, and a document created yesterday can govern code
 /// that moved this morning.
-pub fn cannot_be_stale(config: &Config, doc: &DocMeta) -> bool {
-    configured_driver(config, doc) == StalenessDriver::Age
-        && days_since(doc.date) < config.staleness.aging.0
-}
-
-fn configured_driver(config: &Config, doc: &DocMeta) -> StalenessDriver {
-    config
-        .type_by_name(doc.doc_type.as_str())
-        .map(|t| t.staleness)
-        .unwrap_or_default()
+pub fn cannot_be_stale(terms: StalenessTerms, doc: &DocMeta) -> bool {
+    terms.driver == StalenessDriver::Age && days_since(doc.date) < terms.thresholds.aging.0
 }
 
 fn band_by_age(age_days: u64, thresholds: StalenessConfig) -> Band {
@@ -269,7 +301,7 @@ mod tests {
         let doc = store.docs.values().next().expect("one document loaded");
         compute(
             store.governs_root(),
-            config,
+            StalenessTerms::of(config, doc),
             doc,
             git,
             &StalenessCache::off(),
@@ -553,8 +585,10 @@ mod tests {
 
     /// STORY-276 AC4: under the `age` driver a document dated inside the `aging`
     /// window cannot be stale, whatever its anchor says, because the anchor is
-    /// never older than the date. Bounded by the same threshold `compute` bands
-    /// on, so the two can never disagree about which documents are skipped.
+    /// never older than the date. Bounded by `aging`, which is the lower of the
+    /// two thresholds -- `compute` bands stale on `stale` -- so the guard skips a
+    /// subset of what `compute` would have called fresh, never more.
+    /// `Config::load` rejects an `aging` past `stale`, so that ordering holds.
     #[test]
     fn a_young_age_driven_document_cannot_be_stale() {
         let config = config_driven_by(StalenessDriver::Age);
@@ -565,7 +599,7 @@ mod tests {
             let doc = store.docs.values().next().unwrap();
 
             assert_eq!(
-                cannot_be_stale(&config, doc),
+                cannot_be_stale(StalenessTerms::of(&config, doc), doc),
                 expected,
                 "a document dated {age} days ago"
             );
@@ -580,7 +614,7 @@ mod tests {
         let doc = store.docs.values().next().unwrap();
 
         assert!(!cannot_be_stale(
-            &config_driven_by(StalenessDriver::Drift),
+            StalenessTerms::of(&config_driven_by(StalenessDriver::Drift), doc),
             doc
         ));
     }

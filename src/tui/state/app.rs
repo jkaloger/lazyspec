@@ -317,7 +317,9 @@ pub struct StalenessRequest {
     /// The docs root, which is where the `(reviewed, HEAD)` memo is filed.
     pub root: PathBuf,
     pub governs_root: PathBuf,
-    pub config: Config,
+    /// The two `Copy` values `compute` reads off the config, rather than a clone
+    /// of the whole of it per selection change (STORY-277).
+    pub terms: crate::engine::staleness::StalenessTerms,
     pub doc: DocMeta,
     pub generation: u64,
 }

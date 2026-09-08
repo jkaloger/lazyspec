@@ -1054,7 +1054,7 @@ fn build_cache_content(meta: &DocMeta, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{NumberingStrategy, StoreBackend};
+    use crate::engine::config::StoreBackend;
     use crate::engine::document::DocType;
     use crate::engine::gh::{GhAuthor, GhGraphql, GhIssueDependencyApi, GhLabel, GqlVar};
     use anyhow::Result;
@@ -1071,29 +1071,8 @@ mod tests {
 
     fn story_type_def() -> TypeDef {
         TypeDef {
-            name: "story".to_string(),
             plural: "stories".to_string(),
-            dir: "docs/story".to_string(),
-            prefix: "STORY".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("story", StoreBackend::GithubIssues)
         }
     }
 
@@ -1101,31 +1080,7 @@ mod tests {
     // story_type_def(), used to prove two types can independently match the
     // same underlying GitHub issue number without colliding (RFC-055).
     fn ticket_type_def() -> TypeDef {
-        TypeDef {
-            name: "ticket".to_string(),
-            plural: "tickets".to_string(),
-            dir: "docs/ticket".to_string(),
-            prefix: "TICKET".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::default(),
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
-        }
+        TypeDef::test_fixture("ticket", StoreBackend::GithubIssues)
     }
 
     fn story_match_rule() -> TypeMatchRule {

@@ -3130,7 +3130,7 @@ pub fn clickup_write_store<C: crate::engine::clickup::ClickupClient + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{Config, StoreBackend, TypeDef};
     use crate::engine::gh::{
         test_support::{MockGhClient, MockGhMilestoneClient},
         GhIssue, GhLabel,
@@ -3142,29 +3142,8 @@ mod tests {
 
     fn test_type_def(store: StoreBackend) -> TypeDef {
         TypeDef {
-            name: "rfc".to_string(),
-            plural: "rfcs".to_string(),
             dir: "docs/rfcs".to_string(),
-            prefix: "RFC".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("rfc", store)
         }
     }
 
@@ -4678,29 +4657,10 @@ mod tests {
         };
 
         let td = TypeDef {
-            name: "github".to_string(),
             plural: "gh".to_string(),
             dir: "docs/gh".to_string(),
             prefix: "GH".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubIssues,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("github", StoreBackend::GithubIssues)
         };
 
         let result = gh_store.create(&td, "test prefix", "author", "").unwrap();
@@ -6882,7 +6842,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<MockGitRefClient>()
                 .unwrap()
-                .calls
+                .call_log()
                 .borrow()
                 .is_empty(),
             "GitRefStore should not have been invoked for a Filesystem type"

@@ -1,5 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{Config, NumberingStrategy, TypeDef};
+use lazyspec::engine::config::{Config, TypeDef};
 use lazyspec::engine::fs::RealFileSystem;
 
 fn convention_config(fixture: &TestFixture) -> Config {
@@ -9,54 +9,17 @@ fn convention_config(fixture: &TestFixture) -> Config {
         .types
         .retain(|t| t.name != "convention" && t.name != "dictum");
     config.documents.types.push(TypeDef {
-        name: "convention".to_string(),
-        plural: "conventions".to_string(),
-        dir: "docs/convention".to_string(),
         prefix: "CONV".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
         subdirectory: true,
-        store: Default::default(),
         singleton: true,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("convention", Default::default())
     });
     config.documents.types.push(TypeDef {
-        name: "dictum".to_string(),
         plural: "dicta".to_string(),
         dir: "docs/convention".to_string(),
         prefix: "DICT".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::default(),
-        subdirectory: false,
-        store: Default::default(),
-        singleton: false,
         parent_type: Some("convention".to_string()),
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
+        ..TypeDef::test_fixture("dictum", Default::default())
     });
     config
 }

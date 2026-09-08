@@ -1,5 +1,5 @@
 use crate::common::TestFixture;
-use lazyspec::engine::config::{NumberingStrategy, TypeDef};
+use lazyspec::engine::config::TypeDef;
 
 const PARENT_CONTENT: &str = "\
 ---
@@ -165,32 +165,10 @@ fn create_with_parent_cross_store_rejected_before_mutation() {
     // types: keep rfc filesystem (parent) and add a github-issues `issue` type
     // as the child.
     let mut config = fixture.config();
-    let issue_type = TypeDef {
-        name: "issue".to_string(),
-        plural: "issues".to_string(),
+    config.documents.types.push(TypeDef {
         dir: "docs/issues".to_string(),
-        prefix: "ISSUE".to_string(),
-        icon: None,
-        numbering: NumberingStrategy::Incremental,
-        subdirectory: false,
-        store: StoreBackend::GithubIssues,
-        singleton: false,
-        parent_type: None,
-        agents: Vec::new(),
-        intent: None,
-        authorship: Default::default(),
-        lifecycle: Default::default(),
-        attributes: Default::default(),
-        label_override: None,
-        github_issue_tag: None,
-        github_issue_type: None,
-        staleness: Default::default(),
-        status_authority: None,
-        clickup_list_id: None,
-        clickup_task_type: None,
-        clickup_custom_field_map: None,
-    };
-    config.documents.types.push(issue_type);
+        ..TypeDef::test_fixture("issue", StoreBackend::GithubIssues)
+    });
     let store = fixture.store();
 
     let err = lazyspec::cli::create::run_with_body(

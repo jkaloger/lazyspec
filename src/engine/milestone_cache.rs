@@ -88,34 +88,13 @@ pub fn fetch_milestones(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::{NumberingStrategy, StoreBackend, TypeDef};
+    use crate::engine::config::{StoreBackend, TypeDef};
     use tempfile::TempDir;
 
     fn milestone_type_def() -> TypeDef {
         TypeDef {
-            name: "milestone".to_string(),
-            plural: "milestones".to_string(),
             dir: "docs/milestones".to_string(),
-            prefix: "MILESTONE".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GithubMilestones,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("milestone", StoreBackend::GithubMilestones)
         }
     }
 

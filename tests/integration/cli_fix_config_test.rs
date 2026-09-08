@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use lazyspec::engine::config::{Config, Severity, Traversal};
+use lazyspec::engine::config::{Config, Severity, StalenessFinding, Traversal};
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::store::Store;
 use lazyspec::engine::validation::ValidationIssue;
@@ -95,13 +95,9 @@ impl ConfigFixture {
             format!("related:\n{links}")
         };
         let title = Path::new(path).file_stem().unwrap().to_str().unwrap();
-        // Dated today, because these tests name the migrated project's whole
-        // finding set and a fixed date would age into a `stale` finding
-        // (RFC-069) on a wall clock the test does not control.
-        let date = chrono::Utc::now().date_naive();
         let body = format!(
             "---\ntitle: \"{title}\"\ntype: {doc_type}\nstatus: draft\nauthor: \"test\"\n\
-             date: {date}\ntags: []\n{related_block}---\nbody\n"
+             date: 2026-01-01\ntags: []\n{related_block}---\nbody\n"
         );
         std::fs::write(self.root().join(path), body).unwrap();
     }
@@ -127,7 +123,12 @@ fn fingerprint(severity: &str, issue: &ValidationIssue) -> String {
 
 /// Every finding `validate` reports for the project at `root`, as fingerprints.
 fn findings(root: &Path) -> BTreeSet<String> {
-    let config = Config::load(root, &RealFileSystem).expect("the config strict-loads");
+    let mut config = Config::load(root, &RealFileSystem).expect("the config strict-loads");
+    // These tests name a migrated project's whole finding set, and the fixture
+    // documents carry a fixed date -- so the `stale` finding (RFC-069) would
+    // enter that set off a wall clock the test does not control. Off, the way
+    // the other date-bearing fixtures spell it.
+    config.staleness.finding = StalenessFinding::Off;
     let store = Store::load(root, &config).expect("the store loads");
     let result = store.validate_full(&config);
     result

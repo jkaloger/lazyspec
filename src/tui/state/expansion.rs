@@ -2,7 +2,7 @@ use crate::engine::cache::DiskCache;
 use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
 use crate::engine::refs::RefExpander;
-use crate::engine::staleness::Staleness;
+use crate::engine::staleness::{Staleness, StalenessTerms};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -113,7 +113,7 @@ impl App {
         let _ = self.staleness_tx.send(StalenessRequest {
             root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
-            config: config.clone(),
+            terms: StalenessTerms::of(config, &doc),
             doc,
             generation: self.staleness_generation,
         });
@@ -187,7 +187,7 @@ impl App {
         };
         let staleness = crate::engine::staleness::compute(
             self.store.governs_root(),
-            config,
+            StalenessTerms::of(config, &doc),
             &doc,
             &*self.git,
             &crate::engine::staleness_cache::StalenessCache::off(),

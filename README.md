@@ -421,10 +421,15 @@ Each document entry in `show --json` and `status --json` (under `documents[]`) i
 lazyspec show SPEC-001
 # staleness: stale (drift, 12 files since 0123456, 140d)
 
+lazyspec show RFC-001
+# staleness: aging (age, 140d since 2026-04-21)
+
 lazyspec show SPEC-001 --json | jq .staleness
 # { "band": "stale", "driver": "drift", "anchor": "0123456", "age_days": 140,
 #   "drift": { "files": 12, "insertions": 310, "deletions": 85 } }
 ```
+
+The line quotes the fact that banded the document: a drift-driven one names the file count, an age-driven one names the days. The JSON carries both either way.
 
 `band` is `fresh`, `aging` or `stale` and `driver` is what banded it; see [Staleness](#staleness) for the thresholds and the per-type driver. `anchor` is the document's `reviewed` sha when it has one and its `date` when it does not, and `age_days` counts from that anchor's commit time or from that date. `drift` is what `git diff` counts between the anchor and `HEAD` for the files the document's `governs` globs match — reported as a fact even for a document banded by age, and zero when there is nothing to diff. Both surfaces carry the line for every document, pinned or not.
 

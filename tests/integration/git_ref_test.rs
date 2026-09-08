@@ -1,5 +1,21 @@
 use crate::common::TestFixture;
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
+use std::path::Path;
+
+/// Stage and commit everything in `root`. The `diff_stat` tests below need real
+/// commits to diff between, which the mock seam cannot supply.
+fn commit_all(root: &Path, message: &str) {
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(root)
+        .output()
+        .unwrap();
+}
 
 #[test]
 fn create_ref_commit_and_resolve() {
@@ -433,19 +449,6 @@ fn diff_stat_counts_exactly_the_files_a_governs_glob_matches() {
     let (fixture, _bare) = TestFixture::with_git_remote();
     let git = GitCli;
 
-    let commit_all = |message: &str| {
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(fixture.root())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(fixture.root())
-            .output()
-            .unwrap();
-    };
-
     let changed = [
         "src/top.rs",
         "src/deep/nested.rs",
@@ -457,13 +460,13 @@ fn diff_stat_counts_exactly_the_files_a_governs_glob_matches() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "").unwrap();
     }
-    commit_all("base");
+    commit_all(fixture.root(), "base");
     let base = git.head(fixture.root()).unwrap();
 
     for path in changed {
         std::fs::write(fixture.root().join(path), "one\n").unwrap();
     }
-    commit_all("touch every file");
+    commit_all(fixture.root(), "touch every file");
 
     for glob in ["src/*", "src/**", "src/{cli,deep}/**", "src", "*.md"] {
         let matcher = globset::Glob::new(glob).unwrap().compile_matcher();
@@ -488,27 +491,14 @@ fn diff_stat_without_globs_counts_every_changed_file() {
     let (fixture, _bare) = TestFixture::with_git_remote();
     let git = GitCli;
 
-    let commit_all = |message: &str| {
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(fixture.root())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(fixture.root())
-            .output()
-            .unwrap();
-    };
-
     std::fs::write(fixture.root().join("a.txt"), "").unwrap();
     std::fs::write(fixture.root().join("b.txt"), "").unwrap();
-    commit_all("base");
+    commit_all(fixture.root(), "base");
     let base = git.head(fixture.root()).unwrap();
 
     std::fs::write(fixture.root().join("a.txt"), "one\n").unwrap();
     std::fs::write(fixture.root().join("b.txt"), "two\n").unwrap();
-    commit_all("touch both");
+    commit_all(fixture.root(), "touch both");
 
     let drift = git.diff_stat(fixture.root(), &base, "HEAD", &[]).unwrap();
     assert_eq!(drift.files, 2);

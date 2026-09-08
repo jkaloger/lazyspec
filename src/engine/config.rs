@@ -1277,9 +1277,9 @@ impl Default for GovernsConfig {
 /// A whole number of days, spelled `"90d"`. The staleness bands compare nothing
 /// finer than a day, so that is all this parses and all it yields; it renders
 /// back to `"90d"` so a config round-trips through `to_toml`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
+/// `PartialOrd` is load-bearing: `Config::load` rejects an `aging` past `stale`
+/// by comparing the two directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 #[schemars(with = "String")]
 pub struct Days(pub u64);
@@ -1343,11 +1343,11 @@ impl StalenessFinding {
     }
 }
 
-pub fn default_aging() -> Days {
+fn default_aging() -> Days {
     Days(90)
 }
 
-pub fn default_stale() -> Days {
+fn default_stale() -> Days {
     Days(180)
 }
 
@@ -2210,8 +2210,12 @@ impl TypeDef {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TypeDef {
+    /// A `[[types]]` entry with every field at its default, for a test that
+    /// cares about one or two of them. Spread it (`..TypeDef::test_fixture(..)`)
+    /// rather than naming every field: a new key on `TypeDef` should not charge
+    /// a mechanical edit to every fixture in the suite (STORY-277).
     pub fn test_fixture(name: &str, store: StoreBackend) -> TypeDef {
         TypeDef {
             name: name.to_string(),

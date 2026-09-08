@@ -532,37 +532,16 @@ impl DocumentStore for GitRefStore {
 mod tests {
     use super::*;
     use crate::engine::config::{
-        Config, DocumentConfig, FilesystemConfig, Naming, NumberingStrategy, StoreBackend,
-        Templates, TypeDef, UiConfig,
+        Config, DocumentConfig, FilesystemConfig, Naming, StoreBackend, Templates, TypeDef,
+        UiConfig,
     };
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use tempfile::TempDir;
 
     fn test_type_def() -> TypeDef {
         TypeDef {
-            name: "iteration".to_string(),
-            plural: "iterations".to_string(),
             dir: "docs/iterations".to_string(),
-            prefix: "ITERATION".to_string(),
-            icon: None,
-            numbering: NumberingStrategy::Incremental,
-            subdirectory: false,
-            store: StoreBackend::GitRef,
-            singleton: false,
-            parent_type: None,
-            agents: Vec::new(),
-            intent: None,
-            authorship: Default::default(),
-            lifecycle: Default::default(),
-            attributes: Default::default(),
-            label_override: None,
-            github_issue_tag: None,
-            github_issue_type: None,
-            staleness: Default::default(),
-            status_authority: None,
-            clickup_list_id: None,
-            clickup_task_type: None,
-            clickup_custom_field_map: None,
+            ..TypeDef::test_fixture("iteration", StoreBackend::GitRef)
         }
     }
 
@@ -653,7 +632,8 @@ mod tests {
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-001"), Some("abc123sha"));
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(calls.iter().any(|c| c.starts_with("list_refs:")));
         assert!(calls
             .iter()
@@ -791,7 +771,8 @@ mod tests {
         let lock = CacheLock::load(tmp.path()).unwrap();
         assert_eq!(lock.get("iteration/ITERATION-042"), Some("newsha456"));
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         let create_call = calls
             .iter()
             .find(|c| c.starts_with("create_commit:"))
@@ -996,7 +977,8 @@ mod tests {
             "lock entry should be removed"
         );
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(calls
             .iter()
             .any(|c| c == "delete_ref:refs/lazyspec/iteration/ITERATION-042"));
@@ -1089,7 +1071,8 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-042");
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             !calls.iter().any(|c| c.starts_with("list_refs:")),
             "should not call list_refs when reserved_number is set, got: {:?}",
@@ -1123,7 +1106,8 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-004");
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("list_refs:")),
             "should call list_refs when no reserved_number"
@@ -1168,7 +1152,8 @@ mod tests {
         );
         drop(blobs);
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("create_commit:")),
             "should re-commit locally, got: {:?}",
@@ -1269,7 +1254,8 @@ mod tests {
             .set_provenance(&td, "ITERATION-042", &["A".to_string()])
             .unwrap();
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         let create_call = calls
             .iter()
             .find(|c| c.starts_with("create_commit:"))
@@ -1314,7 +1300,8 @@ mod tests {
         // BUG-006: a create whose push reaches the remote reports `Synced`.
         assert_eq!(result.push_outcome, PushOutcome::Synced);
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c
                 == "push_new_ref:origin:refs/lazyspec/iteration/ITERATION-001:new_sha=abc123sha"),
@@ -1345,7 +1332,8 @@ mod tests {
 
         assert_eq!(result.id, "ITERATION-002");
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("fetch_refs:")),
             "a rejected claim should refetch before retrying, got: {:?}",
@@ -1395,7 +1383,8 @@ mod tests {
             err
         );
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert_eq!(
             calls
                 .iter()
@@ -1457,7 +1446,8 @@ mod tests {
             "offline create should keep the local lock entry"
         );
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             !calls.iter().any(|c| c.starts_with("fetch_refs:")),
             "an unreachable remote must not trigger a collision refetch, got: {:?}",
@@ -1493,7 +1483,8 @@ mod tests {
         // BUG-006: an update whose push reaches the remote reports `Synced`.
         assert_eq!(outcome, PushOutcome::Synced);
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c
                 == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
@@ -1568,7 +1559,8 @@ mod tests {
             .set_provenance(&test_type_def(), "ITERATION-042", &["A".to_string()])
             .unwrap();
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c
                 == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
@@ -1598,7 +1590,8 @@ mod tests {
             )
             .unwrap();
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c
                 == "push_ref_with_lease:origin:refs/lazyspec/iteration/ITERATION-042:new_sha=newsha:expected_old=Some(\"oldsha\")"),
@@ -1620,7 +1613,8 @@ mod tests {
         let mut store = make_store(&tmp, mock);
         store.delete(&test_type_def(), "ITERATION-042").unwrap();
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c
                 == "delete_remote_ref:origin:refs/lazyspec/iteration/ITERATION-042:expected_old=Some(\"somesha\")"),
@@ -1670,7 +1664,8 @@ mod tests {
             "lock should advance even when the push is offline"
         );
 
-        let calls = store.git_mock().calls.borrow();
+        let log = store.git_mock().call_log();
+        let calls = log.borrow();
         assert!(
             calls.iter().any(|c| c.starts_with("push_ref_with_lease:")),
             "a push should still have been attempted, got: {:?}",
