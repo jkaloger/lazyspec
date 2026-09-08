@@ -160,6 +160,7 @@ fn store_from_variant(v: &str) -> Option<StoreBackend> {
         "github-milestones" => Some(StoreBackend::GithubMilestones),
         "github-projects" => Some(StoreBackend::GithubProjects),
         "git-ref" => Some(StoreBackend::GitRef),
+        "git" => Some(StoreBackend::Git),
         _ => None,
     }
 }
@@ -3109,6 +3110,8 @@ impl App {
                     clickup_list_id: None,
                     clickup_task_type: None,
                     clickup_custom_field_map: None,
+                    remote: None,
+                    branch: None,
                 });
                 self.settings_entry = self.settings_buffer.documents.types.len() - 1;
             }
@@ -4399,6 +4402,12 @@ pub(crate) mod parity_seed {
 mod tests {
     use super::parity_seed::{bare_app, populate_docs};
     use super::*;
+
+    // STORY-281 AC9: the TUI store parser accepts `git` as the CLI one does.
+    #[test]
+    fn store_from_variant_accepts_git() {
+        assert_eq!(store_from_variant("git"), Some(StoreBackend::Git));
+    }
     use crate::engine::config::TypeDef;
     use crate::engine::staleness_cache::StalenessCache;
     use crate::engine::store::Store;
@@ -7140,6 +7149,11 @@ mod tests {
         assert_eq!(
             app.settings_buffer.documents.types[0].store,
             StoreBackend::GitRef
+        );
+        app.settings_space();
+        assert_eq!(
+            app.settings_buffer.documents.types[0].store,
+            StoreBackend::Git
         );
         app.settings_space();
         assert_eq!(

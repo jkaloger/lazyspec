@@ -14,10 +14,11 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::resolve::{resolve_to_id, resolve_to_path};
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{
-    board_number, GithubIssuesStore, GithubProjectsStore, PushOutcome, ADD_PROJECT_ITEM_MUTATION,
+    board_number, git_write_refusal, GithubIssuesStore, GithubProjectsStore, PushOutcome,
+    ADD_PROJECT_ITEM_MUTATION,
 };
 use crate::engine::task_map::TaskMap;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
 /// Describes the canonical relation that was actually written (or removed),
@@ -91,6 +92,7 @@ fn link_inner<
     // Pre-write store-aware guard: reject an illegal milestone triple before any
     // native call or cache write (ITER-230).
     validate_milestone_relation(config, store, &from_id, &to_id, &rel_str)?;
+    refuse_git_source(config, store, &from_id)?;
 
     // Native field PATCH (milestone / membership) is its own authoritative
     // last-write-wins edge; it runs before the cache mirror (ITER-222).
@@ -588,6 +590,20 @@ fn store_of(config: &Config, store: &Store, id: &str) -> Option<StoreBackend> {
         .map(|t| t.store.clone())
 }
 
+/// A `git` type is read-only until STORY-282, and the relation rewrite touches
+/// only the source document, so only the source's store is checked.
+pub(crate) fn refuse_git_source(config: &Config, store: &Store, from_id: &str) -> Result<()> {
+    let git_type = resolve_to_path(store, from_id)
+        .ok()
+        .and_then(|path| store.get(&path))
+        .and_then(|doc| config.type_by_name(doc.doc_type.as_str()))
+        .filter(|type_def| type_def.store == StoreBackend::Git);
+    match git_type {
+        Some(type_def) => bail!(git_write_refusal(type_def)),
+        None => Ok(()),
+    }
+}
+
 /// Enforce the store-aware relation vocabulary for `github-milestones` docs: a
 /// milestone is a REST object with no body and no native edge for arbitrary
 /// relations, so it may only be the *target* of the `targets` relation
@@ -694,6 +710,7 @@ fn unlink_inner<
     // Pre-retain store-aware guard: reject an illegal milestone triple before any
     // native call or cache mutation (ITER-230), mirroring link_inner.
     validate_milestone_relation(config, store, &from_id, &to_id, &rel_str)?;
+    refuse_git_source(config, store, &from_id)?;
 
     let native = apply_native_milestone(
         root,

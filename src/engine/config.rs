@@ -555,6 +555,8 @@ pub enum StoreBackend {
     GitRef,
     #[serde(rename = "clickup-tasks")]
     ClickupTasks,
+    #[serde(rename = "git")]
+    Git,
 }
 
 impl fmt::Display for StoreBackend {
@@ -566,6 +568,7 @@ impl fmt::Display for StoreBackend {
             StoreBackend::GithubProjects => write!(f, "github-projects"),
             StoreBackend::GitRef => write!(f, "git-ref"),
             StoreBackend::ClickupTasks => write!(f, "clickup-tasks"),
+            StoreBackend::Git => write!(f, "git"),
         }
     }
 }
@@ -756,10 +759,19 @@ pub struct TypeDef {
     #[serde(default)]
     pub subdirectory: bool,
     /// The storage backend for this type's documents: `filesystem` (default),
-    /// `github-issues`, `github-milestones`, `github-projects`, `git-ref`, or
-    /// `clickup-tasks`.
+    /// `github-issues`, `github-milestones`, `github-projects`, `git-ref`,
+    /// `clickup-tasks`, or `git`.
     #[serde(default)]
     pub store: StoreBackend,
+    /// The clone URL of the repository holding this type's documents. Required
+    /// when `store = "git"`, rejected on every other store; `dir` is then
+    /// relative to the clone root (RFC-072 "The git store").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// The branch checked out in the `git` store's clone. Absent means the
+    /// remote's default branch. Only valid beside `remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// When true, this type holds at most one document (e.g. a project
     /// convention), so `create` and numbering treat it as a singleton.
     #[serde(default)]
@@ -1518,6 +1530,8 @@ pub fn starter_types() -> Vec<TypeDef> {
         clickup_list_id: None,
         clickup_task_type: None,
         clickup_custom_field_map: None,
+        remote: None,
+        branch: None,
     };
     vec![
         simple("rfc", "rfcs", "docs/rfcs", "RFC", "●"),
@@ -1555,6 +1569,8 @@ pub fn starter_types() -> Vec<TypeDef> {
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
+            remote: None,
+            branch: None,
         },
         TypeDef {
             name: "dictum".to_string(),
@@ -1580,6 +1596,8 @@ pub fn starter_types() -> Vec<TypeDef> {
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
+            remote: None,
+            branch: None,
         },
     ]
 }
@@ -1997,6 +2015,30 @@ impl Config {
             );
         }
 
+        for t in &types {
+            let is_git = t.store == StoreBackend::Git;
+            if is_git && t.remote.is_none() {
+                bail!(
+                    "type \"{}\" sets store = \"git\" without remote; store = \"git\" requires remote = \"<clone url>\"",
+                    t.name
+                );
+            }
+            if !is_git && (t.remote.is_some() || t.branch.is_some()) {
+                bail!(
+                    "type \"{}\" sets remote/branch but store = \"{}\"; remote and branch are only valid on store = \"git\"",
+                    t.name,
+                    t.store
+                );
+            }
+            if is_git && std::path::Path::new(&t.dir).is_absolute() {
+                bail!(
+                    "type \"{}\" sets store = \"git\" with absolute dir \"{}\"; a git type's dir is relative to the clone root",
+                    t.name,
+                    t.dir
+                );
+            }
+        }
+
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
 
         let staleness = raw.staleness.unwrap_or_default();
@@ -2241,6 +2283,8 @@ impl TypeDef {
             clickup_list_id: None,
             clickup_task_type: None,
             clickup_custom_field_map: None,
+            remote: None,
+            branch: None,
         }
     }
 }
@@ -3802,6 +3846,90 @@ store = "github-issues"
     #[test]
     fn test_store_backend_display_git_ref() {
         assert_eq!(StoreBackend::GitRef.to_string(), "git-ref");
+    }
+
+    #[test]
+    fn test_store_backend_display_git() {
+        assert_eq!(StoreBackend::Git.to_string(), "git");
+    }
+
+    // STORY-281 AC7 / RFC-072 "The git store": `store = "git"` carries a clone
+    // URL and an optional branch as two keys on the type table.
+    #[test]
+    fn test_store_backend_parses_git_with_remote_and_branch() {
+        let toml_str = r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+store = "git"
+remote = "git@github.com:org/shared-specs.git"
+branch = "main"
+"#;
+        let config = Config::parse(&format!("{toml_str}{RELATIONSHIPS}")).unwrap();
+        let spec = &config.documents.types[0];
+        assert_eq!(spec.store, StoreBackend::Git);
+        assert_eq!(
+            spec.remote.as_deref(),
+            Some("git@github.com:org/shared-specs.git")
+        );
+        assert_eq!(spec.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_git_store_without_remote_errors_naming_the_type() {
+        let toml_str = r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+store = "git"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"spec\""), "names the type: {err}");
+        assert!(err.contains("remote"), "names the missing key: {err}");
+    }
+
+    #[test]
+    fn test_remote_on_non_git_store_errors() {
+        let toml_str = r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+remote = "git@github.com:org/shared-specs.git"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"spec\""), "names the type: {err}");
+        assert!(
+            err.contains("store = \"filesystem\""),
+            "names the store: {err}"
+        );
+    }
+
+    #[test]
+    fn test_git_store_with_absolute_dir_errors() {
+        let toml_str = r#"
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "/tmp/x/specs"
+prefix = "SPEC"
+store = "git"
+remote = "git@github.com:org/shared-specs.git"
+"#;
+        let err = Config::parse(&format!("{toml_str}{RELATIONSHIPS}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"spec\""), "names the type: {err}");
+        assert!(err.contains("/tmp/x/specs"), "names the dir: {err}");
     }
 
     #[test]

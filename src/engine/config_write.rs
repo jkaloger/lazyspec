@@ -86,6 +86,8 @@ fn update_type_table(entry: &mut Table, def: &TypeDef) {
     );
     set_bool_defaulted(entry, "subdirectory", def.subdirectory, false);
     set_str_defaulted(entry, "store", &def.store.to_string(), "filesystem");
+    set_opt_str(entry, "remote", def.remote.as_deref());
+    set_opt_str(entry, "branch", def.branch.as_deref());
     set_bool_defaulted(entry, "singleton", def.singleton, false);
     set_opt_str(entry, "parent_type", def.parent_type.as_deref());
     set_str_array_defaulted(entry, "agents", &def.agents);
@@ -1348,6 +1350,24 @@ normalize = false
         assert!(!reparsed
             .certification
             .should_normalize("docs/specs/SPEC-009"));
+    }
+
+    // STORY-281 AC7: a `git` type's remote and branch survive the writer.
+    #[test]
+    fn git_store_remote_and_branch_round_trip_through_writer() {
+        let git_type = TypeDef {
+            remote: Some("git@github.com:org/shared-specs.git".to_string()),
+            branch: Some("main".to_string()),
+            ..TypeDef::test_fixture("spec", StoreBackend::Git)
+        };
+        let buffer = {
+            let mut c = Config::parse(SRC).unwrap();
+            c.documents.types.push(git_type.clone());
+            c
+        };
+        let out = write_config_in_place(SRC, &buffer).unwrap();
+        let reparsed = Config::parse(&out).unwrap();
+        assert_eq!(reparsed.type_by_name("spec"), Some(&git_type));
     }
 
     #[test]

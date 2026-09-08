@@ -380,6 +380,8 @@ fn type_def_from_parts(
         clickup_list_id: clickup_list_id.map(str::to_string),
         clickup_task_type,
         clickup_custom_field_map: None,
+        remote: None,
+        branch: None,
     }
 }
 
@@ -1201,6 +1203,7 @@ fn parse_store(value: &str) -> Result<StoreBackend> {
         "github-milestones" => Ok(StoreBackend::GithubMilestones),
         "github-projects" => Ok(StoreBackend::GithubProjects),
         "git-ref" => Ok(StoreBackend::GitRef),
+        "git" => Ok(StoreBackend::Git),
         "clickup-tasks" => Ok(StoreBackend::ClickupTasks),
         other => bail!("unknown store backend \"{}\"", other),
     }
@@ -1219,6 +1222,12 @@ fn parse_authorship(value: &str) -> Result<Authorship> {
 mod tests {
     use super::*;
     use crate::cli::wizard::ScriptedPrompter;
+
+    // STORY-281 AC9: `--store git` parses.
+    #[test]
+    fn parse_store_accepts_git() {
+        assert_eq!(parse_store("git").unwrap(), StoreBackend::Git);
+    }
     use crate::cli::{Cli, Commands};
     use crate::engine::fs::RealFileSystem;
     use clap::Parser;
@@ -1341,6 +1350,14 @@ dir = "docs/issues"
 prefix = "ISSUE"
 store = "github-issues"
 
+[[types]]
+name = "team"
+plural = "team"
+dir = "docs/rfcs"
+prefix = "TEAM"
+store = "git"
+remote = "git@github.com:org/shared-specs.git"
+
 [github]
 repo = "octo-org/repo"
 
@@ -1354,6 +1371,7 @@ inverse = "implemented-by"
             ("spec", "/tmp/x/specs", "/tmp/x/specs"),
             ("shared", "../shared-specs", "/a/shared-specs"),
             ("issue", "docs/issues", "/a/b/.lazyspec/cache/issue"),
+            ("team", "docs/rfcs", "/a/b/.lazyspec/cache/team/docs/rfcs"),
         ] {
             let ty = type_named(&json, name);
             assert_eq!(ty["dir"], dir, "raw dir survives for {name}");

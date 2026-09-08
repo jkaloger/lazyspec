@@ -2095,6 +2095,7 @@ const STORE_VARIANTS: &[&str] = &[
     "github-milestones",
     "github-projects",
     "git-ref",
+    "git",
 ];
 const RESERVED_FORMAT_VARIANTS: &[&str] = &["incremental", "sqids"];
 
@@ -2961,6 +2962,12 @@ pub(super) fn doc_row_cells_gh_for_test(
 mod tests {
     use super::*;
     use crate::engine::config::{RelSelector, TypeSelector};
+
+    // STORY-281 AC9: the settings pane's store field cycles to `git`.
+    #[test]
+    fn store_variants_offer_git() {
+        assert!(STORE_VARIANTS.contains(&"git"));
+    }
     use crate::engine::status_colors::StatusColors;
 
     #[test]

@@ -11,8 +11,8 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store_dispatch;
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
-    Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, GitSync,
+    SyncContext, Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use anyhow::{bail, Context, Result};
@@ -53,6 +53,14 @@ pub fn run(
         .map(|t| t.name.as_str())
         .collect();
 
+    let git_types: Vec<&str> = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::Git)
+        .map(|t| t.name.as_str())
+        .collect();
+
     let clickup_types: Vec<&str> = config
         .documents
         .types
@@ -64,6 +72,7 @@ pub fn run(
     if gh_types.is_empty()
         && milestone_types.is_empty()
         && git_ref_types.is_empty()
+        && git_types.is_empty()
         && clickup_types.is_empty()
     {
         if json {
@@ -78,10 +87,11 @@ pub fn run(
         if !gh_types.contains(&filter)
             && !milestone_types.contains(&filter)
             && !git_ref_types.contains(&filter)
+            && !git_types.contains(&filter)
             && !clickup_types.contains(&filter)
         {
             bail!(
-                "type '{}' is not a github-issues, github-milestones, git-ref, or clickup-tasks type",
+                "type '{}' is not a github-issues, github-milestones, git-ref, git, or clickup-tasks type",
                 filter
             );
         }
@@ -94,6 +104,7 @@ pub fn run(
     let fetch_milestones = filter_types(milestone_types.clone(), type_filter);
     let fetch_gh = filter_types(gh_types.clone(), type_filter);
     let fetch_gitref = filter_types(git_ref_types.clone(), type_filter);
+    let fetch_git = filter_types(git_types.clone(), type_filter);
     let fetch_clickup = filter_types(clickup_types.clone(), type_filter);
 
     let gh_fetch = !fetch_milestones.is_empty() || !fetch_gh.is_empty();
@@ -179,6 +190,9 @@ pub fn run(
                 ops: git_ref_ops,
                 remote: config.git_ref.remote.clone(),
             });
+        }
+        if !fetch_git.is_empty() {
+            syncers.git = Some(GitSync { ops: git_ref_ops });
         }
         if clickup_fetch {
             syncers.clickup = Some(ClickupSync {

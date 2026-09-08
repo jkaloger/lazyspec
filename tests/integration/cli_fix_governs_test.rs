@@ -74,6 +74,12 @@ impl GitRefOps for RenamingGit {
     fn fetch_refs(&self, _root: &Path, _remote: &str, _pattern: &str) -> Result<()> {
         unreachable!("fix --governs fetches nothing")
     }
+    fn update_clone(&self, _clone: &Path, _branch: Option<&str>) -> Result<()> {
+        unreachable!("fix --governs updates no clones")
+    }
+    fn clone_repo(&self, _remote: &str, _branch: Option<&str>, _dest: &Path) -> Result<()> {
+        unreachable!("fix --governs clones nothing")
+    }
     fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
         unreachable!("fix --governs pushes nothing")
     }

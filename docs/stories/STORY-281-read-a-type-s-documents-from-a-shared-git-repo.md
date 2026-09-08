@@ -1,7 +1,7 @@
 ---
 title: Read a type's documents from a shared git repo
 type: story
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
@@ -9,6 +9,7 @@ related:
 - implements: RFC-072
 - blocks: STORY-282
 - blocks: STORY-284
+reviewed: bf44ec29495e6ef41d05c55f1385d7e9e8624a48
 ---
 
 ## Context

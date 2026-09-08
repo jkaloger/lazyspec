@@ -30,6 +30,13 @@ pub trait GitRefOps {
     fn update_ref(&self, root: &Path, refname: &str, new_sha: &str, old_sha: &str) -> Result<()>;
     fn delete_ref(&self, root: &Path, refname: &str) -> Result<()>;
     fn fetch_refs(&self, root: &Path, remote: &str, pattern: &str) -> Result<()>;
+    /// Clone `remote` into `dest` as a single-branch checkout of `branch`, or
+    /// of the remote's default branch when `None` (RFC-072 "The git store").
+    fn clone_repo(&self, remote: &str, branch: Option<&str>, dest: &Path) -> Result<()>;
+    /// Bring an existing clone to the tip of `branch` (or the remote's default
+    /// branch when `None`). Resets hard rather than pulling: an out-of-band edit
+    /// in the clone must not block the refresh.
+    fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
@@ -254,6 +261,42 @@ impl GitRefOps for GitCli {
         Ok(())
     }
 
+    fn clone_repo(&self, remote: &str, branch: Option<&str>, dest: &Path) -> Result<()> {
+        let mut cmd = Command::new("git");
+        cmd.args(["clone", "--single-branch"]);
+        if let Some(branch) = branch {
+            cmd.args(["--branch", branch]);
+        }
+        cmd.arg(remote).arg(dest).env("GIT_TERMINAL_PROMPT", "0");
+        let output = crate::engine::subprocess::output_with_timeout(cmd, FETCH_TIMEOUT)
+            .context("git clone")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git clone failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
+    fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()> {
+        let mut fetch = Command::new("git");
+        fetch
+            .args(["fetch", "origin", branch.unwrap_or("HEAD")])
+            .current_dir(clone)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let output = crate::engine::subprocess::output_with_timeout(fetch, FETCH_TIMEOUT)
+            .context("git fetch")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git fetch failed: {}", stderr.trim());
+        }
+        let output = self.run_git(clone, &["reset", "--hard", "FETCH_HEAD"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git reset failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
         let output = self.run_git(root, &["push", remote, refname])?;
         if !output.status.success() {
@@ -466,6 +509,8 @@ pub mod test_support {
         pub update_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_ref_results: RefCell<Vec<Result<()>>>,
         pub fetch_results: RefCell<Vec<Result<()>>>,
+        pub clone_results: RefCell<Vec<Result<()>>>,
+        pub update_clone_results: RefCell<Vec<Result<()>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
@@ -512,6 +557,8 @@ pub mod test_support {
                 update_ref_results: RefCell::new(vec![]),
                 delete_ref_results: RefCell::new(vec![]),
                 fetch_results: RefCell::new(vec![]),
+                clone_results: RefCell::new(vec![]),
+                update_clone_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
@@ -569,6 +616,16 @@ pub mod test_support {
 
         pub fn with_fetch_result(self, result: Result<()>) -> Self {
             self.fetch_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_clone_result(self, result: Result<()>) -> Self {
+            self.clone_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_update_clone_result(self, result: Result<()>) -> Self {
+            self.update_clone_results.borrow_mut().push(result);
             self
         }
 
@@ -710,6 +767,25 @@ pub mod test_support {
                 .borrow_mut()
                 .push(format!("fetch_refs:{}:{}", remote, pattern));
             Self::pop_or_default(&self.fetch_results)
+        }
+
+        fn clone_repo(&self, remote: &str, branch: Option<&str>, dest: &Path) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "clone_repo:{}:{}:{}",
+                remote,
+                branch.unwrap_or("default"),
+                dest.display()
+            ));
+            Self::pop_or_default(&self.clone_results)
+        }
+
+        fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "update_clone:{}:{}",
+                clone.display(),
+                branch.unwrap_or("default")
+            ));
+            Self::pop_or_default(&self.update_clone_results)
         }
 
         fn push_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {

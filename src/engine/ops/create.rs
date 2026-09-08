@@ -11,7 +11,7 @@ use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
 use crate::engine::store::{Filter, Store};
 use crate::engine::store_dispatch::{
-    DocumentStore, GithubIssuesStore, GithubMilestonesStore, PushOutcome,
+    build_registry, DocumentStore, GithubIssuesStore, GithubMilestonesStore, PushOutcome,
 };
 use anyhow::{anyhow, bail, Result};
 use std::fs;
@@ -80,6 +80,17 @@ pub fn run_with_body(
         if let Some(doc) = existing.first() {
             bail!("{} already exists at {}", doc_type, doc.path.display());
         }
+    }
+
+    // Ahead of the `--parent` branch so a child of a git type is refused too,
+    // instead of landing as a local file under `<root>/<dir>`.
+    if type_def.store == StoreBackend::Git {
+        let mut registry = build_registry(root, config);
+        let created =
+            registry
+                .for_type(type_def)?
+                .create(type_def, title, author, body.unwrap_or(""))?;
+        return Ok((root.join(&created.path), created.push_outcome));
     }
 
     if let Some(parent_id) = parent {

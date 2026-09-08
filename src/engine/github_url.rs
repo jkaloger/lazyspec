@@ -159,9 +159,13 @@ pub fn github_url(
                 entry.issue_number
             )))
         }
-        // GithubProjects / GitRef / ClickupTasks have no GitHub single-document
-        // URL (ClickUp docs live in ClickUp, not GitHub).
-        StoreBackend::GithubProjects | StoreBackend::GitRef | StoreBackend::ClickupTasks => None,
+        // GithubProjects / GitRef / ClickupTasks / Git have no GitHub
+        // single-document URL (ClickUp docs live in ClickUp, not GitHub; a git
+        // clone's remote need not be GitHub).
+        StoreBackend::GithubProjects
+        | StoreBackend::GitRef
+        | StoreBackend::ClickupTasks
+        | StoreBackend::Git => None,
     }
 }
 

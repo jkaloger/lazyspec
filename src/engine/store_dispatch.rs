@@ -3087,7 +3087,34 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
         );
     }
 
+    // A `git` type is read-only until STORY-282: every write dispatched through
+    // the registry refuses with the message the direct write paths raise. The
+    // registry is keyed by backend, so the message names the first `git` type.
+    let git_type = config
+        .documents
+        .types
+        .iter()
+        .find(|t| t.store == StoreBackend::Git);
+    let message = match git_type {
+        Some(type_def) => git_write_refusal(type_def),
+        None => format!(
+            "type uses {} store; writes are not yet supported (STORY-282)",
+            StoreBackend::Git
+        ),
+    };
+    registry.register(StoreBackend::Git, Box::new(UnavailableStore { message }));
+
     registry
+}
+
+/// The refusal every write to a `git` type raises (STORY-281 AC6), so `create`,
+/// `update`, `link`, `tag` and `delete` all name the backend the same way.
+pub(crate) fn git_write_refusal(type_def: &TypeDef) -> String {
+    format!(
+        "type '{}' uses {} store; writes are not yet supported (STORY-282)",
+        type_def.name,
+        StoreBackend::Git
+    )
 }
 
 /// Load the ClickUp credential and bind a token-bearing [`ClickupTasksStore`] --
@@ -5682,6 +5709,28 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("no clickup-tasks type is configured"));
+    }
+
+    #[test]
+    fn build_registry_refuses_writes_to_git_types() {
+        let root = tmp_root("registry_git_refuses");
+        let mut config = Config::default();
+        let td = TypeDef {
+            remote: Some("https://example.com/specs.git".to_string()),
+            ..test_type_def(StoreBackend::Git)
+        };
+        config.documents.types.push(td.clone());
+        let mut registry = build_registry(&root, &config);
+
+        let result =
+            registry
+                .for_type(&td)
+                .unwrap()
+                .update(&td, "RFC-001", &[("status", "review")]);
+
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("git"), "{msg}");
+        assert!(msg.contains("not yet supported"), "{msg}");
     }
 
     #[test]

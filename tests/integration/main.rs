@@ -47,6 +47,7 @@ mod fetch_milestone_relation_test;
 mod fetch_nested_subissues_test;
 mod fetch_prune_test;
 mod git_ref_test;
+mod git_store_test;
 mod provenance_cli;
 mod provenance_roundtrip;
 mod reservation_test;

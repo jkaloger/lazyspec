@@ -212,6 +212,88 @@ impl TypeSync for GitRefSync<'_> {
     }
 }
 
+/// Refreshes a `git` type's managed clone (RFC-072 "The git store"): clones
+/// when the clone root is missing, otherwise brings it to the branch tip.
+pub struct GitSync<'c> {
+    pub ops: &'c dyn GitRefOps,
+}
+
+impl TypeSync for GitSync<'_> {
+    fn sync(
+        &mut self,
+        _ctx: &mut SyncContext,
+        root: &Path,
+        td: &TypeDef,
+        _cfg: &Config,
+    ) -> SyncOutcome {
+        match sync_git_clone(root, self.ops, td) {
+            Ok(c) => SyncOutcome {
+                type_name: td.name.clone(),
+                fetched: c.fetched,
+                new: c.new,
+                removed: c.removed,
+                ..Default::default()
+            },
+            Err(e) => SyncOutcome::failed(&td.name, format!("{e:#}")),
+        }
+    }
+}
+
+fn sync_git_clone(root: &Path, ops: &dyn GitRefOps, td: &TypeDef) -> Result<GitRefCounts> {
+    use anyhow::Context as _;
+
+    let clone_root = root.join(".lazyspec/cache").join(&td.name);
+    let docs = crate::engine::store::doc_root(root, td);
+    let before = md_files(&docs);
+
+    if clone_root.exists() {
+        let branch = td.branch.as_deref();
+        ops.update_clone(&clone_root, branch).with_context(|| {
+            format!(
+                "updating {} ({}) for type {}",
+                td.remote.as_deref().unwrap_or_default(),
+                branch.unwrap_or("default branch"),
+                td.name
+            )
+        })?;
+    } else {
+        crate::engine::store::clone_git_store(
+            root,
+            td,
+            &clone_root,
+            ops,
+            &crate::engine::fs::RealFileSystem,
+        )?;
+    }
+
+    let after = md_files(&docs);
+    Ok(GitRefCounts {
+        fetched: after.len(),
+        new: after.difference(&before).count(),
+        removed: before.difference(&after).count(),
+    })
+}
+
+/// Every `.md` under `dir`, recursively -- the set the loader will read, so the
+/// counts are set differences over what changed on disk, not a parsed diff.
+fn md_files(dir: &Path) -> HashSet<std::path::PathBuf> {
+    let mut found = HashSet::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                found.insert(path);
+            }
+        }
+    }
+    found
+}
+
 /// Refreshes a `clickup-tasks` type: task cache, then the bound List's status
 /// colours (the previously TUI-missed capture) and the derived lifecycle.
 pub struct ClickupSync<'c> {
@@ -294,11 +376,12 @@ pub struct Syncers<'c> {
     pub milestone: Option<GhMilestoneSync>,
     pub issue: Option<GhIssueSync<'c>>,
     pub git_ref: Option<GitRefSync<'c>>,
+    pub git: Option<GitSync<'c>>,
     pub clickup: Option<ClickupSync<'c>>,
 }
 
 /// Refresh every configured type's cache, in fixed backend order (milestones,
-/// issues, git-ref, clickup), collecting one [`SyncOutcome`] per type. Never
+/// issues, git-ref, git, clickup), collecting one [`SyncOutcome`] per type. Never
 /// aborts: a per-type fetch failure -- or a missing syncer for a configured
 /// backend -- is recorded in that type's `error` and the run continues. The
 /// ordering rule (milestones before issues) lives here, in one place.
@@ -318,6 +401,7 @@ pub fn sync_all(
         StoreBackend::GithubMilestones,
         StoreBackend::GithubIssues,
         StoreBackend::GitRef,
+        StoreBackend::Git,
         StoreBackend::ClickupTasks,
     ];
 
@@ -390,6 +474,7 @@ fn is_github_backend(backend: &StoreBackend) -> bool {
         StoreBackend::GithubProjects
         | StoreBackend::GitRef
         | StoreBackend::ClickupTasks
+        | StoreBackend::Git
         | StoreBackend::Filesystem => false,
     }
 }
@@ -437,6 +522,7 @@ fn dispatch(
             cfg,
             "clickup-tasks",
         )),
+        StoreBackend::Git => Some(run_syncer(syncers.git.as_mut(), ctx, root, td, cfg, "git")),
         StoreBackend::Filesystem => None,
         StoreBackend::GithubProjects => None,
     }
@@ -1818,5 +1904,112 @@ mod tests {
         assert!(warnings.is_empty(), "got: {warnings:?}");
         assert_eq!(cached_story_status(&doc), "review");
         assert!(client.graphql_calls.borrow().is_empty());
+    }
+
+    // --- STORY-281 AC5: `fetch` brings a `git` type's managed clone current ---
+
+    use crate::engine::git_ref::test_support::MockGitRefClient;
+
+    const GIT_REMOTE: &str = "https://example.invalid/shared.git";
+
+    fn git_type_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some(GIT_REMOTE.to_string()),
+            branch: Some("next".to_string()),
+            ..type_def("rfc", "RFC", StoreBackend::Git)
+        }];
+        config
+    }
+
+    fn sync_git(root: &Path, config: &Config, ops: &MockGitRefClient) -> SyncOutcome {
+        let mut ctx = SyncContext {
+            gh: None,
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            git: Some(GitSync { ops }),
+            ..Default::default()
+        };
+        let mut outcomes = sync_all(root, config, &mut ctx, &mut syncers, None);
+        assert_eq!(outcomes.len(), 1, "one outcome for the one git type");
+        outcomes.remove(0)
+    }
+
+    fn calls_starting(ops: &MockGitRefClient, prefix: &str) -> Vec<String> {
+        ops.call_log()
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_clone_is_cloned_not_updated() {
+        let tmp = TempDir::new().unwrap();
+        let ops = MockGitRefClient::new();
+
+        let outcome = sync_git(tmp.path(), &git_type_config(), &ops);
+
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(calls_starting(&ops, "clone_repo:").len(), 1);
+        assert!(calls_starting(&ops, "update_clone:").is_empty());
+    }
+
+    #[test]
+    fn an_existing_clone_is_updated_on_its_branch_not_recloned() {
+        let tmp = TempDir::new().unwrap();
+        let clone_root = tmp.path().join(".lazyspec/cache/rfc");
+        std::fs::create_dir_all(&clone_root).unwrap();
+        let ops = MockGitRefClient::new();
+
+        let outcome = sync_git(tmp.path(), &git_type_config(), &ops);
+
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(
+            calls_starting(&ops, "update_clone:"),
+            vec![format!("update_clone:{}:next", clone_root.display())]
+        );
+        assert!(calls_starting(&ops, "clone_repo:").is_empty());
+    }
+
+    #[test]
+    fn a_failed_update_names_remote_and_branch_and_fetches_nothing() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache/rfc")).unwrap();
+        let ops = MockGitRefClient::new()
+            .with_update_clone_result(Err(anyhow::anyhow!("could not resolve host")));
+
+        let outcome = sync_git(tmp.path(), &git_type_config(), &ops);
+
+        let error = outcome
+            .error
+            .expect("the failed update is the outcome's error");
+        assert!(error.contains(GIT_REMOTE), "{error}");
+        assert!(error.contains("next"), "{error}");
+        assert_eq!(outcome.fetched, 0);
+    }
+
+    #[test]
+    fn counts_come_from_the_doc_set_before_and_after() {
+        let tmp = TempDir::new().unwrap();
+        let docs = tmp.path().join(".lazyspec/cache/rfc/docs/rfcs");
+        std::fs::create_dir_all(docs.join("nested")).unwrap();
+        std::fs::write(docs.join("RFC-001-a.md"), "").unwrap();
+        std::fs::write(docs.join("RFC-002-b.md"), "").unwrap();
+        std::fs::write(docs.join("nested/RFC-003-c.md"), "").unwrap();
+        std::fs::write(docs.join("notes.txt"), "").unwrap();
+        let ops = MockGitRefClient::new();
+
+        let outcome = sync_git(tmp.path(), &git_type_config(), &ops);
+
+        assert_eq!(
+            (outcome.fetched, outcome.new, outcome.removed),
+            (3, 0, 0),
+            "the mock changes nothing, so the set is unchanged"
+        );
     }
 }

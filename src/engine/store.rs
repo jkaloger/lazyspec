@@ -10,7 +10,7 @@ use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
 use crate::engine::traversal::TraversalWalk;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use globset::GlobMatcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config as NucleoConfig, Matcher, Utf32Str};
@@ -113,16 +113,61 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
 /// Where a type's documents live, as an absolute path with no `..` (RFC-072
 /// "Resolution, not a second store"). `root` is absolute, and `Path::join`
 /// discards it for an absolute `dir`, so every `filesystem` spelling resolves
-/// to the same shape. Cache-backed stores ignore `dir` entirely.
+/// to the same shape. Cache-backed stores ignore `dir` entirely; a `git` store
+/// joins `dir` against its managed clone root under the cache.
 pub fn doc_root(root: &Path, type_def: &TypeDef) -> PathBuf {
+    let cache = root.join(".lazyspec/cache").join(&type_def.name);
     match type_def.store {
         StoreBackend::Filesystem => normalize(&root.join(&type_def.dir)),
         StoreBackend::GithubIssues
         | StoreBackend::GithubMilestones
         | StoreBackend::GithubProjects
         | StoreBackend::GitRef
-        | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
+        | StoreBackend::ClickupTasks => cache,
+        StoreBackend::Git => normalize(&cache.join(&type_def.dir)),
     }
+}
+
+/// Keeps `.lazyspec/cache/` out of the project's history. Every backend that
+/// materializes a managed cache -- git-ref writes, git clones -- calls this
+/// before its first write under the cache root.
+pub(crate) fn ensure_cache_gitignored(root: &Path, fs: &dyn FileSystem) -> Result<()> {
+    let path = root.join(".lazyspec/.gitignore");
+    let mut contents = fs.read_to_string(&path).unwrap_or_default();
+    if contents.lines().any(|line| line.trim() == "cache/") {
+        return Ok(());
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str("cache/\n");
+    fs.create_dir_all(&root.join(".lazyspec"))?;
+    fs.write(&path, &contents)
+}
+
+/// First read of a `git` type: clone its remote into the managed cache root
+/// (RFC-072 "The git store"). Subsequent reads find the clone and never reach
+/// here, so an unreachable remote cannot break them.
+pub(crate) fn clone_git_store(
+    root: &Path,
+    type_def: &TypeDef,
+    clone_root: &Path,
+    ops: &dyn GitRefOps,
+    fs: &dyn FileSystem,
+) -> Result<()> {
+    let remote = type_def
+        .remote
+        .as_deref()
+        .expect("Config::parse rejects a git store without a remote");
+    let branch = type_def.branch.as_deref();
+    ensure_cache_gitignored(root, fs)?;
+    ops.clone_repo(remote, branch, clone_root).with_context(|| {
+        format!(
+            "cloning {remote} ({}) for type {}",
+            branch.unwrap_or("default branch"),
+            type_def.name
+        )
+    })
 }
 
 impl Store {
@@ -145,6 +190,13 @@ impl Store {
 
         for type_def in &config.documents.types {
             let full_path = doc_root(root, type_def);
+
+            if type_def.store == StoreBackend::Git {
+                let clone_root = root.join(".lazyspec/cache").join(&type_def.name);
+                if let Some(ops) = git_ref_ops.filter(|_| !fs.exists(&clone_root)) {
+                    clone_git_store(root, type_def, &clone_root, ops, fs)?;
+                }
+            }
 
             if !fs.exists(&full_path) {
                 if type_def.store == StoreBackend::GitRef {
@@ -1531,6 +1583,19 @@ mod tests {
         }
     }
 
+    // STORY-281 AC7: a `git` type's `dir` is joined against its managed clone root.
+    #[test]
+    fn doc_root_joins_dir_against_the_clone_root_for_git_store() {
+        let type_def = TypeDef {
+            dir: "docs/specs".to_string(),
+            ..TypeDef::test_fixture("spec", StoreBackend::Git)
+        };
+        assert_eq!(
+            doc_root(Path::new("/a/b"), &type_def),
+            PathBuf::from("/a/b/.lazyspec/cache/spec/docs/specs")
+        );
+    }
+
     fn github_issues_config() -> Config {
         use crate::engine::config::{StoreBackend, TypeDef};
 
@@ -1832,6 +1897,153 @@ mod tests {
         let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
 
         assert_eq!(store.docs.len(), 0);
+    }
+
+    const GIT_REMOTE: &str = "https://example.invalid/docs.git";
+
+    fn git_config(branch: Option<&str>) -> Config {
+        use crate::engine::config::{StoreBackend, TypeDef};
+
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            dir: "docs/notes".to_string(),
+            remote: Some(GIT_REMOTE.to_string()),
+            branch: branch.map(str::to_string),
+            ..TypeDef::test_fixture("note", StoreBackend::Git)
+        });
+        config
+    }
+
+    fn clone_calls(mock: &crate::engine::git_ref::test_support::MockGitRefClient) -> Vec<String> {
+        mock.call_log()
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("clone_repo:"))
+            .cloned()
+            .collect()
+    }
+
+    // STORY-281 AC1/AC2: a git type with no clone yet clones the remote at the
+    // configured branch into the managed cache root.
+    #[test]
+    fn test_git_store_first_read_clones_configured_branch() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let mock = MockGitRefClient::new();
+
+        Store::load_with_fs(&root, &git_config(Some("next")), &fs, Some(&mock)).unwrap();
+
+        assert_eq!(
+            clone_calls(&mock),
+            vec![format!(
+                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/note"
+            )]
+        );
+    }
+
+    // STORY-281 AC2: no `branch` means the remote's default branch.
+    #[test]
+    fn test_git_store_first_read_clones_default_branch_when_unset() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let mock = MockGitRefClient::new();
+
+        Store::load_with_fs(&root, &git_config(None), &fs, Some(&mock)).unwrap();
+
+        assert_eq!(
+            clone_calls(&mock),
+            vec![format!(
+                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/note"
+            )]
+        );
+    }
+
+    // STORY-281 AC3: an existing clone is read as-is; the remote is not touched,
+    // so an unreachable remote cannot break the read.
+    #[test]
+    fn test_git_store_existing_clone_reads_without_cloning() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let clone = root.join(".lazyspec/cache/note");
+        fs.add_dir(clone.clone());
+        fs.add_dir(clone.join("docs/notes"));
+        fs.add_file(
+            clone.join("docs/notes/NOTE-001-a.md"),
+            concat!(
+                "---\n",
+                "title: \"A\"\n",
+                "type: note\n",
+                "status: draft\n",
+                "author: \"tester\"\n",
+                "date: 2026-04-01\n",
+                "tags: []\n",
+                "---\n",
+            ),
+        );
+        let mock = MockGitRefClient::new()
+            .with_clone_result(Err(anyhow::anyhow!("could not read from remote")));
+
+        let store = Store::load_with_fs(&root, &git_config(None), &fs, Some(&mock)).unwrap();
+
+        assert!(clone_calls(&mock).is_empty());
+        let docs = store.list(&Filter::default());
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id, "NOTE-001");
+    }
+
+    // STORY-281 AC8: a failed clone names the remote and the branch.
+    #[test]
+    fn test_git_store_failed_clone_names_remote_and_branch() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let mock = MockGitRefClient::new()
+            .with_clone_result(Err(anyhow::anyhow!("could not read from remote")));
+
+        let Err(err) = Store::load_with_fs(&root, &git_config(Some("next")), &fs, Some(&mock))
+        else {
+            panic!("a failed clone fails the load");
+        };
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains(GIT_REMOTE), "{msg}");
+        assert!(msg.contains("next"), "{msg}");
+        assert!(msg.contains("could not read from remote"), "{msg}");
+    }
+
+    // STORY-281 AC4: the clone path gitignores the cache.
+    #[test]
+    fn test_git_store_first_read_gitignores_cache() {
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let mock = MockGitRefClient::new();
+
+        Store::load_with_fs(&root, &git_config(None), &fs, Some(&mock)).unwrap();
+
+        let gitignore = fs
+            .read_to_string(&root.join(".lazyspec/.gitignore"))
+            .expect(".lazyspec/.gitignore is written");
+        assert!(gitignore.lines().any(|l| l == "cache/"), "{gitignore:?}");
+    }
+
+    #[test]
+    fn test_git_store_without_git_ops_reads_nothing() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+
+        let store = Store::load_with_fs(&root, &git_config(None), &fs, None).unwrap();
+
+        assert_eq!(store.docs.len(), 0);
+        assert!(!fs.exists(&root.join(".lazyspec/.gitignore")));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use chrono::Local;
@@ -8,30 +8,12 @@ use crate::engine::config::{Config, TypeDef};
 use crate::engine::document::{
     body_section, compose_frontmatter, split_frontmatter, DocMeta, DocType, Status,
 };
+use crate::engine::fs::RealFileSystem;
 use crate::engine::git_ref::GitRefClient;
+use crate::engine::store::ensure_cache_gitignored;
 use crate::engine::store_dispatch::{
     find_cache_file, write_cache_file, CreatedDoc, DocumentStore, PushOutcome,
 };
-
-fn ensure_cache_gitignored(root: &Path) -> Result<()> {
-    let gitignore_path = root.join(".lazyspec/.gitignore");
-    if let Ok(contents) = std::fs::read_to_string(&gitignore_path) {
-        if !contents.lines().any(|line| line.trim() == "cache/") {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&gitignore_path)?;
-            if !contents.ends_with('\n') && !contents.is_empty() {
-                writeln!(file)?;
-            }
-            writeln!(file, "cache/")?;
-        }
-    } else {
-        std::fs::create_dir_all(root.join(".lazyspec"))?;
-        std::fs::write(&gitignore_path, "cache/\n")?;
-    }
-    Ok(())
-}
 
 /// True when a push error is a live remote *rejecting* the update (the ref
 /// moved underneath us) rather than the remote being unreachable/offline.
@@ -284,7 +266,7 @@ impl DocumentStore for GitRefStore {
         author: &str,
         body: &str,
     ) -> Result<CreatedDoc> {
-        ensure_cache_gitignored(&self.root)?;
+        ensure_cache_gitignored(&self.root, &RealFileSystem)?;
         let date = Local::now().format("%Y-%m-%d").to_string();
 
         // A reserved number is claimed by the caller (e.g. the reservation

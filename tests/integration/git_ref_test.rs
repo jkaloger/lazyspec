@@ -520,3 +520,57 @@ fn create_ref_commit_fails_if_ref_exists() {
         "second create_ref_commit on same refname should fail due to CAS"
     );
 }
+
+// STORY-281 AC6 regression guard: `tag` on a git-ref type must commit the
+// rewritten cache into the ref, not the pre-change bytes (ITERATION-435 pushed
+// first, which recommitted the stale cache and left the tag local-only).
+#[test]
+fn tag_add_on_git_ref_type_commits_the_tag_into_the_ref() {
+    use lazyspec::engine::cache_lock::CacheLock;
+    use lazyspec::engine::config::StoreBackend;
+    use lazyspec::engine::fs::RealFileSystem;
+    use lazyspec::engine::store::Store;
+
+    let (fixture, _bare) = TestFixture::with_git_remote();
+    let root = fixture.root();
+    let git = GitCli;
+    let content = "---\ntitle: \"Feature Work\"\ntype: iteration\nstatus: draft\nauthor: \"agent\"\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n";
+
+    let cache_dir = root.join(".lazyspec/cache/iteration");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(cache_dir.join("ITERATION-001-feature.md"), content).unwrap();
+    let refname = "refs/lazyspec/iteration/ITERATION-001";
+    let old_sha = git
+        .create_ref_commit(root, refname, &[("doc.md", content)])
+        .unwrap();
+    git.push_ref(root, "origin", refname).unwrap();
+    let mut lock = CacheLock::default();
+    lock.set("iteration/ITERATION-001", &old_sha);
+    lock.save(root).unwrap();
+
+    let mut config = fixture.config();
+    for t in &mut config.documents.types {
+        if t.name == "iteration" {
+            t.store = StoreBackend::GitRef;
+        }
+    }
+    let store = Store::load(root, &config).unwrap();
+
+    lazyspec::cli::tag::tag_add_with_config(
+        root,
+        &store,
+        "ITERATION-001",
+        &["security".to_string()],
+        &RealFileSystem,
+        Some(&config),
+    )
+    .unwrap();
+
+    let new_sha = git.resolve_ref(root, refname).unwrap().unwrap();
+    assert_ne!(new_sha, old_sha, "tag should advance the ref");
+    let blob = git.read_ref_blob(root, &new_sha, "doc.md").unwrap();
+    assert!(
+        blob.contains("security"),
+        "committed ref blob should carry the tag, got: {blob}"
+    );
+}

@@ -12,8 +12,8 @@ use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, GithubIssuesStore};
 use crate::engine::sync::{
-    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, SyncContext,
-    Syncers,
+    sync_all, ClickupMaps, ClickupSync, GhMaps, GhMilestoneSync, GhRound, GitRefSync, GitSync,
+    SyncContext, Syncers,
 };
 use crate::engine::task_map::TaskMap;
 use crate::tui::content;
@@ -309,6 +309,7 @@ fn poll_sync(
         .any(|t| t.store == StoreBackend::GithubMilestones);
     let has_gh_issues = types.iter().any(|t| t.store == StoreBackend::GithubIssues);
     let has_git_ref = types.iter().any(|t| t.store == StoreBackend::GitRef);
+    let has_git = types.iter().any(|t| t.store == StoreBackend::Git);
     let has_clickup = types.iter().any(|t| t.store == StoreBackend::ClickupTasks);
 
     let mut warnings: Vec<String> = Vec::new();
@@ -373,6 +374,9 @@ fn poll_sync(
                 ops: git_ops,
                 remote: config.git_ref.remote.clone(),
             });
+        }
+        if has_git {
+            syncers.git = Some(GitSync { ops: git_ops });
         }
         if has_clickup {
             if let Some(token) = clickup_token {
@@ -941,15 +945,20 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 // poll, so the trigger keeps firing for later refreshes.
                 next_poll = Some(Instant::now() + Duration::from_secs(cache_ttl));
                 // Spawn ONE poll thread whenever there is ANY work: a github store
-                // to refresh, or at least one clickup-tasks type. A project with
-                // neither (no gh store AND no clickup types) skips the spawn and
-                // just rides the advanced deadline above.
+                // to refresh, or at least one clickup-tasks or git type. A project
+                // with none skips the spawn and just rides the advanced deadline
+                // above.
                 let has_clickup_types = config
                     .documents
                     .types
                     .iter()
                     .any(|t| t.store == StoreBackend::ClickupTasks);
-                if shared_gh_store.is_some() || has_clickup_types {
+                let has_git_types = config
+                    .documents
+                    .types
+                    .iter()
+                    .any(|t| t.store == StoreBackend::Git);
+                if shared_gh_store.is_some() || has_clickup_types || has_git_types {
                     refresh_in_flight.store(true, Ordering::Relaxed);
                     let poll_tx = tx.clone();
                     let poll_root = root.clone();
@@ -1432,6 +1441,41 @@ mod tests {
         );
         let colors = StatusColors::load(root).unwrap();
         assert_eq!(colors.get("task", "in progress"), Some("#4194f6"));
+    }
+
+    // AC (STORY-281 AC9): the poll treats a `git` type as fetchable, bringing its
+    // existing clone current through the same seam `fetch` uses.
+    #[test]
+    fn poll_updates_the_clone_of_a_git_type() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let clone_root = root.join(".lazyspec/cache/rfc");
+        std::fs::create_dir_all(&clone_root).unwrap();
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some("https://example.invalid/shared.git".to_string()),
+            branch: Some("main".to_string()),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+        }];
+        let git = MockGitRefClient::new();
+        let clickup = FakeClickupClient::with_tasks(vec![]);
+        let reader = inert_gh();
+
+        let warnings = poll_sync(root, &config, None, &reader, &git, &clickup, None);
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        let updates: Vec<String> = git
+            .call_log()
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("update_clone:"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            updates,
+            vec![format!("update_clone:{}:main", clone_root.display())]
+        );
     }
 
     // AC (STORY-203): a per-type fetch failure surfaces as a warning on the
