@@ -289,6 +289,53 @@ mod tests {
         }
     }
 
+    /// STORY-274 AC3: transitioning a stale `drift` document re-anchors it, so
+    /// the next `compute` diffs `HEAD..HEAD` -- the range real git answers
+    /// empty, and so the one that stops reporting `stale`. The mock's `Drift` is
+    /// fixed, so the range it was asked for is the assertion; the counts would
+    /// look the same for a document that was never re-anchored at all.
+    #[test]
+    fn a_status_transition_re_anchors_a_stale_drift_document() {
+        let config = config_driven_by(StalenessDriver::Drift);
+        let drift = Drift {
+            files: 12,
+            insertions: 310,
+            deletions: 85,
+        };
+        let (tmp, store) = store_with(&["src/engine/**"], Some("staleanchor"), days_ago(1));
+        let git = mock_with_drift(drift);
+        assert_eq!(compute_in(&store, &config, &git).band, Band::Stale);
+
+        crate::engine::ops::update::run_with_config(
+            tmp.path(),
+            &store,
+            "RFC-001",
+            &[("status", "review")],
+            Some(&config),
+            &git,
+        )
+        .unwrap();
+
+        let store = Store::load(tmp.path(), &config).unwrap();
+        git.calls.borrow_mut().clear();
+        compute_in(&store, &config, &git);
+
+        assert_eq!(
+            git.calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with("diff_stat:"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [format!(
+                "diff_stat:{}:{}..HEAD:src/engine/**",
+                store.governs_root().display(),
+                crate::engine::git_ref::test_support::FAKE_HEAD
+            )],
+            "the anchor is now HEAD, so nothing is between it and HEAD"
+        );
+    }
+
     // AC5: `reviewed` is the anchor and dates the document; its absence falls
     // back to the frontmatter date without reading any commit.
     #[test]

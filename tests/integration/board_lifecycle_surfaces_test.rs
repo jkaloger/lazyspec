@@ -7,6 +7,7 @@ use lazyspec::engine::gh::{
     ProjectFieldValue, ProjectItem,
 };
 use lazyspec::engine::gh_schema::{GhSchemaSnapshot, OptionId, ProjectFieldId};
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::issue_body::TypeMatchRule;
 use lazyspec::engine::issue_cache::IssueCache;
 use lazyspec::engine::issue_map::IssueMap;
@@ -1226,6 +1227,7 @@ fn update_status_rejects_a_value_the_authority_board_has_no_column_for() {
         "TICKET-42",
         &[("status", "Blocked")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap_err()
     .to_string();

@@ -1966,6 +1966,11 @@ impl DocumentStore for GithubIssuesStore {
                 "title" => meta.title = value.to_string(),
                 "author" => meta.author = value.to_string(),
                 "body" => body = value.to_string(),
+                // The review anchor is first-class frontmatter, not a declared
+                // attribute: it rides the issue body (which `fetch` rebuilds the
+                // cache file from), so stamping the cache instead would be erased
+                // by the next round.
+                "reviewed" => meta.reviewed = Some(value.to_string()),
                 // The native issue-type lives in GitHub's `issueType` field, not
                 // the issue-body HTML comment, so it is kept out of attr_updates.
                 "issue_type" => issue_type_update = Some(value),
@@ -9330,6 +9335,68 @@ mod tests {
             assert!(store.mock().field_clears.borrow().is_empty());
             assert_eq!(cached_status(&root, "RFC-001"), "in progress");
         }
+    }
+
+    const REVIEW_SHA: &str = "1234567890abcdef1234567890abcdef12345678";
+
+    // STORY-274 AC5: a human transition reaches the store as ONE slice carrying
+    // the column and the anchor together. The anchor rides the issue body -- the
+    // cache file is rebuilt from that body by the next fetch -- and the card
+    // still moves, in the same single `issue_edit`.
+    #[test]
+    fn update_stamps_reviewed_into_the_issue_body_and_still_moves_the_card() {
+        let root = tmp_root("iter428_stamp_and_move");
+        let mut store = board_bound_update_store(&root, "OPEN");
+
+        store
+            .update(
+                &board_bound_type_def(),
+                "RFC-001",
+                &[("status", "In Progress"), ("reviewed", REVIEW_SHA)],
+            )
+            .unwrap();
+
+        let pushed = store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("the issue body is pushed");
+        assert!(
+            pushed.contains(&format!("reviewed: {REVIEW_SHA}")),
+            "got:\n{pushed}"
+        );
+        assert_eq!(store.mock().edit_calls.get(), 1, "one edit, not two");
+        assert_eq!(
+            store.mock().field_updates.borrow().len(),
+            1,
+            "the card still moves: {:?}",
+            store.mock().field_updates.borrow()
+        );
+        assert_eq!(cached_status(&root, "RFC-001"), "in progress");
+    }
+
+    // `reviewed` is a first-class frontmatter field, not a declared attribute:
+    // without an arm of its own it falls through to `apply_attrs`, which rejects
+    // it as unknown and fails the whole transition. The default type declares no
+    // attributes at all, which is the ordinary case.
+    #[test]
+    fn update_accepts_reviewed_on_a_type_that_declares_no_attributes() {
+        let root = tmp_root("iter428_reviewed_is_not_an_attribute");
+        let client = MockGhClient::new().with_view_sequence(vec![issue_42_at(
+            &make_issue_body("agent-7", "2026-03-27", None, "prose"),
+            "2026-03-27T10:00:00Z",
+        )]);
+        let mut store = gh_store_for_issue_42(&root, client);
+        let td = test_type_def(StoreBackend::GithubIssues);
+        assert!(td.attributes.is_empty(), "the fixture declares none");
+
+        store
+            .update(&td, "RFC-001", &[("reviewed", REVIEW_SHA)])
+            .unwrap();
+
+        let pushed = store.mock().last_edit_body.borrow();
+        let pushed = pushed.as_ref().expect("the issue body is pushed");
+        assert!(
+            pushed.contains(&format!("reviewed: {REVIEW_SHA}")),
+            "got:\n{pushed}"
+        );
     }
 
     // AC6, defence in depth behind `ops::update`'s gate: a column the board does

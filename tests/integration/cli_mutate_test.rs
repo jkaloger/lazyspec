@@ -2,6 +2,7 @@ use crate::common::TestFixture;
 use lazyspec::cli::json::doc_to_json;
 use lazyspec::engine::config::{Config, NumberingStrategy, StoreBackend, TypeDef};
 use lazyspec::engine::document::DocMeta;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::issue_map::IssueMap;
 use std::fs;
 
@@ -66,6 +67,7 @@ fn update_status_in_frontmatter() {
         &store,
         "docs/rfcs/RFC-001-test.md",
         &[("status", "review")],
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -92,6 +94,7 @@ fn update_with_body_file_keeps_the_frontmatter_separator() {
         &store,
         "RFC-001",
         &[("body", body.as_str())],
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -135,6 +138,7 @@ fn update_body_file_matches_create_body_file() {
         &fixture.store(),
         "RFC-900",
         &[("body", body.as_str())],
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -169,7 +173,14 @@ fn update_with_shorthand_id() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("status", "review")]).unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("status", "review")],
+        &MockGitRefClient::new(),
+    )
+    .unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
     let meta = DocMeta::parse(&content).unwrap();
@@ -200,6 +211,7 @@ fn update_github_milestones_type_routes_to_milestone_branch() {
         "MILESTONE-1",
         &[("title", "v2.0")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap_err()
     .to_string();
@@ -240,8 +252,14 @@ fn update_assignee_sets_frontmatter_and_json() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "alice")])
-        .unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("assignee", "alice")],
+        &MockGitRefClient::new(),
+    )
+    .unwrap();
 
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
     assert!(
@@ -284,12 +302,26 @@ fn update_assignee_empty_string_clears() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "bob")]).unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("assignee", "bob")],
+        &MockGitRefClient::new(),
+    )
+    .unwrap();
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
     assert!(content.contains("assignee: bob"));
 
     let store = fixture.store();
-    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("assignee", "")]).unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("assignee", "")],
+        &MockGitRefClient::new(),
+    )
+    .unwrap();
     let content = fs::read_to_string(fixture.root().join("docs/rfcs/RFC-001-test.md")).unwrap();
     assert!(
         !content.contains("assignee:"),
@@ -304,7 +336,14 @@ fn update_with_json_flag() {
     fixture.write_rfc("RFC-001-test.md", "Test", "draft");
     let store = fixture.store();
 
-    lazyspec::cli::update::run(fixture.root(), &store, "RFC-001", &[("status", "review")]).unwrap();
+    lazyspec::cli::update::run(
+        fixture.root(),
+        &store,
+        "RFC-001",
+        &[("status", "review")],
+        &MockGitRefClient::new(),
+    )
+    .unwrap();
 
     // Reload store to pick up changes (mirrors what main.rs does for --json)
     let config = fixture.config();

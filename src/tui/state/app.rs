@@ -18,6 +18,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{rewrite_frontmatter, DocMeta, DocType, Status};
 use crate::engine::fs::FileSystem;
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::git_status::{query_git_branch, GitStatusCache};
 use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::reservation::ReservationProgress;
@@ -546,6 +547,11 @@ pub(crate) fn clamp_viewport_offset(
 
 pub struct App {
     pub fs: Box<dyn FileSystem>,
+    /// The git seam every App-owned engine call reads through. Defaulted to the
+    /// real CLI in `new` rather than taken as a parameter, so a test that needs
+    /// determinism swaps the field (DICTUM-002/003: injected here in the TUI
+    /// layer, never constructed in the engine).
+    pub git: Box<dyn GitRefOps>,
     pub store: Store,
     pub selected_type: usize,
     pub selected_doc: usize,
@@ -752,6 +758,7 @@ impl App {
 
         let mut app = App {
             fs,
+            git: Box::new(crate::engine::git_ref::GitCli),
             store,
             selected_type: 0,
             selected_doc: 0,
@@ -3291,6 +3298,7 @@ impl App {
             &doc_path_str,
             &[("status", &status.to_string())],
             Some(config),
+            &*self.git,
         ) {
             self.status_picker.error = Some(e.to_string());
             return Err(e);
@@ -3842,6 +3850,7 @@ pub(crate) mod parity_seed {
         let config = Config::default();
         let mut app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
+            git: Box::new(crate::engine::git_ref::test_support::MockGitRefClient::new()),
             store,
             selected_type: 0,
             selected_doc: 0,
@@ -4333,6 +4342,7 @@ mod tests {
 
         let app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
+            git: Box::new(crate::engine::git_ref::test_support::MockGitRefClient::new()),
             store,
             selected_type: 0,
             selected_doc: 0,
@@ -4977,6 +4987,33 @@ mod tests {
         assert!(
             app.status_picker.error.is_none(),
             "the error is cleared on success"
+        );
+    }
+
+    // STORY-274 AC2: a status change from the TUI resets the staleness clock the
+    // same way the CLI's does, because both are `ops::update` -- the TUI never
+    // names `reviewed` and cannot drift from the engine's rule.
+    #[test]
+    fn confirm_status_change_stamps_the_review_anchor() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config::default();
+
+        app.status_picker.active = true;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
+        app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.status_picker.selected = 1; // draft -> review
+
+        app.confirm_status_change(&root, &config).unwrap();
+
+        let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
+        assert!(
+            content.contains(&format!(
+                "reviewed: {}",
+                crate::engine::git_ref::test_support::FAKE_HEAD
+            )),
+            "got: {content}"
         );
     }
 

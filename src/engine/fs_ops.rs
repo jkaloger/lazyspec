@@ -290,7 +290,13 @@ pub fn update_document(
     update_document_with_type(root, store, doc_id, updates, None)
 }
 
-const RESERVED_UPDATE_KEYS: &[&str] = &["status", "title", "body", "author", "assignee"];
+const RESERVED_UPDATE_KEYS: &[&str] =
+    &["status", "title", "body", "author", "assignee", "reviewed"];
+
+/// Reserved keys that are absent when unset, so their line has to be inserted
+/// rather than only replaced. `assignee` clears to absent on an empty value;
+/// `reviewed` (RFC-069) is only ever written with a sha.
+const INSERTED_WHEN_MISSING: &[&str] = &["assignee", "reviewed"];
 
 /// Update a filesystem document's frontmatter. Reserved keys (status/title/body/
 /// author) follow the in-place replace path; any other key is a declared custom
@@ -351,19 +357,18 @@ pub fn update_document_with_type(
             new_body = body_section(value);
             continue;
         }
-        // `assignee` is absent-when-unset, so unlike the other reserved keys it
-        // must insert a line when missing and remove it when cleared with "".
-        if *key == "assignee" {
+        if INSERTED_WHEN_MISSING.contains(key) {
+            let prefix = format!("{}:", key);
             let pos = lines
                 .iter()
-                .position(|l| l.trim_start().starts_with("assignee:"));
+                .position(|l| l.trim_start().starts_with(&prefix));
             match (pos, value.is_empty()) {
                 (Some(i), true) => {
                     lines.remove(i);
                 }
-                (Some(i), false) => lines[i] = format!("assignee: {}", value),
+                (Some(i), false) => lines[i] = format!("{}: {}", key, value),
                 (None, true) => {}
-                (None, false) => lines.push(format!("assignee: {}", value)),
+                (None, false) => lines.push(format!("{}: {}", key, value)),
             }
             continue;
         }
@@ -607,5 +612,69 @@ mod tests {
         let (_, before_body) = split_frontmatter(&before).unwrap();
         let (_, after_body) = split_frontmatter(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(before_body, after_body);
+    }
+
+    /// `reviewed` reaching `update_document_with_type` as an ordinary key would
+    /// land in `attr_updates` and be rejected by `apply_attrs` for every type
+    /// that does not declare it. It is a `DocMeta` field, so it is reserved --
+    /// and no document on disk carries the line yet, so it inserts.
+    fn update_reviewed(root: &Path, existing: &str, sha: &str) -> String {
+        let config = Config::default();
+        let path = root.join("docs/rfcs/RFC-001-test.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "---\ntitle: \"Test\"\ntype: rfc\nstatus: draft\nauthor: \"alice\"\ndate: 2026-01-01\ntags: []\n{existing}---\n\nbody\n"
+            ),
+        )
+        .unwrap();
+        let store = Store::load(root, &config).unwrap();
+        let type_def = config.type_by_name("rfc").unwrap();
+        update_document_with_type(
+            root,
+            &store,
+            "docs/rfcs/RFC-001-test.md",
+            &[("status", "review"), ("reviewed", sha)],
+            Some(type_def),
+        )
+        .unwrap();
+        fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn reviewed_is_inserted_when_the_frontmatter_has_no_line_for_it() {
+        let tmp = TempDir::new().unwrap();
+
+        let content = update_reviewed(tmp.path(), "", "abc123");
+
+        assert!(content.contains("reviewed: abc123"), "got: {content}");
+        assert!(content.contains("status: review"), "got: {content}");
+    }
+
+    #[test]
+    fn reviewed_replaces_an_existing_line_rather_than_appending_a_second() {
+        let tmp = TempDir::new().unwrap();
+
+        let content = update_reviewed(tmp.path(), "reviewed: deadbeef\n", "abc123");
+
+        assert!(!content.contains("deadbeef"), "got: {content}");
+        assert_eq!(content.matches("reviewed:").count(), 1, "got: {content}");
+    }
+
+    /// `rfc` declares no attributes, so a `reviewed` treated as one would error
+    /// here rather than write.
+    #[test]
+    fn reviewed_does_not_error_for_a_type_declaring_no_attributes() {
+        let tmp = TempDir::new().unwrap();
+        assert!(Config::default()
+            .type_by_name("rfc")
+            .unwrap()
+            .attributes
+            .is_empty());
+
+        let content = update_reviewed(tmp.path(), "", "abc123");
+
+        assert!(content.contains("reviewed: abc123"), "got: {content}");
     }
 }

@@ -320,6 +320,7 @@ fn main() -> anyhow::Result<()> {
                 &path,
                 &updates,
                 Some(&config),
+                &GitCli,
             )?;
             if json {
                 let store = Store::load(&cwd, &config)?;

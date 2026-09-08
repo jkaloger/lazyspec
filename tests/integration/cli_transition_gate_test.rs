@@ -1,6 +1,7 @@
 use crate::common::TestFixture;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::DocMeta;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::store::Store;
 use std::fs;
 
@@ -24,6 +25,7 @@ fn transition_rejects_off_edge_move() {
         "RFC-001",
         &[("status", "accepted")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("invalid transition"), "got: {err}");
@@ -46,6 +48,7 @@ fn transition_accepts_on_edge_move() {
         "RFC-001",
         &[("status", "review")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -66,6 +69,7 @@ fn transition_wildcard_edge_allows_move_from_any_state() {
         "RFC-001",
         &[("status", "superseded")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -89,6 +93,7 @@ fn transition_no_op_to_same_status_is_allowed() {
         "RFC-001",
         &[("status", "draft")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
@@ -109,6 +114,7 @@ fn transition_check_skipped_for_non_status_updates() {
         "RFC-001",
         &[("title", "Renamed")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap();
 

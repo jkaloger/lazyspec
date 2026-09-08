@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Result};
 
 pub use crate::engine::ops::update::{run, run_with_config};
 
-const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author"];
+const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author", "reviewed"];
 
 /// Parse repeatable `--attr key=value` flags into owned `(key, value)` pairs.
 ///
@@ -83,6 +83,14 @@ mod tests {
     #[test]
     fn parse_attr_pairs_reserved_key_bails() {
         let err = parse_attr_pairs(&["status=done".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "got: {err}");
+    }
+
+    /// `reviewed` is the staleness anchor (RFC-069): `--status` and `pin` stamp
+    /// it from HEAD. Hand-setting it via `--attr` would forge a review.
+    #[test]
+    fn parse_attr_pairs_refuses_reviewed() {
+        let err = parse_attr_pairs(&["reviewed=deadbeef".to_string()]).unwrap_err();
         assert!(err.to_string().contains("reserved"), "got: {err}");
     }
 }

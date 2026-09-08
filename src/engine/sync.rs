@@ -1625,44 +1625,69 @@ mod tests {
             .to_string()
     }
 
+    fn cached_reviewed(path: &Path) -> Option<String> {
+        let content = std::fs::read_to_string(path).unwrap();
+        crate::engine::document::DocMeta::parse(&content)
+            .unwrap()
+            .reviewed
+    }
+
     // A nested cache doc (a native sub-issue, materialized under its parent's
     // folder) is board-bound like any other, so the pass must reach it: skipping
     // it leaves the type reporting two lifecycles with no warning.
+    //
+    // STORY-274 AC4: and the same pass leaves `reviewed` exactly as it found it,
+    // in both directions. A card someone dragged on a board is not a human
+    // opening the document, so a fetched status stamps no anchor -- and an
+    // anchor a local transition already wrote must survive the round, because
+    // one silently lost reads as a review that never happened. The property
+    // holds by construction (`sync_all` is handed no `GitRefOps`); this is what
+    // fails if git is ever threaded into the sync path.
     #[test]
     fn nested_cache_docs_take_their_status_from_the_authority_board() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let config = authority_config();
-        let td = &config.documents.types[0];
+        const ANCHOR: &str = "1234567890abcdef1234567890abcdef12345678";
 
-        let child = root.join(".lazyspec/cache/story/STORY-100");
-        std::fs::create_dir_all(&child).unwrap();
-        let child_file = child.join("01-STORY-12.md");
-        std::fs::write(
-            &child_file,
-            "---\ntitle: \"Child\"\ntype: story\nstatus: \"\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
-        )
-        .unwrap();
+        for reviewed in [None, Some(ANCHOR)] {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let config = authority_config();
+            let td = &config.documents.types[0];
 
-        let mut issue_map = IssueMap::load(root).unwrap();
-        issue_map.insert("STORY-12", 12, "", "I_node12");
-        let client = MockGhClient::new();
+            let child = root.join(".lazyspec/cache/story/STORY-100");
+            std::fs::create_dir_all(&child).unwrap();
+            let child_file = child.join("01-STORY-12.md");
+            let anchor_line = reviewed.map_or(String::new(), |sha| format!("reviewed: {sha}\n"));
+            std::fs::write(
+                &child_file,
+                format!("---\ntitle: \"Child\"\ntype: story\nstatus: \"\"\nauthor: \"@octocat\"\ndate: 2026-01-01\ntags: []\n{anchor_line}---\nbody\n"),
+            )
+            .unwrap();
 
-        let warnings = reconcile_project_fields_into_cache(
-            root,
-            &client,
-            "owner/repo",
-            &issue_map,
-            &config,
-            td,
-            Some(&round_items_for(&[(
-                "I_node12",
-                vec![board_status_item(7, "Review")],
-            )])),
-        );
+            let mut issue_map = IssueMap::load(root).unwrap();
+            issue_map.insert("STORY-12", 12, "", "I_node12");
+            let client = MockGhClient::new();
 
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-        assert_eq!(cached_story_status(&child_file), "review");
+            let warnings = reconcile_project_fields_into_cache(
+                root,
+                &client,
+                "owner/repo",
+                &issue_map,
+                &config,
+                td,
+                Some(&round_items_for(&[(
+                    "I_node12",
+                    vec![board_status_item(7, "Review")],
+                )])),
+            );
+
+            assert!(warnings.is_empty(), "got: {warnings:?}");
+            assert_eq!(cached_story_status(&child_file), "review");
+            assert_eq!(
+                cached_reviewed(&child_file),
+                reviewed.map(str::to_string),
+                "the fetch round neither stamps nor drops an anchor"
+            );
+        }
     }
 
     // The round reads one repo and the issue syncer writes to one repo, and they

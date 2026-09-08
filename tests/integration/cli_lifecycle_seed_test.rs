@@ -4,6 +4,7 @@ use lazyspec::engine::config::{
 };
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use lazyspec::engine::store::Store;
 use std::fs;
 use std::path::Path;
@@ -128,6 +129,7 @@ fn bug_created_then_transitions_to_triaged() {
         "BUG-001",
         &[("status", "triaged")],
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap();
 
