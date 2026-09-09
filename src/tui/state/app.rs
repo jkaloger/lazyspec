@@ -378,7 +378,13 @@ pub enum AppEvent {
     AgentFinished,
 }
 
-fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSystem) -> Result<()> {
+fn update_tags(
+    root: &Path,
+    config: &Config,
+    relative: &Path,
+    tags: &[String],
+    fs: &dyn FileSystem,
+) -> Result<()> {
     let full_path = root.join(relative);
     rewrite_frontmatter(&full_path, fs, |doc| {
         let tag_values: Vec<serde_yaml::Value> = tags
@@ -387,7 +393,15 @@ fn update_tags(root: &Path, relative: &Path, tags: &[String], fs: &dyn FileSyste
             .collect();
         doc["tags"] = serde_yaml::Value::Sequence(tag_values);
         Ok(())
-    })
+    })?;
+    let id = crate::engine::store::extract_id(relative);
+    crate::engine::git_store::commit_if_git_backed(
+        root,
+        config,
+        relative,
+        &crate::engine::git_ref::GitCli,
+        &format!("tag {id}"),
+    )
 }
 
 pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {
@@ -2948,7 +2962,7 @@ impl App {
                             .map(|t| t.trim().to_string())
                             .filter(|t| !t.is_empty())
                             .collect();
-                        update_tags(&root, &relative, &tags, &thread_fs)
+                        update_tags(&root, &config, &relative, &tags, &thread_fs)
                             .map_err(|e| e.to_string())?;
                     }
 
@@ -2998,7 +3012,7 @@ impl App {
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            update_tags(root, &relative, &tags, &*self.fs)?;
+            update_tags(root, config, &relative, &tags, &*self.fs)?;
         }
 
         // Reload the store before applying relations so the new doc is resolvable

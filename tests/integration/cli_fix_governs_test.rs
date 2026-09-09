@@ -80,6 +80,9 @@ impl GitRefOps for RenamingGit {
     fn clone_repo(&self, _remote: &str, _branch: Option<&str>, _dest: &Path) -> Result<()> {
         unreachable!("fix --governs clones nothing")
     }
+    fn commit_and_push(&self, _clone: &Path, _branch: Option<&str>, _message: &str) -> Result<()> {
+        unreachable!("fix --governs commits nothing")
+    }
     fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
         unreachable!("fix --governs pushes nothing")
     }
@@ -159,11 +162,8 @@ fn rotted_project() -> TestFixture {
     fixture
 }
 
-fn moved_git() -> Box<dyn GitRefOps> {
-    Box::new(RenamingGit::new(&[(
-        "src/old/resolve.rs",
-        "src/context/resolve.rs",
-    )]))
+fn moved_git() -> RenamingGit {
+    RenamingGit::new(&[("src/old/resolve.rs", "src/context/resolve.rs")])
 }
 
 #[test]
@@ -173,8 +173,7 @@ fn json_wraps_every_rewrite_in_a_governs_array() {
     let json = lazyspec::cli::fix::run_governs_json(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         &RealFileSystem,
     );
@@ -201,8 +200,7 @@ fn a_repo_with_no_rotted_pin_reports_an_empty_array_and_succeeds() {
     let json = lazyspec::cli::fix::run_governs_json(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         &RealFileSystem,
     );
@@ -215,7 +213,7 @@ fn a_repo_with_no_rotted_pin_reports_an_empty_array_and_succeeds() {
         fixture.root(),
         &fixture.store(),
         &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         false,
         &RealFileSystem,
@@ -233,8 +231,7 @@ fn the_human_line_names_the_document_and_both_globs() {
     let output = lazyspec::cli::fix::run_governs_human(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         &RealFileSystem,
     );
@@ -252,8 +249,7 @@ fn a_dry_run_says_would_repin() {
     let output = lazyspec::cli::fix::run_governs_human(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         true,
         &RealFileSystem,
     );
@@ -271,8 +267,7 @@ fn a_failed_write_is_reported_as_an_error_not_as_a_repin() {
     let output = lazyspec::cli::fix::run_governs_human(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         &UnwritableFs,
     );
@@ -294,8 +289,7 @@ fn a_failed_write_carries_its_reason_into_json() {
     let json = lazyspec::cli::fix::run_governs_json(
         fixture.root(),
         &fixture.store(),
-        &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         &UnwritableFs,
     );
@@ -320,7 +314,7 @@ fn a_failed_write_exits_nonzero() {
         fixture.root(),
         &fixture.store(),
         &fixture.config(),
-        moved_git(),
+        &moved_git(),
         false,
         false,
         &UnwritableFs,

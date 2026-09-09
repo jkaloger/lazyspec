@@ -2,12 +2,11 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::store::Store;
-use crate::engine::validation::{Checker, GovernsNoMatchRule, ValidationIssue};
+use crate::engine::validation::{GovernsNoMatchRule, ValidationIssue};
 
 use super::{record_write, GovernsFixResult};
 
@@ -21,13 +20,11 @@ use super::{record_write, GovernsFixResult};
 pub fn collect_governs_fixes(
     root: &Path,
     store: &Store,
-    config: &Config,
-    git: Box<dyn GitRefOps>,
+    git: &dyn GitRefOps,
     dry_run: bool,
     fs: &dyn FileSystem,
 ) -> Vec<GovernsFixResult> {
-    GovernsNoMatchRule::new(git)
-        .check(store, config)
+    GovernsNoMatchRule::findings(git, store)
         .into_iter()
         .filter_map(|(_severity, issue)| match issue {
             ValidationIssue::GovernsNoMatch {
@@ -74,6 +71,7 @@ fn replace_glob(full_path: &Path, fs: &dyn FileSystem, old: &str, new: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::config::Config;
     use crate::engine::fs::RealFileSystem;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use crate::engine::store::test_support::store_from_with_config;
@@ -109,8 +107,7 @@ mod tests {
         collect_governs_fixes(
             tmp.path(),
             store,
-            &Config::default(),
-            Box::new(MockGitRefClient::new().with_renames(renames)),
+            &MockGitRefClient::new().with_renames(renames),
             dry_run,
             &RealFileSystem,
         )
@@ -122,8 +119,7 @@ mod tests {
 
     fn rotted_globs(tmp: &tempfile::TempDir) -> Vec<String> {
         let store = Store::load(tmp.path(), &Config::default()).unwrap();
-        GovernsNoMatchRule::new(Box::new(MockGitRefClient::new().with_renames(MOVED)))
-            .check(&store, &Config::default())
+        GovernsNoMatchRule::findings(&MockGitRefClient::new().with_renames(MOVED), &store)
             .into_iter()
             .map(|(_, issue)| match issue {
                 ValidationIssue::GovernsNoMatch { glob, .. } => glob,

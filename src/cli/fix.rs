@@ -11,6 +11,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
 use crate::engine::git_ref::GitRefOps;
+use crate::engine::git_store::commit_if_git_backed;
 use crate::engine::ops::fix::{
     collect_config_fixes, collect_governs_fixes, plan_field_and_conflict_fixes,
 };
@@ -48,6 +49,24 @@ struct RenumberOutput {
     external_references: Vec<ExternalReference>,
 }
 
+/// Commit every document a fix reached when it sits in a `git` type's clone
+/// (STORY-282 AC2). An `Err` is a rejected push with the clone rolled back, so
+/// nothing the plan reports as `written` still is; the caller prints the error
+/// in place of the plan (DICTUM-006).
+fn commit_written<'a>(
+    root: &Path,
+    config: &Config,
+    git: &dyn GitRefOps,
+    paths: impl IntoIterator<Item = &'a str>,
+    message: &str,
+) -> anyhow::Result<()> {
+    for path in paths {
+        commit_if_git_backed(root, config, Path::new(path), git, message)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: &Path,
     store: &Store,
@@ -55,9 +74,14 @@ pub fn run(
     paths: &[String],
     dry_run: bool,
     json: bool,
+    git: &dyn GitRefOps,
     fs: &dyn FileSystem,
 ) -> i32 {
     let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
+    if let Err(e) = commit_written(root, config, git, output.written_paths(), "fix") {
+        eprintln!("error: {e:#}");
+        return 1;
+    }
     let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
         || !output.conflict_fixes.is_empty()
         || !output.relation_fixes.is_empty()
@@ -136,12 +160,20 @@ pub fn run_governs(
     root: &Path,
     store: &Store,
     config: &Config,
-    git: Box<dyn GitRefOps>,
+    git: &dyn GitRefOps,
     dry_run: bool,
     json: bool,
     fs: &dyn FileSystem,
 ) -> i32 {
-    let rewrites = collect_governs_fixes(root, store, config, git, dry_run, fs);
+    let rewrites = collect_governs_fixes(root, store, git, dry_run, fs);
+    let written = rewrites
+        .iter()
+        .filter(|r| r.written)
+        .map(|r| r.path.as_str());
+    if let Err(e) = commit_written(root, config, git, written, "fix governs") {
+        eprintln!("error: {e:#}");
+        return 1;
+    }
 
     if json {
         println!("{}", governs_json(&rewrites));
@@ -166,25 +198,21 @@ fn governs_json(rewrites: &[GovernsFixResult]) -> String {
 pub fn run_governs_json(
     root: &Path,
     store: &Store,
-    config: &Config,
-    git: Box<dyn GitRefOps>,
+    git: &dyn GitRefOps,
     dry_run: bool,
     fs: &dyn FileSystem,
 ) -> String {
-    governs_json(&collect_governs_fixes(
-        root, store, config, git, dry_run, fs,
-    ))
+    governs_json(&collect_governs_fixes(root, store, git, dry_run, fs))
 }
 
 pub fn run_governs_human(
     root: &Path,
     store: &Store,
-    config: &Config,
-    git: Box<dyn GitRefOps>,
+    git: &dyn GitRefOps,
     dry_run: bool,
     fs: &dyn FileSystem,
 ) -> String {
-    let rewrites = collect_governs_fixes(root, store, config, git, dry_run, fs);
+    let rewrites = collect_governs_fixes(root, store, git, dry_run, fs);
     format_governs_human(&rewrites, dry_run)
 }
 
@@ -197,9 +225,18 @@ pub fn run_renumber(
     doc_type: Option<&str>,
     dry_run: bool,
     json: bool,
+    git: &dyn GitRefOps,
     fs: &dyn FileSystem,
 ) -> i32 {
     let output = collect_renumber_output(root, store, config, format, doc_type, dry_run, fs);
+    let written = output.changes.iter().filter(|c| c.written).flat_map(|c| {
+        std::iter::once(c.new_path.as_str())
+            .chain(c.references_updated.iter().map(|u| u.file.as_str()))
+    });
+    if let Err(e) = commit_written(root, config, git, written, "fix renumber") {
+        eprintln!("error: {e:#}");
+        return 1;
+    }
 
     if json {
         let wrapper = serde_json::json!({ "renumber": output });

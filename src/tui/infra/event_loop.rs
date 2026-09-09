@@ -170,6 +170,30 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
         .map_err(|e| e.to_string())
 }
 
+// The `git` store's external-edit arm (STORY-282 AC3): the editor already wrote
+// the clone file, so only the commit-and-push remains. Any non-git doc is a
+// no-op, so the caller spawns it unconditionally.
+fn try_push_git_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
+    try_push_git_edit_with(root, relative, config, &GitCli)
+}
+
+fn try_push_git_edit_with(
+    root: &Path,
+    relative: &Path,
+    config: &Config,
+    ops: &dyn GitRefOps,
+) -> Result<(), String> {
+    let id = crate::engine::store::extract_id(relative);
+    crate::engine::git_store::commit_if_git_backed(
+        root,
+        config,
+        relative,
+        ops,
+        &format!("update {id}"),
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
 // Push a clickup-tasks doc's edited body back to ClickUp after an external-editor
 // save -- the third backend arm alongside `try_push_gh_edit`/`try_push_git_ref_edit`
 // (RFC-056 write-through). Early-returns `Ok(())` for any non-clickup type, so the
@@ -1052,6 +1076,18 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let push_config = config.clone();
                     let push_tx = tx.clone();
                     std::thread::spawn(move || {
+                        let result = try_push_git_edit(&push_root, &push_relative, &push_config);
+                        if let Err(msg) = result {
+                            let _ = push_tx.send(AppEvent::GhPushResult(Err(msg)));
+                        }
+                    });
+                }
+                {
+                    let push_root = root.clone();
+                    let push_relative = relative.to_path_buf();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    std::thread::spawn(move || {
                         let result =
                             try_push_clickup_edit(&push_root, &push_relative, &push_config);
                         if let Err(msg) = result {
@@ -1148,7 +1184,21 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let fixes = crate::engine::ops::fix::plan_field_and_conflict_fixes(
                 &root, &app.store, &config, &paths, false, &fs,
             );
-            let output = format_fix_output(&fixes);
+            // A rejected push rolled the clone back, so the plan's `written`
+            // entries are no longer true; the error replaces them (DICTUM-006).
+            let commit = fixes.written_paths().try_for_each(|path| {
+                crate::engine::git_store::commit_if_git_backed(
+                    &root,
+                    &config,
+                    Path::new(path),
+                    &GitCli,
+                    "fix",
+                )
+            });
+            let output = match commit {
+                Ok(()) => format_fix_output(&fixes),
+                Err(e) => format!("error: {e:#}"),
+            };
             app.store = Store::load(&root, &config)?;
             app.refresh_validation(&config);
             app.fix_result = if output.is_empty() {
@@ -1791,5 +1841,59 @@ mod tests {
             !built.get(),
             "no client must be built when the token is absent"
         );
+    }
+
+    // --- STORY-282 AC3: an external edit of a `git` doc commits and pushes ---
+
+    fn git_type_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some("https://example.com/specs.git".to_string()),
+            branch: Some("next".to_string()),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+        }];
+        config
+    }
+
+    #[test]
+    fn git_edit_commits_and_pushes_the_clone_once() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let result = try_push_git_edit_with(
+            root,
+            Path::new(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md"),
+            &git_type_config(),
+            &mock,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *calls.borrow(),
+            vec![format!(
+                "commit_and_push:{}/.lazyspec/cache/rfc:next:update RFC-001",
+                root.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn git_edit_noop_for_a_filesystem_doc() {
+        let tmp = TempDir::new().unwrap();
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let result = try_push_git_edit_with(
+            tmp.path(),
+            Path::new("docs/rfcs/RFC-001-a.md"),
+            &Config::default(),
+            &mock,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert!(calls.borrow().is_empty());
     }
 }

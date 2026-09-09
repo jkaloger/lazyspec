@@ -484,7 +484,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Ignore { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::ignore(&cwd, &store, &path, &fs)?;
+            lazyspec::cli::ignore::ignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
                 let out = serde_json::json!({
@@ -501,7 +501,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Unignore { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::unignore(&cwd, &store, &path, &fs)?;
+            lazyspec::cli::ignore::unignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
                 let out = serde_json::json!({
@@ -614,13 +614,7 @@ fn main() -> anyhow::Result<()> {
             let fs = lazyspec::engine::fs::RealFileSystem;
             if governs {
                 let exit_code = lazyspec::cli::fix::run_governs(
-                    &cwd,
-                    &store,
-                    &config,
-                    Box::new(lazyspec::engine::git_ref::GitCli),
-                    dry_run,
-                    json,
-                    &fs,
+                    &cwd, &store, &config, &GitCli, dry_run, json, &fs,
                 );
                 if exit_code != 0 {
                     std::process::exit(exit_code);
@@ -634,14 +628,16 @@ fn main() -> anyhow::Result<()> {
                     doc_type.as_deref(),
                     dry_run,
                     json,
+                    &GitCli,
                     &fs,
                 );
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
             } else {
-                let exit_code =
-                    lazyspec::cli::fix::run(&cwd, &store, &config, &paths, dry_run, json, &fs);
+                let exit_code = lazyspec::cli::fix::run(
+                    &cwd, &store, &config, &paths, dry_run, json, &GitCli, &fs,
+                );
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }

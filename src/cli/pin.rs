@@ -194,6 +194,13 @@ pub fn run(
     }
 
     stamp_reviewed(&full_path, fs, &result.reviewed)?;
+    crate::engine::git_store::commit_if_git_backed(
+        root,
+        config,
+        &doc.path,
+        git,
+        &format!("pin {}", doc.id),
+    )?;
 
     // Output results
     if json {

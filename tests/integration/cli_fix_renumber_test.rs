@@ -1,5 +1,6 @@
 use lazyspec::cli::RenumberFormat;
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 
 fn sqids_config() -> lazyspec::engine::config::Config {
     let toml = r#"
@@ -74,6 +75,7 @@ fn renumber_incremental_to_sqids() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
@@ -119,6 +121,7 @@ fn renumber_sqids_to_incremental() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
@@ -154,6 +157,7 @@ fn renumber_type_filter() {
         Some("rfc"),
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -186,6 +190,7 @@ fn renumber_dry_run_no_side_effects() {
         None,
         true,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -213,6 +218,7 @@ fn renumber_skips_already_converted_sqids() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -238,6 +244,7 @@ fn renumber_skips_already_converted_incremental() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -265,6 +272,7 @@ fn renumber_json_output() {
         None,
         true,
         true,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
     assert_eq!(exit_code, 0);
@@ -292,6 +300,7 @@ fn renumber_updates_related_references() {
         Some("rfc"),
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -461,6 +470,7 @@ fn renumber_sqids_to_incremental_avoids_collision() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 
@@ -501,6 +511,7 @@ fn renumber_mixed_formats_only_converts_needed() {
         None,
         false,
         false,
+        &MockGitRefClient::new(),
         &RealFileSystem,
     );
 

@@ -1,11 +1,12 @@
 use crate::engine::clickup::ClickupHttpClient;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::DocType;
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::GitCli;
 use crate::engine::git_ref_store::GitRefStore;
+use crate::engine::git_store::commit_if_git_backed;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
@@ -82,8 +83,16 @@ pub fn run_with_body(
         }
     }
 
-    // Ahead of the `--parent` branch so a child of a git type is refused too,
-    // instead of landing as a local file under `<root>/<dir>`.
+    // Ahead of the git early return below: a git child asked for a parent goes
+    // through `create_with_parent`, whose same-repo guard applies to git types
+    // too and whose write lands (and commits) inside the parent's clone.
+    if let Some(parent_id) = parent {
+        return create_with_parent(
+            root, config, store, type_def, title, author, body, parent_id,
+        )
+        .map(|path| (path, PushOutcome::Synced));
+    }
+
     if type_def.store == StoreBackend::Git {
         let mut registry = build_registry(root, config);
         let created =
@@ -91,13 +100,6 @@ pub fn run_with_body(
                 .for_type(type_def)?
                 .create(type_def, title, author, body.unwrap_or(""))?;
         return Ok((root.join(&created.path), created.push_outcome));
-    }
-
-    if let Some(parent_id) = parent {
-        return create_with_parent(
-            root, config, store, type_def, title, author, body, parent_id,
-        )
-        .map(|path| (path, PushOutcome::Synced));
     }
 
     if type_def.store == StoreBackend::GithubIssues {
@@ -212,6 +214,7 @@ pub fn run_with_body(
         author,
         &type_def.numbering,
         type_def.subdirectory,
+        None,
         on_progress,
     )?;
 
@@ -232,14 +235,15 @@ pub fn run_with_body(
 /// `TYPE-n-slug/index.md` on the first child; the loader tracks the new
 /// parent/child edges directly.
 ///
-/// Both branches enforce the same-store guard: parent and child must share a
-/// [`StoreBackend`].
+/// Both branches enforce the same-repo guard: parent and child must resolve
+/// to the same repo -- [`same_repo`] -- not merely share a [`StoreBackend`],
+/// since two `git` types can declare different `remote`/`branch` pairs.
 #[allow(clippy::too_many_arguments)]
 fn create_with_parent(
     root: &Path,
     config: &Config,
     store: &Store,
-    child_type_def: &crate::engine::config::TypeDef,
+    child_type_def: &TypeDef,
     title: &str,
     author: &str,
     body: Option<&str>,
@@ -259,15 +263,20 @@ fn create_with_parent(
             )
         })?;
 
-    if child_type_def.store != parent_type_def.store {
-        bail!(
+    if !same_repo(child_type_def, parent_type_def) {
+        let mut msg = format!(
             "sub-issue link rejected: parent {} (store {}) and child type {} (store {}) \
              are in different stores; lazyspec sub-issues are same-store only",
-            parent_id,
-            parent_type_def.store,
-            child_type_def.name,
-            child_type_def.store
+            parent_id, parent_type_def.store, child_type_def.name, child_type_def.store
         );
+        if child_type_def.store == StoreBackend::Git && parent_type_def.store == StoreBackend::Git {
+            msg = format!(
+                "{msg} (parent remote {}, child remote {})",
+                parent_type_def.remote.as_deref().unwrap_or("<none>"),
+                child_type_def.remote.as_deref().unwrap_or("<none>"),
+            );
+        }
+        bail!(msg);
     }
 
     if child_type_def.store == StoreBackend::GithubIssues {
@@ -333,7 +342,7 @@ fn create_with_parent(
         new_dir
     };
 
-    fs_ops::create_child_in_dir(
+    let child_path = fs_ops::create_child_in_dir(
         root,
         config,
         child_type_def,
@@ -341,5 +350,176 @@ fn create_with_parent(
         title,
         author,
         body,
-    )
+    )?;
+
+    // Keyed on the parent's path, not the child's: that is the clone the
+    // rename and the new file both landed in, even when child and parent are
+    // two `git` types sharing a remote (RFC-072 "The git store").
+    commit_if_git_backed(
+        root,
+        config,
+        &parent_meta.path,
+        &GitCli,
+        &format!("create child of {parent_id}"),
+    )?;
+
+    Ok(child_path)
+}
+
+/// Same store, same remote, same branch: the repo two types resolve to, not
+/// just their [`StoreBackend`] discriminant. `remote`/`branch` are `None` on
+/// every non-`git` type (`Config::parse` rejects them otherwise), so this
+/// degrades to a plain store comparison for every backend but `git`.
+fn same_repo(a: &TypeDef, b: &TypeDef) -> bool {
+    a.store == b.store && a.remote == b.remote && a.branch == b.branch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::store::test_support::doc_md;
+    use crate::engine::store::Store;
+    use tempfile::TempDir;
+
+    /// Docs on disk under a fresh `TempDir`, with an empty `.lazyspec/cache/<name>`
+    /// pre-created for every `git`-typed name in `precloned` -- `Store::load`
+    /// clones only when the cache dir is missing, and these tests exercise the
+    /// same-repo guard, not a real clone (DICTUM-004: no network in a unit test).
+    fn project(files: &[(&str, &str)], precloned: &[&str], config: &Config) -> (TempDir, Store) {
+        let tmp = TempDir::new().unwrap();
+        for (rel_path, contents) in files {
+            let full = tmp.path().join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, contents).unwrap();
+        }
+        for name in precloned {
+            std::fs::create_dir_all(tmp.path().join(".lazyspec/cache").join(name)).unwrap();
+        }
+        let store = Store::load(tmp.path(), config).unwrap();
+        (tmp, store)
+    }
+
+    fn git_type(name: &str, remote: &str, branch: Option<&str>) -> TypeDef {
+        TypeDef {
+            remote: Some(remote.to_string()),
+            branch: branch.map(str::to_string),
+            ..TypeDef::test_fixture(name, StoreBackend::Git)
+        }
+    }
+
+    // --- same_repo (AC9, AC10): the resolved repo, not just the discriminant ---
+
+    #[test]
+    fn same_repo_true_for_two_filesystem_types() {
+        let a = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        let b = TypeDef::test_fixture("story", StoreBackend::Filesystem);
+
+        assert!(same_repo(&a, &b));
+    }
+
+    #[test]
+    fn same_repo_true_for_two_git_types_with_equal_remote_and_branch() {
+        let a = git_type("rfc", "https://example.com/x.git", Some("next"));
+        let b = git_type("spec", "https://example.com/x.git", Some("next"));
+
+        assert!(same_repo(&a, &b));
+    }
+
+    #[test]
+    fn same_repo_false_when_remote_differs() {
+        let a = git_type("rfc", "https://example.com/a.git", Some("next"));
+        let b = git_type("spec", "https://example.com/b.git", Some("next"));
+
+        assert!(!same_repo(&a, &b));
+    }
+
+    #[test]
+    fn same_repo_false_when_only_branch_differs() {
+        let a = git_type("rfc", "https://example.com/x.git", Some("next"));
+        let b = git_type("spec", "https://example.com/x.git", Some("main"));
+
+        assert!(!same_repo(&a, &b));
+    }
+
+    // --- create_with_parent: the guard rejects before any mutation ---
+
+    #[test]
+    fn create_with_parent_filesystem_parent_git_child_rejected_unchanged_text() {
+        let parent_type = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        let child_type = git_type("spec", "https://example.com/child.git", None);
+        let mut config = Config::default();
+        config.documents.types = vec![parent_type, child_type.clone()];
+        let (tmp, store) = project(
+            &[("docs/rfc/RFC-001-a.md", &doc_md("A", "rfc", "[]"))],
+            &["spec"],
+            &config,
+        );
+
+        let err = create_with_parent(
+            tmp.path(),
+            &config,
+            &store,
+            &child_type,
+            "Child",
+            "tester",
+            None,
+            "RFC-001",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("different stores"), "{err}");
+    }
+
+    #[test]
+    fn create_with_parent_two_git_types_different_remotes_rejected_before_mutation() {
+        let parent_type = git_type("a", "/a.git", None);
+        let child_type = git_type("b", "/b.git", None);
+        let mut config = Config::default();
+        config.documents.types = vec![
+            TypeDef {
+                dir: "docs/a".to_string(),
+                ..parent_type
+            },
+            TypeDef {
+                dir: "docs/b".to_string(),
+                ..child_type
+            },
+        ];
+        let child_type_def = config.documents.types[1].clone();
+        let (tmp, store) = project(
+            &[(
+                ".lazyspec/cache/a/docs/a/A-001-parent.md",
+                &doc_md("Parent", "a", "[]"),
+            )],
+            &["b"],
+            &config,
+        );
+
+        let err = create_with_parent(
+            tmp.path(),
+            &config,
+            &store,
+            &child_type_def,
+            "Child",
+            "tester",
+            None,
+            "A-001",
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("/a.git"), "{msg}");
+        assert!(msg.contains("/b.git"), "{msg}");
+        assert!(
+            !tmp.path().join(".lazyspec/cache/b/docs/b").exists(),
+            "no file written under the child's own cache dir"
+        );
+        assert_eq!(
+            fs::read_dir(tmp.path().join(".lazyspec/cache/a/docs/a"))
+                .unwrap()
+                .count(),
+            1,
+            "no file written under the parent's cache dir"
+        );
+    }
 }

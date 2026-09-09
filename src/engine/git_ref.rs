@@ -37,6 +37,12 @@ pub trait GitRefOps {
     /// branch when `None`). Resets hard rather than pulling: an out-of-band edit
     /// in the clone must not block the refresh.
     fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
+    /// Stage everything in `clone`, commit it as `message`, and push `HEAD` to
+    /// `branch` on `origin` (or to the branch `HEAD` tracks when `None`). A
+    /// clean tree commits nothing and returns `Ok`. Any push failure resets the
+    /// clone to its pre-call `HEAD` before erroring, so a rejected write leaves
+    /// no orphan file for `next_number` to count (STORY-282 AC6).
+    fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
@@ -297,6 +303,46 @@ impl GitRefOps for GitCli {
         Ok(())
     }
 
+    fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()> {
+        let head = self.head(clone)?;
+        let output = self.run_git(clone, &["add", "-A"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git add failed: {}", stderr.trim());
+        }
+        let staged = self.run_git(clone, &["diff", "--cached", "--quiet"])?;
+        if staged.status.success() {
+            return Ok(());
+        }
+        let output = self.run_git(clone, &["commit", "-q", "-m", message])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            self.run_git(clone, &["reset", "--hard", &head])?;
+            bail!("git commit failed: {}", stderr);
+        }
+        let refspec = match branch {
+            Some(branch) => format!("HEAD:{branch}"),
+            None => "HEAD".to_string(),
+        };
+        let mut push = Command::new("git");
+        push.args(["push", "origin", &refspec])
+            .current_dir(clone)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let pushed = crate::engine::subprocess::output_with_timeout(push, FETCH_TIMEOUT)
+            .context("git push")
+            .and_then(|output| {
+                if output.status.success() {
+                    return Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("git push failed: {}", stderr.trim())
+            });
+        if pushed.is_err() {
+            self.run_git(clone, &["reset", "--hard", &head])?;
+        }
+        pushed
+    }
+
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
         let output = self.run_git(root, &["push", remote, refname])?;
         if !output.status.success() {
@@ -511,6 +557,7 @@ pub mod test_support {
         pub fetch_results: RefCell<Vec<Result<()>>>,
         pub clone_results: RefCell<Vec<Result<()>>>,
         pub update_clone_results: RefCell<Vec<Result<()>>>,
+        pub commit_and_push_results: RefCell<Vec<Result<()>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
@@ -559,6 +606,7 @@ pub mod test_support {
                 fetch_results: RefCell::new(vec![]),
                 clone_results: RefCell::new(vec![]),
                 update_clone_results: RefCell::new(vec![]),
+                commit_and_push_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
@@ -626,6 +674,11 @@ pub mod test_support {
 
         pub fn with_update_clone_result(self, result: Result<()>) -> Self {
             self.update_clone_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_commit_and_push_result(self, result: Result<()>) -> Self {
+            self.commit_and_push_results.borrow_mut().push(result);
             self
         }
 
@@ -786,6 +839,16 @@ pub mod test_support {
                 branch.unwrap_or("default")
             ));
             Self::pop_or_default(&self.update_clone_results)
+        }
+
+        fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()> {
+            self.calls.borrow_mut().push(format!(
+                "commit_and_push:{}:{}:{}",
+                clone.display(),
+                branch.unwrap_or("default"),
+                message
+            ));
+            Self::pop_or_default(&self.commit_and_push_results)
         }
 
         fn push_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {

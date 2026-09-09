@@ -20,6 +20,7 @@ pub mod gh_subissue;
 pub mod git_ref;
 pub mod git_ref_store;
 pub mod git_status;
+pub mod git_store;
 pub mod github;
 pub mod github_url;
 pub mod graph;

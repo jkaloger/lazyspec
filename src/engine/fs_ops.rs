@@ -104,6 +104,7 @@ pub fn create_document(
     author: &str,
     numbering_strategy: &NumberingStrategy,
     subdirectory: bool,
+    reservation_repo: Option<&Path>,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     let target_dir = root.join(dir);
@@ -126,9 +127,13 @@ pub fn create_document(
                     doc_type
                 )
             })?;
+            let (repo, remote) = match reservation_repo {
+                Some(clone) => (clone, "origin"),
+                None => (root, reserved_cfg.remote.as_str()),
+            };
             let num = reservation::reserve_next(
-                root,
-                &reserved_cfg.remote,
+                repo,
+                remote,
                 &prefix.to_uppercase(),
                 reserved_cfg.max_retries,
                 &target_dir,
@@ -404,7 +409,7 @@ pub fn update_document_with_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::config::Lifecycle;
+    use crate::engine::config::{Lifecycle, ReservedConfig, ReservedFormat};
     use tempfile::TempDir;
 
     fn noop_progress(_: reservation::ReservationProgress) {}
@@ -472,6 +477,7 @@ mod tests {
             "alice",
             &NumberingStrategy::Incremental,
             false,
+            None,
             noop_progress,
         )
         .unwrap();
@@ -494,6 +500,7 @@ mod tests {
             "alice",
             &NumberingStrategy::Incremental,
             true,
+            None,
             noop_progress,
         )
         .unwrap();
@@ -516,11 +523,47 @@ mod tests {
             "bob",
             &NumberingStrategy::Incremental,
             false,
+            None,
             noop_progress,
         )
         .unwrap();
 
         assert_eq!(status_line(&path), "status: draft");
+    }
+
+    // STORY-282 AC8: a caller that names a reservation repo has its number
+    // reserved there, against that repo's `origin`, not against
+    // `[numbering.reserved].remote` from the project root.
+    #[test]
+    fn reservation_repo_overrides_the_configured_remote() {
+        let tmp = TempDir::new().unwrap();
+        let not_a_repo = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.documents.reserved = Some(ReservedConfig {
+            remote: "no-such-remote".to_string(),
+            format: ReservedFormat::Incremental,
+            max_retries: 1,
+        });
+
+        let Err(err) = create_document(
+            tmp.path(),
+            &config,
+            "rfc",
+            "docs/rfcs",
+            "RFC",
+            "Reserved",
+            "alice",
+            &NumberingStrategy::Reserved,
+            false,
+            Some(not_a_repo.path()),
+            noop_progress,
+        ) else {
+            panic!("ls-remote in a directory that is not a repository fails");
+        };
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'origin'"), "{msg}");
+        assert!(!msg.contains("no-such-remote"), "{msg}");
     }
 
     #[test]

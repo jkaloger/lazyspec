@@ -2,7 +2,6 @@ use crate::cli::resolve::{resolve_shorthand_or_path, resolve_to_path};
 use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
-use crate::engine::ops::link::refuse_git_source;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{build_registry, PushOutcome};
 use anyhow::Result;
@@ -18,7 +17,6 @@ pub fn tag_add_with_config(
 ) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
-    refuse_git(config, store, id)?;
     rewrite_frontmatter(&full_path, fs, |doc| {
         if doc.get("tags").is_none() {
             doc["tags"] = serde_yaml::Value::Sequence(vec![]);
@@ -45,7 +43,6 @@ pub fn tag_remove_with_config(
 ) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, id)?;
     let full_path = root.join(&resolved);
-    refuse_git(config, store, id)?;
     rewrite_frontmatter(&full_path, fs, |doc| {
         if let Some(seq) = doc.get_mut("tags").and_then(|v| v.as_sequence_mut()) {
             seq.retain(|v| {
@@ -59,23 +56,13 @@ pub fn tag_remove_with_config(
     propagate_tags(root, store, id, config, &[], tags)
 }
 
-/// A `git` type is read-only until STORY-282 (STORY-281 AC6); refuse before the
-/// cache file is rewritten.
-fn refuse_git(config: Option<&Config>, store: &Store, id: &str) -> Result<()> {
-    match config {
-        Some(config) => refuse_git_source(config, store, id),
-        None => Ok(()),
-    }
-}
-
 /// Propagate a tag mutation to the document's backend via
 /// [`DocumentStore::sync_tags`](crate::engine::store_dispatch::DocumentStore::sync_tags).
 ///
-/// Runs after the frontmatter rewrite: `GitRefStore::sync_tags` recommits the
-/// cache file as it sits on disk, so the tag must already be in it. A backend
-/// that refuses writes outright is turned away by [`refuse_git`] before the
-/// rewrite. With no config the type/backend cannot be resolved, so propagation
-/// is skipped and only the local rewrite stands.
+/// Runs after the frontmatter rewrite: `GitRefStore::sync_tags` and
+/// `GitStore::sync_tags` recommit the cache file as it sits on disk, so the tag
+/// must already be in it. With no config the type/backend cannot be resolved,
+/// so propagation is skipped and only the local rewrite stands.
 fn propagate_tags(
     root: &Path,
     store: &Store,

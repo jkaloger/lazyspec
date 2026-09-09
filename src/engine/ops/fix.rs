@@ -50,6 +50,37 @@ pub struct FixOutput {
     pub status_fixes: Vec<StatusFixResult>,
 }
 
+impl FixOutput {
+    /// Every root-relative document path a fix reached: the renamed-to path for
+    /// a conflict rename and each file its reference cascade rewrote.
+    pub fn written_paths(&self) -> impl Iterator<Item = &str> {
+        let fields = self
+            .field_fixes
+            .iter()
+            .filter(|r| r.written)
+            .map(|r| r.path.as_str());
+        let conflicts = self
+            .conflict_fixes
+            .iter()
+            .filter(|r| r.written)
+            .flat_map(|r| {
+                std::iter::once(r.new_path.as_str())
+                    .chain(r.references_updated.iter().map(|u| u.file.as_str()))
+            });
+        let relations = self
+            .relation_fixes
+            .iter()
+            .filter(|r| r.written)
+            .map(|r| r.path.as_str());
+        let statuses = self
+            .status_fixes
+            .iter()
+            .filter(|r| r.written)
+            .map(|r| r.path.as_str());
+        fields.chain(conflicts).chain(relations).chain(statuses)
+    }
+}
+
 /// Repair of a document whose frontmatter `status` is not one of its type's
 /// lifecycle states: rewritten to `lifecycle.states[0]` so it re-enters its
 /// lifecycle and gains legal transitions again.

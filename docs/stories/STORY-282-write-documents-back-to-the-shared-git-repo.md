@@ -1,12 +1,13 @@
 ---
 title: Write documents back to the shared git repo
 type: story
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - implements: RFC-072
+reviewed: 10607d51537a582ab71e87313ed2fe9d426e9b15
 ---
 
 ## Context

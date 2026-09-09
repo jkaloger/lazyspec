@@ -1,5 +1,6 @@
 use crate::common::TestFixture;
 use lazyspec::engine::document::DocMeta;
+use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use std::fs;
 
 #[test]
@@ -11,6 +12,8 @@ fn ignore_adds_validate_ignore_field() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -33,6 +36,8 @@ fn unignore_removes_validate_ignore_field() {
     lazyspec::cli::ignore::unignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -52,6 +57,8 @@ fn ignore_is_idempotent() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -61,6 +68,8 @@ fn ignore_is_idempotent() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -80,6 +89,8 @@ fn unignore_on_document_without_field_succeeds() {
     lazyspec::cli::ignore::unignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -120,6 +131,8 @@ fn ignore_then_validate_skips_document() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/iterations/ITERATION-001-sprint.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -147,6 +160,8 @@ fn ignore_with_shorthand_id() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "RFC-001",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -166,6 +181,8 @@ fn unignore_with_shorthand_id() {
     lazyspec::cli::ignore::ignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "docs/rfcs/RFC-001-auth.md",
         &lazyspec::engine::fs::RealFileSystem,
     )
@@ -175,6 +192,8 @@ fn unignore_with_shorthand_id() {
     lazyspec::cli::ignore::unignore(
         fixture.root(),
         &store,
+        &fixture.config(),
+        &MockGitRefClient::new(),
         "RFC-001",
         &lazyspec::engine::fs::RealFileSystem,
     )

@@ -53,6 +53,11 @@ struct CacheFrontmatter {
 /// mutation is synced synchronously as part of the API call itself (a REST/
 /// GraphQL write that either succeeds or the whole mutation errors), so those
 /// backends always report `Synced`.
+///
+/// The `git` store also pushes after a local write but never reports
+/// `LocalOnly` (RFC-072 Decision 5): its clone is rolled back and the mutation
+/// errors, because an unreachable or moved remote there is a conflict the
+/// human resolves with `lazyspec fetch`, not a local write to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PushOutcome {
     #[default]
@@ -496,6 +501,7 @@ impl DocumentStore for FilesystemStore {
             author,
             &type_def.numbering,
             type_def.subdirectory,
+            None,
             |_| {},
         )?;
 
@@ -3087,34 +3093,16 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
         );
     }
 
-    // A `git` type is read-only until STORY-282: every write dispatched through
-    // the registry refuses with the message the direct write paths raise. The
-    // registry is keyed by backend, so the message names the first `git` type.
-    let git_type = config
-        .documents
-        .types
-        .iter()
-        .find(|t| t.store == StoreBackend::Git);
-    let message = match git_type {
-        Some(type_def) => git_write_refusal(type_def),
-        None => format!(
-            "type uses {} store; writes are not yet supported (STORY-282)",
-            StoreBackend::Git
-        ),
-    };
-    registry.register(StoreBackend::Git, Box::new(UnavailableStore { message }));
+    registry.register(
+        StoreBackend::Git,
+        Box::new(crate::engine::git_store::GitStore {
+            root: root.to_path_buf(),
+            config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
+        }),
+    );
 
     registry
-}
-
-/// The refusal every write to a `git` type raises (STORY-281 AC6), so `create`,
-/// `update`, `link`, `tag` and `delete` all name the backend the same way.
-pub(crate) fn git_write_refusal(type_def: &TypeDef) -> String {
-    format!(
-        "type '{}' uses {} store; writes are not yet supported (STORY-282)",
-        type_def.name,
-        StoreBackend::Git
-    )
 }
 
 /// Load the ClickUp credential and bind a token-bearing [`ClickupTasksStore`] --
@@ -5712,25 +5700,15 @@ mod tests {
     }
 
     #[test]
-    fn build_registry_refuses_writes_to_git_types() {
-        let root = tmp_root("registry_git_refuses");
-        let mut config = Config::default();
-        let td = TypeDef {
-            remote: Some("https://example.com/specs.git".to_string()),
-            ..test_type_def(StoreBackend::Git)
-        };
-        config.documents.types.push(td.clone());
-        let mut registry = build_registry(&root, &config);
+    fn build_registry_registers_a_git_store() {
+        let root = tmp_root("registry_git_store");
+        let registry = build_registry(&root, &Config::default());
 
-        let result =
-            registry
-                .for_type(&td)
-                .unwrap()
-                .update(&td, "RFC-001", &[("status", "review")]);
-
-        let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("git"), "{msg}");
-        assert!(msg.contains("not yet supported"), "{msg}");
+        let store = registry.get(StoreBackend::Git).unwrap();
+        assert!(store
+            .as_any()
+            .downcast_ref::<crate::engine::git_store::GitStore>()
+            .is_some());
     }
 
     #[test]

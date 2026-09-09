@@ -974,7 +974,7 @@ impl GovernsNoMatchRule {
     /// in, so a sha git cannot resolve here is a real anomaly, not the expected
     /// case.
     fn rename_candidates(
-        &self,
+        git: &dyn GitRefOps,
         store: &super::store::Store,
         doc: &Path,
         matcher: &GlobMatcher,
@@ -982,7 +982,7 @@ impl GovernsNoMatchRule {
         let Some(reviewed) = store.docs.get(doc).and_then(|m| m.reviewed.as_deref()) else {
             return (Vec::new(), None);
         };
-        let pairs = match self.git.renames(&store.governs_root, reviewed, "HEAD") {
+        let pairs = match git.renames(&store.governs_root, reviewed, "HEAD") {
             Ok(pairs) => pairs,
             Err(e) => return (Vec::new(), Some(format!("{e:#}"))),
         };
@@ -992,6 +992,50 @@ impl GovernsNoMatchRule {
             .map(Rename::from)
             .collect();
         (renamed, None)
+    }
+
+    /// [`Checker::check`] against a borrowed git, for a caller (`fix --governs`)
+    /// that needs the same seam again after the findings are in.
+    pub fn findings(
+        git: &dyn GitRefOps,
+        store: &super::store::Store,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        // Per glob, not per document: a document with three pins and one miss
+        // is one finding. Sorted, because `governs_globs` is a `HashMap` and
+        // the order findings print in should not be its iteration order.
+        let mut pinned: Vec<(&PathBuf, &String, &GlobMatcher)> = store
+            .governs_globs
+            .iter()
+            .filter(|(path, _)| store.docs.get(*path).is_some_and(|m| !m.validate_ignore))
+            .flat_map(|(path, globs)| {
+                globs
+                    .iter()
+                    .map(move |(glob, matcher)| (path, glob, matcher))
+            })
+            .collect();
+        pinned.sort_by(|(ap, ag, _), (bp, bg, _)| (ap, ag).cmp(&(bp, bg)));
+
+        let matchers: Vec<GlobMatcher> = pinned.iter().map(|(_, _, m)| (*m).clone()).collect();
+        let matched = files_matching(&store.governs_root, &matchers);
+
+        pinned
+            .iter()
+            .filter(|(_, _, matcher)| !matched.iter().any(|file| matcher.is_match(file)))
+            .map(|(path, glob, matcher)| {
+                let (renamed, rename_lookup_error) =
+                    Self::rename_candidates(git, store, path, matcher);
+                (
+                    Severity::Warning,
+                    ValidationIssue::GovernsNoMatch {
+                        path: (*path).clone(),
+                        glob: (*glob).clone(),
+                        suggested_glob: suggest_glob(&renamed),
+                        renamed,
+                        rename_lookup_error,
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -1119,41 +1163,7 @@ impl Checker for GovernsNoMatchRule {
         store: &super::store::Store,
         _config: &Config,
     ) -> Vec<(Severity, ValidationIssue)> {
-        // Per glob, not per document: a document with three pins and one miss
-        // is one finding. Sorted, because `governs_globs` is a `HashMap` and
-        // the order findings print in should not be its iteration order.
-        let mut pinned: Vec<(&PathBuf, &String, &GlobMatcher)> = store
-            .governs_globs
-            .iter()
-            .filter(|(path, _)| store.docs.get(*path).is_some_and(|m| !m.validate_ignore))
-            .flat_map(|(path, globs)| {
-                globs
-                    .iter()
-                    .map(move |(glob, matcher)| (path, glob, matcher))
-            })
-            .collect();
-        pinned.sort_by(|(ap, ag, _), (bp, bg, _)| (ap, ag).cmp(&(bp, bg)));
-
-        let matchers: Vec<GlobMatcher> = pinned.iter().map(|(_, _, m)| (*m).clone()).collect();
-        let matched = files_matching(&store.governs_root, &matchers);
-
-        pinned
-            .iter()
-            .filter(|(_, _, matcher)| !matched.iter().any(|file| matcher.is_match(file)))
-            .map(|(path, glob, matcher)| {
-                let (renamed, rename_lookup_error) = self.rename_candidates(store, path, matcher);
-                (
-                    Severity::Warning,
-                    ValidationIssue::GovernsNoMatch {
-                        path: (*path).clone(),
-                        glob: (*glob).clone(),
-                        suggested_glob: suggest_glob(&renamed),
-                        renamed,
-                        rename_lookup_error,
-                    },
-                )
-            })
-            .collect()
+        Self::findings(&*self.git, store)
     }
 }
 
