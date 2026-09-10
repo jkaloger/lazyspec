@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/jkaloger/lazyspec/compare/v0.11.3...v0.12.0) - 2026-09-10
+
+### Added
+
+- adopt a shared doc set with a one-line config (STORY-284)
+- write documents back to the shared git repo (STORY-282)
+- read a type's documents from a shared git repo (STORY-281)
+- resolve every type's doc root to one path shape (STORY-283)
+- bound the cost of staleness on the validation path (STORY-276)
+- show the staleness band on the TUI detail surface (STORY-275)
+- stamp reviewed when a document's status moves (STORY-274)
+- report stale documents as validation findings (STORY-273)
+- compute and expose document staleness (STORY-272)
+- *(cli)* rewrite stale globs with fix --governs
+- *(engine)* carry rename candidates on the zero-match finding
+- *(cli)* stamp reviewed with HEAD when pinning
+- *(engine,tui,web)* match a file path in search
+- *(tui,web)* render governs and reviewed on document detail
+- *(engine)* emit governs-unowned for in-scope files no document governs
+- *(engine)* emit governs-no-match for a glob that matches nothing
+- *(engine)* [**breaking**] serialise validation findings as objects with a rule slug
+- *(cli)* print governs and reviewed in show
+- *(cli)* add the why <path> verb
+- *(engine)* compile governs globs at store load and answer governing
+- *(engine)* parse governs and reviewed frontmatter and the governs config
+- *(engine)* [**breaking**] remove the acceptance-gating validation findings
+- [**breaking**] consolidate document DAG config into an edge table ([#99](https://github.com/jkaloger/lazyspec/pull/99))
+
+### Fixed
+
+- close the batch review on RFC-068 governs
+- *(engine)* restore frontmatter separator on body substitution
+
+### Other
+
+- clickup CI reqwest panics
+- update status
+- close STORY-282 and ITERATION-440
+- rfc073 tui rethink
+- raise shorthand id bug
+- rfc072 stories
+- close out the staleness chunk's comprehensive review
+- tidy the residue of the staleness batch (STORY-277)
+- story statuses
+- RFC071 tweaks
+- RFC071 tweaks
+- close the RFC-069 staleness batch
+- RFC072
+- split RFC-069 into four stories
+- remove test types
+- update story statuses
+- file the batch review's deferred findings
+- add a fast mode to gate.sh
+- *(docs)* record status advances from landed work
+- cover the web feature in gate.sh
+- seed this repo's governs pins and turn unowned on
+- point validate --json consumers at rule slugs
+- add gate.sh, the single verification gate
+- *(docs)* STORY-265 in-progress, walking skeleton landed
+- *(docs)* accept RFC-068 iterations, close ITERATION-407
+- RFC-068 iterations 407-420, story AC amendments
+- RFC071 and ADR036
+- RFC068 stories
+- document trust, packed context and module ownership
+- hydra interview, context-graph candidates
+- push release closures to a Cachix binary cache
+- RFC 67
+- *(engine)* consolidate body normalisation, cover it end to end
+
 ## [0.11.3](https://github.com/jkaloger/lazyspec/compare/v0.11.2...v0.11.3) - 2026-08-24
 
 ### Fixed
