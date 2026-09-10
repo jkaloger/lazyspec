@@ -1,13 +1,13 @@
 ---
 title: External git repo support
 type: rfc
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - related-to: RFC-071
-reviewed: 000f4aa7fa18f61d47104de712f8c10fbd9d9560
+reviewed: bb17f1630effa6c943b9fb308098d4cb3ba77469
 ---
 
 ## Summary
