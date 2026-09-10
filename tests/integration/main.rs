@@ -42,6 +42,7 @@ mod config_test;
 mod create_spec_test;
 mod document_test;
 mod expand_refs_test;
+mod extends_test;
 mod fetch_clickup_colors_test;
 mod fetch_milestone_relation_test;
 mod fetch_nested_subissues_test;

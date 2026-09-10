@@ -1,9 +1,13 @@
+mod extends;
+
 use crate::engine::document::Status;
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+
+pub use extends::Extends;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -1156,6 +1160,13 @@ pub struct Config {
     /// bands step at. Serialized into `config --json` but parsed via `RawConfig`.
     #[serde(default, skip_deserializing)]
     pub staleness: StalenessConfig,
+    /// The extended location this config resolved from, when its
+    /// `.lazyspec.toml` declared only `extends` (STORY-284). `None` for a
+    /// config that declares its own `[[types]]`. Skipped on both directions:
+    /// `to_toml` never writes it (it is derived, not declared) and `config
+    /// --json` reports it separately so it is never double-reported.
+    #[serde(skip)]
+    pub extends: Option<Extends>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1492,6 +1503,15 @@ struct RawConfig {
     /// The `[staleness]` block: the age thresholds the staleness bands step at.
     #[serde(default)]
     staleness: Option<StalenessConfig>,
+    /// `extends`: point this config at another directory's `.lazyspec.toml`
+    /// instead of declaring `[[types]]`/`[[relationships]]` locally -- the
+    /// whole config, since STORY-284's exclusivity rule forbids any sibling
+    /// key. [`extends::probe`] reads this out of the raw TOML text before
+    /// `RawConfig` deserializes, so this field is never read here; it exists
+    /// only so `config schema` documents the key.
+    #[allow(dead_code)]
+    #[serde(default)]
+    extends: Option<String>,
 }
 
 /// The JSON Schema for `.lazyspec.toml`, derived from the private `RawConfig`
@@ -1730,6 +1750,7 @@ impl Default for Config {
             git_ref: GitRefConfig::default(),
             governs: GovernsConfig::default(),
             staleness: StalenessConfig::default(),
+            extends: None,
         }
     }
 }
@@ -1815,6 +1836,13 @@ impl Config {
     }
 
     fn parse_inner(toml_str: &str, lenient: bool) -> Result<Self> {
+        if extends::probe(toml_str)?.is_some() {
+            bail!(
+                "this project extends another project's config via `extends`; edit \
+                 types, relationships, and edges at the extended location, not here"
+            );
+        }
+
         let raw: RawConfig =
             toml::from_str(toml_str).map_err(|e| enrich_parse_error(toml_str, e))?;
 
@@ -2076,41 +2104,183 @@ impl Config {
             git_ref: raw.git_ref.unwrap_or_default(),
             governs: raw.governs.unwrap_or_default(),
             staleness,
+            extends: None,
         })
+    }
+
+    /// Read `.lazyspec.toml`'s bytes and the `extends` spec found by probing
+    /// them, shared by [`Config::load`] and [`Config::load_lenient`] so both
+    /// see the same one-liner the same way.
+    fn read_source(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+    ) -> Result<(String, Option<String>)> {
+        let path = project_root.join(".lazyspec.toml");
+        if !fs.exists(&path) {
+            bail!(
+                "no .lazyspec.toml found in {}. Run `lazyspec init` to scaffold a config.",
+                project_root.display()
+            );
+        }
+        let content = fs.read_to_string(&path)?;
+        let extends = extends::probe(&content)?;
+        Ok((content, extends))
+    }
+
+    /// Resolve an `extends` spec found at `project_root` to the config it
+    /// names, dispatching on whether `spec` is a clone URL (ITERATION-443) or
+    /// a local directory (ITERATION-441).
+    fn load_extended(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+        spec: &str,
+        ops: &dyn crate::engine::git_ref::GitRefOps,
+    ) -> Result<Self> {
+        if extends::is_url(spec) {
+            Self::load_extended_url(project_root, fs, spec, ops)
+        } else {
+            Self::load_extended_dir(project_root, fs, spec)
+        }
+    }
+
+    /// The tail shared by [`load_extended_dir`](Self::load_extended_dir) and
+    /// [`load_extended_url`](Self::load_extended_url) once each has resolved
+    /// its own `root` (a local directory or a clone): read `root`'s
+    /// `.lazyspec.toml`, refuse a nested `extends` rather than follow it
+    /// (AC6, RFC-072 Non-goals: no recursion), and parse it. Setting
+    /// `config.extends` is left to the caller, which alone knows whether
+    /// `root` came from a URL.
+    fn load_extended_at(
+        spec: &str,
+        root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+    ) -> Result<Self> {
+        let config_path = Extends::config_path(root);
+        if !fs.exists(&config_path) {
+            bail!(
+                "extends = \"{}\" resolves to {}, which has no .lazyspec.toml",
+                spec,
+                root.display()
+            );
+        }
+        let content = fs.read_to_string(&config_path)?;
+        if extends::probe(&content)?.is_some() {
+            bail!(
+                "extends chain: {} itself declares extends; a config declaring extends may not itself be extended",
+                root.display()
+            );
+        }
+        Self::parse(&content)
+    }
+
+    /// `spec` resolved to a directory (AC7), that directory's
+    /// `.lazyspec.toml` read and parsed, with a nested `extends` refused
+    /// rather than followed (AC6, RFC-072 Non-goals: no recursion).
+    fn load_extended_dir(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+        spec: &str,
+    ) -> Result<Self> {
+        let resolved = extends::resolve_dir(project_root, spec);
+        let mut config = Self::load_extended_at(spec, &resolved, fs)?;
+        config.extends = Some(Extends {
+            root: resolved,
+            ..Default::default()
+        });
+        Ok(config)
+    }
+
+    /// `spec` split into its clone URL and optional branch fragment
+    /// (ITERATION-443): clone under the *local* `.lazyspec/cache/config/` on
+    /// first load, reuse the existing clone thereafter (AC8), then read and
+    /// parse that clone's `.lazyspec.toml` exactly as the dir branch does.
+    fn load_extended_url(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+        spec: &str,
+        ops: &dyn crate::engine::git_ref::GitRefOps,
+    ) -> Result<Self> {
+        let (url, branch) = extends::split_fragment(spec);
+        let clone_root = project_root.join(".lazyspec/cache/config");
+        if !fs.exists(&clone_root) {
+            crate::engine::store::ensure_cache_gitignored(project_root, fs)?;
+            ops.clone_repo(url, branch, &clone_root).with_context(|| {
+                format!(
+                    "cloning {url} ({}) for extends",
+                    branch.unwrap_or("default branch")
+                )
+            })?;
+        }
+        let mut config = Self::load_extended_at(spec, &clone_root, fs)?;
+        // Only a cache-backed or `git` store resolves into
+        // `.lazyspec/cache/<name>` (`doc_root`), which can actually collide
+        // with the config clone under `.lazyspec/cache/config`; a
+        // `filesystem` type named `config` lives at its own `dir` and never
+        // touches the cache.
+        if config
+            .type_by_name("config")
+            .is_some_and(|t| t.store != StoreBackend::Filesystem)
+        {
+            bail!(
+                "extends = \"{}\" clones into .lazyspec/cache/config, which collides with a type named `config`; rename that type",
+                spec
+            );
+        }
+        config.extends = Some(Extends {
+            root: clone_root,
+            remote: Some(url.to_string()),
+            branch: branch.map(str::to_string),
+        });
+        Ok(config)
     }
 
     pub fn load(
         project_root: &std::path::Path,
         fs: &dyn crate::engine::fs::FileSystem,
     ) -> Result<Self> {
-        let path = project_root.join(".lazyspec.toml");
-        if !fs.exists(&path) {
-            bail!(
-                "no .lazyspec.toml found in {}. Run `lazyspec init` to scaffold a config.",
-                project_root.display()
-            );
+        Self::load_with_git(project_root, fs, &crate::engine::git_ref::GitCli)
+    }
+
+    /// [`Config::load`] with the `GitRefOps` seam exposed (ITERATION-443), so
+    /// a URL `extends` can be cloned through a fake in unit tests rather than
+    /// spawning real git. `load` is the `GitCli` default, as `Store::load` is
+    /// for [`Store::load_with_fs`](crate::engine::store::Store::load_with_fs).
+    pub fn load_with_git(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+        ops: &dyn crate::engine::git_ref::GitRefOps,
+    ) -> Result<Self> {
+        let (content, extends) = Self::read_source(project_root, fs)?;
+        match extends {
+            None => Self::parse(&content),
+            Some(spec) => Self::load_extended(project_root, fs, &spec, ops),
         }
-        let content = fs.read_to_string(&path)?;
-        Self::parse(&content)
     }
 
     /// Lenient counterpart of [`Config::load`], used only by `fix --config`.
     /// Reads `.lazyspec.toml` without enforcing the strict `[[relationships]]`
     /// requirement, so the migration can repair the very config strict load
-    /// would reject.
+    /// would reject. An `extends` one-liner has no `[[relationships]]` to be
+    /// lenient about, so it loads exactly as `load` does.
     pub fn load_lenient(
         project_root: &std::path::Path,
         fs: &dyn crate::engine::fs::FileSystem,
     ) -> Result<Self> {
-        let path = project_root.join(".lazyspec.toml");
-        if !fs.exists(&path) {
-            bail!(
-                "no .lazyspec.toml found in {}. Run `lazyspec init` to scaffold a config.",
-                project_root.display()
-            );
+        Self::load_lenient_with_git(project_root, fs, &crate::engine::git_ref::GitCli)
+    }
+
+    /// [`Config::load_lenient`] with the `GitRefOps` seam exposed, mirroring
+    /// [`Config::load_with_git`].
+    pub fn load_lenient_with_git(
+        project_root: &std::path::Path,
+        fs: &dyn crate::engine::fs::FileSystem,
+        ops: &dyn crate::engine::git_ref::GitRefOps,
+    ) -> Result<Self> {
+        let (content, extends) = Self::read_source(project_root, fs)?;
+        match extends {
+            None => Self::parse_lenient(&content),
+            Some(spec) => Self::load_extended(project_root, fs, &spec, ops),
         }
-        let content = fs.read_to_string(&path)?;
-        Self::parse_lenient(&content)
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -2119,6 +2289,16 @@ impl Config {
 
     pub fn type_by_name(&self, name: &str) -> Option<&TypeDef> {
         self.documents.types.iter().find(|t| t.name == name)
+    }
+
+    /// The extended root when this config declared `extends`, `root`
+    /// otherwise -- what a type's `dir` and the templates dir resolve
+    /// against; see [`doc_root`](crate::engine::store::doc_root) for what
+    /// does and does not move under `extends` (RFC-072 Decision 4).
+    pub fn docs_root(&self, root: &std::path::Path) -> std::path::PathBuf {
+        self.extends
+            .as_ref()
+            .map_or_else(|| root.to_path_buf(), |e| e.root.clone())
     }
 
     /// The relationship declared under the canonical `name`, if any.
@@ -5308,5 +5488,259 @@ github_issue_type = "Bug"
             json["github_issue_type"],
             serde_json::Value::String("Bug".to_string())
         );
+    }
+
+    // Fix 3 (code review of STORY-284): `Config::parse` is what every mutator
+    // (`config add-type`, `set-edge`, `fix --config`, the TUI settings save)
+    // calls on the raw bytes it read, so this message reaches an end user
+    // directly. It must say what to do (edit the extended config) without
+    // naming an internal Rust API the user cannot call.
+    #[test]
+    fn parse_refuses_extends_naming_the_extended_location_not_an_internal_api() {
+        let err = Config::parse("extends = \"../shared\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extends"), "should name extends, got: {err}");
+        assert!(
+            !err.contains("Config::load"),
+            "should not name the internal API, got: {err}"
+        );
+        assert!(
+            err.contains("extended location") || err.contains("extended config"),
+            "should point the reader at the extended location, got: {err}"
+        );
+    }
+
+    // ITERATION-443: `extends` pointing at a clone URL clones under the local
+    // `.lazyspec/cache/config/` through `GitRefOps` rather than a real `git`
+    // process, so these tests stay in-process and fast (DICTUM-002).
+    mod extends_url {
+        use super::*;
+        use crate::engine::fs::FileSystem;
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+        use std::collections::HashMap as StdHashMap;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+
+        /// An in-memory [`crate::engine::fs::FileSystem`], mirroring
+        /// `store.rs`'s test fake: a file and its parent directory are
+        /// tracked independently, so a test can assert "the clone dir does
+        /// not exist yet" while still handing `Config::parse` the bytes a
+        /// real `git clone` would have written there.
+        struct InMemoryFileSystem {
+            files: Mutex<StdHashMap<PathBuf, String>>,
+            dirs: Mutex<Vec<PathBuf>>,
+        }
+
+        impl InMemoryFileSystem {
+            fn new() -> Self {
+                Self {
+                    files: Mutex::new(StdHashMap::new()),
+                    dirs: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn add_file(&self, path: impl Into<PathBuf>, content: &str) {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.into(), content.to_string());
+            }
+
+            fn add_dir(&self, path: impl Into<PathBuf>) {
+                self.dirs.lock().unwrap().push(path.into());
+            }
+        }
+
+        impl crate::engine::fs::FileSystem for InMemoryFileSystem {
+            fn read_to_string(&self, path: &std::path::Path) -> Result<String> {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("file not found: {}", path.display()))
+            }
+
+            fn write(&self, path: &std::path::Path, contents: &str) -> Result<()> {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_path_buf(), contents.to_string());
+                Ok(())
+            }
+
+            fn rename(&self, _from: &std::path::Path, _to: &std::path::Path) -> Result<()> {
+                unimplemented!("rename not needed for extends tests")
+            }
+
+            fn read_dir(&self, _path: &std::path::Path) -> Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+
+            fn exists(&self, path: &std::path::Path) -> bool {
+                let files = self.files.lock().unwrap();
+                let dirs = self.dirs.lock().unwrap();
+                files.contains_key(path) || dirs.contains(&path.to_path_buf())
+            }
+
+            fn create_dir_all(&self, path: &std::path::Path) -> Result<()> {
+                self.dirs.lock().unwrap().push(path.to_path_buf());
+                Ok(())
+            }
+
+            fn is_dir(&self, path: &std::path::Path) -> bool {
+                self.dirs.lock().unwrap().contains(&path.to_path_buf())
+            }
+        }
+
+        fn clone_calls(mock: &MockGitRefClient) -> Vec<String> {
+            mock.call_log()
+                .borrow()
+                .iter()
+                .filter(|c| c.starts_with("clone_repo:"))
+                .cloned()
+                .collect()
+        }
+
+        #[test]
+        fn load_with_git_clones_a_url_extends_under_the_local_cache() {
+            let fs = InMemoryFileSystem::new();
+            let root = PathBuf::from("/fake/root");
+            let clone_root = root.join(".lazyspec/cache/config");
+
+            fs.add_file(
+                root.join(".lazyspec.toml"),
+                "extends = \"https://h/r.git#next\"\n",
+            );
+            // Stands in for what a real `git clone` would have written; the
+            // clone *directory* is deliberately not added, so `fs.exists` on
+            // it still reads false and the mock's `clone_repo` gets called.
+            fs.add_file(clone_root.join(".lazyspec.toml"), TYPES);
+            let mock = MockGitRefClient::new();
+
+            let config = Config::load_with_git(&root, &fs, &mock).unwrap();
+
+            assert_eq!(
+                clone_calls(&mock),
+                vec![format!(
+                    "clone_repo:https://h/r.git:next:{}",
+                    clone_root.display()
+                )]
+            );
+            assert_eq!(config.extends.as_ref().unwrap().root, clone_root);
+            let gitignore = fs
+                .read_to_string(&root.join(".lazyspec/.gitignore"))
+                .unwrap();
+            assert!(
+                gitignore.lines().any(|l| l.trim() == "cache/"),
+                "got: {gitignore}"
+            );
+        }
+
+        #[test]
+        fn load_with_git_reuses_an_existing_clone_without_touching_the_network() {
+            let fs = InMemoryFileSystem::new();
+            let root = PathBuf::from("/fake/root");
+            let clone_root = root.join(".lazyspec/cache/config");
+
+            fs.add_file(
+                root.join(".lazyspec.toml"),
+                "extends = \"https://h/r.git#next\"\n",
+            );
+            fs.add_dir(clone_root.clone());
+            fs.add_file(clone_root.join(".lazyspec.toml"), TYPES);
+            let mock = MockGitRefClient::new();
+
+            Config::load_with_git(&root, &fs, &mock).unwrap();
+
+            assert!(
+                clone_calls(&mock).is_empty(),
+                "an existing clone must not be cloned again"
+            );
+        }
+
+        #[test]
+        fn load_with_git_failed_clone_names_the_url_and_branch() {
+            let fs = InMemoryFileSystem::new();
+            let root = PathBuf::from("/fake/root");
+
+            fs.add_file(
+                root.join(".lazyspec.toml"),
+                "extends = \"https://h/r.git#next\"\n",
+            );
+            let mock = MockGitRefClient::new()
+                .with_clone_result(Err(anyhow::anyhow!("could not read from remote")));
+
+            let err = Config::load_with_git(&root, &fs, &mock).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("https://h/r.git"), "got: {message}");
+            assert!(message.contains("next"), "got: {message}");
+        }
+
+        // Fix 4 (code review of STORY-284): only a cache-backed or `git` type
+        // named `config` collides with the config clone under
+        // `.lazyspec/cache/config` (`doc_root`); a `filesystem` type named
+        // `config` resolves to its own `dir` and never touches the cache.
+        #[test]
+        fn url_extends_loads_fine_beside_a_filesystem_type_named_config() {
+            let fs = InMemoryFileSystem::new();
+            let root = PathBuf::from("/fake/root");
+            let clone_root = root.join(".lazyspec/cache/config");
+
+            fs.add_file(
+                root.join(".lazyspec.toml"),
+                "extends = \"https://h/r.git\"\n",
+            );
+            fs.add_file(
+                clone_root.join(".lazyspec.toml"),
+                r#"
+[[types]]
+name = "config"
+plural = "configs"
+dir = "docs/configs"
+prefix = "CONFIG"
+
+[[relationships]]
+name = "related-to"
+"#,
+            );
+            let mock = MockGitRefClient::new();
+
+            let config = Config::load_with_git(&root, &fs, &mock).unwrap();
+            assert!(config.type_by_name("config").is_some());
+        }
+
+        #[test]
+        fn url_extends_refuses_a_git_type_named_config() {
+            let fs = InMemoryFileSystem::new();
+            let root = PathBuf::from("/fake/root");
+            let clone_root = root.join(".lazyspec/cache/config");
+
+            fs.add_file(
+                root.join(".lazyspec.toml"),
+                "extends = \"https://h/r.git\"\n",
+            );
+            fs.add_file(
+                clone_root.join(".lazyspec.toml"),
+                r#"
+[[types]]
+name = "config"
+plural = "configs"
+dir = "docs/configs"
+prefix = "CONFIG"
+store = "git"
+remote = "https://h/other.git"
+
+[[relationships]]
+name = "related-to"
+"#,
+            );
+            let mock = MockGitRefClient::new();
+
+            let err = Config::load_with_git(&root, &fs, &mock).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("config"), "got: {message}");
+        }
     }
 }

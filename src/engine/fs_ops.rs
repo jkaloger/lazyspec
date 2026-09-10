@@ -18,7 +18,9 @@ use crate::engine::template;
 /// so it ships no per-type templates; `{type}` in the body is substituted at
 /// creation time, letting one template serve every type.
 fn load_template(root: &Path, config: &Config, doc_type: &str) -> String {
-    let dir = root.join(&config.filesystem.templates.dir);
+    let dir = config
+        .docs_root(root)
+        .join(&config.filesystem.templates.dir);
 
     let per_type = dir.join(format!("{}.md", doc_type.to_lowercase()));
     if per_type.exists() {

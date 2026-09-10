@@ -852,3 +852,122 @@ repo = "octo-org/repo"
     );
     assert_eq!(resolved("issue"), root.join(".lazyspec/cache/issue"));
 }
+
+// --- `extends` (STORY-284, ITERATION-441) ---
+
+const TWO_TYPES: &str = r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[types]]
+name = "story"
+plural = "stories"
+dir = "docs/stories"
+prefix = "STORY"
+"#;
+
+// Fix 3 (code review of STORY-284): `Config::parse` is what `config
+// add-type`, `set-edge`, `fix --config`, and the TUI settings save all call
+// on the raw bytes they read, so this message reaches an end user directly.
+// It must point at the extended config rather than name the internal
+// `Config::load` API a user cannot call.
+#[test]
+fn parse_of_an_extends_one_liner_names_the_extended_location() {
+    let err = Config::parse("extends = \"../shared\"\n").unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.contains("Config::load"), "got: {msg}");
+    assert!(msg.contains("extends"), "got: {msg}");
+    assert!(msg.contains("extended location"), "got: {msg}");
+}
+
+#[test]
+fn load_lenient_of_an_extends_one_liner_names_the_extended_location() {
+    // `load_lenient` (`fix --config`) only relaxes `[[relationships]]`;
+    // `extends` refuses through `Config::parse_lenient` the same way.
+    let err = Config::parse_lenient("extends = \"../shared\"\n").unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.contains("Config::load"), "got: {msg}");
+    assert!(msg.contains("extends"), "got: {msg}");
+    assert!(msg.contains("extended location"), "got: {msg}");
+}
+
+fn write_config(dir: &std::path::Path, body: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(".lazyspec.toml"), body).unwrap();
+}
+
+#[test]
+fn load_of_an_extends_one_liner_resolves_the_extended_config() {
+    let tmp = TempDir::new().unwrap();
+    let fs = RealFileSystem;
+
+    let shared = tmp.path().join("shared");
+    write_config(&shared, &format!("{TWO_TYPES}{RELATIONSHIPS}"));
+    write_config(tmp.path(), "extends = \"shared\"\n");
+
+    let config = Config::load(tmp.path(), &fs).unwrap();
+
+    assert_eq!(config.documents.types.len(), 2);
+    assert_eq!(
+        config.extends.as_ref().map(|e| e.root.clone()),
+        Some(shared)
+    );
+}
+
+#[test]
+fn load_lenient_of_an_extends_one_liner_resolves_the_extended_config() {
+    let tmp = TempDir::new().unwrap();
+    let fs = RealFileSystem;
+
+    let shared = tmp.path().join("shared");
+    write_config(&shared, &format!("{TWO_TYPES}{RELATIONSHIPS}"));
+    write_config(tmp.path(), "extends = \"shared\"\n");
+
+    let config = Config::load_lenient(tmp.path(), &fs).unwrap();
+
+    assert_eq!(config.documents.types.len(), 2);
+    assert_eq!(
+        config.extends.as_ref().map(|e| e.root.clone()),
+        Some(shared)
+    );
+}
+
+#[test]
+fn load_refuses_an_extends_chain() {
+    let tmp = TempDir::new().unwrap();
+    let fs = RealFileSystem;
+
+    write_config(
+        &tmp.path().join("other"),
+        &format!("{TWO_TYPES}{RELATIONSHIPS}"),
+    );
+    write_config(&tmp.path().join("shared"), "extends = \"../other\"\n");
+    write_config(tmp.path(), "extends = \"shared\"\n");
+
+    let err = Config::load(tmp.path(), &fs).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("chain"),
+        "error should name the chain, got: {msg}"
+    );
+}
+
+#[test]
+fn load_of_a_missing_extends_target_names_the_resolved_path() {
+    let tmp = TempDir::new().unwrap();
+    let fs = RealFileSystem;
+
+    write_config(tmp.path(), "extends = \"nope\"\n");
+
+    let err = Config::load(tmp.path(), &fs).unwrap_err();
+    let msg = err.to_string();
+    let resolved = tmp.path().join("nope");
+    assert!(
+        msg.contains(&resolved.display().to_string()),
+        "error should name {}, got: {msg}",
+        resolved.display()
+    );
+}

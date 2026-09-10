@@ -49,7 +49,8 @@ pub enum ConfigCommand {
         /// Mark the type as a singleton (a single document, not numbered series)
         #[arg(long)]
         singleton: bool,
-        /// Storage backend: filesystem, github-issues, or git-ref
+        /// Storage backend: filesystem, github-issues, github-milestones,
+        /// github-projects, git-ref, git, or clickup-tasks
         #[arg(long)]
         store: Option<String>,
         /// Numbering strategy: incremental, sqids, or reserved
@@ -215,6 +216,13 @@ pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
         object
             .entry("edges")
             .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        object.insert(
+            "extends".to_string(),
+            match &config.extends {
+                Some(extends) => serde_json::to_value(&extends.root)?,
+                None => serde_json::Value::Null,
+            },
+        );
     }
     if let Some(types) = value
         .get_mut("types")
@@ -224,7 +232,7 @@ pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
             if let Some(object) = entry.as_object_mut() {
                 object.insert(
                     "resolved_dir".to_string(),
-                    serde_json::to_value(doc_root(root, type_def))?,
+                    serde_json::to_value(doc_root(config, root, type_def))?,
                 );
             }
         }

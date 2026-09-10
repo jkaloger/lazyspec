@@ -1,5 +1,5 @@
 use crate::engine::clickup::ClickupClient;
-use crate::engine::config::{Config, Lifecycle, StoreBackend};
+use crate::engine::config::{Config, Extends, Lifecycle, StoreBackend};
 use crate::engine::config_write::write_config_in_place;
 use crate::engine::credentials::Token;
 use crate::engine::gh::GhGraphql;
@@ -29,6 +29,28 @@ pub fn run(
     type_filter: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    // A URL `extends` clone is refreshed before anything else fetches, so the
+    // *next* command sees new types/documents (STORY-284 AC9); a failure here
+    // is a hard error, not a per-type `SyncOutcome`.
+    let mut refreshed_extends_from: Option<&str> = None;
+    if let Some(Extends {
+        remote: Some(url),
+        branch,
+        ..
+    }) = &config.extends
+    {
+        let clone_root = root.join(".lazyspec/cache/config");
+        git_ref_ops
+            .update_clone(&clone_root, branch.as_deref())
+            .with_context(|| {
+                format!(
+                    "updating {url} ({}) for extends",
+                    branch.as_deref().unwrap_or("default branch")
+                )
+            })?;
+        refreshed_extends_from = Some(url);
+    }
+
     let gh_types: Vec<&str> = config
         .documents
         .types
@@ -74,6 +96,7 @@ pub fn run(
         && git_ref_types.is_empty()
         && git_types.is_empty()
         && clickup_types.is_empty()
+        && refreshed_extends_from.is_none()
     {
         if json {
             println!("{{\"error\":\"no fetchable types configured\"}}");
@@ -81,6 +104,28 @@ pub fn run(
             println!("No fetchable types configured.");
         }
         return Ok(());
+    }
+
+    // The clone was refreshed but there is still nothing to fetch: report
+    // that refresh rather than "no fetchable types" (there evidently was
+    // something to do), and skip `sync_all` -- there is no type for it to
+    // touch. No new JSON shape: `SyncOutcome` is per type and `extends` is
+    // not one, so `--json` gets the empty outcomes array the per-type loop
+    // would produce with nothing to do.
+    if let Some(url) = refreshed_extends_from {
+        if gh_types.is_empty()
+            && milestone_types.is_empty()
+            && git_ref_types.is_empty()
+            && git_types.is_empty()
+            && clickup_types.is_empty()
+        {
+            if json {
+                println!("{}", outcomes_json(&[])?);
+            } else {
+                println!("Fetched extends from {url}");
+            }
+            return Ok(());
+        }
     }
 
     if let Some(filter) = type_filter {
@@ -953,6 +998,100 @@ name = "related-to"
                 .iter()
                 .any(|c| c == "fetch_refs:upstream:refs/lazyspec/alpha/*"),
             "fetch should target the configured remote, got: {calls:?}"
+        );
+    }
+
+    fn url_extends(root: &Path) -> crate::engine::config::Extends {
+        crate::engine::config::Extends {
+            root: root.join(".lazyspec/cache/config"),
+            remote: Some("file:///shared".to_string()),
+            branch: Some("next".to_string()),
+        }
+    }
+
+    // STORY-284 AC9 (ITERATION-444): a URL `extends` clone is brought current
+    // before anything else fetches, even when there is no fetchable type --
+    // that is the whole point for a project whose only reason to run `fetch`
+    // is the shared doc set.
+    #[test]
+    fn run_refreshes_a_url_extends_clone_even_with_no_fetchable_types() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let config = Config {
+            extends: Some(url_extends(root)),
+            ..Config::default()
+        };
+
+        let mock = MockGitRefClient::new().with_update_clone_result(Ok(()));
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
+        assert!(result.is_ok(), "refresh must exit zero: {result:?}");
+
+        let log = mock.call_log();
+        let calls = log.borrow();
+        assert_eq!(
+            calls[0],
+            format!(
+                "update_clone:{}:next",
+                root.join(".lazyspec/cache/config").display()
+            )
+        );
+    }
+
+    // A queued `update_clone` failure is a hard error naming the remote and
+    // the branch, not a per-type `SyncOutcome` -- there is no type to name it
+    // under.
+    #[test]
+    fn run_fails_naming_the_remote_and_branch_when_the_extends_refresh_fails() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let config = Config {
+            extends: Some(url_extends(root)),
+            ..Config::default()
+        };
+
+        let mock = MockGitRefClient::new()
+            .with_update_clone_result(Err(anyhow::anyhow!("git fetch failed: connection refused")));
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
+        let err = result.expect_err("a failing refresh must exit non-zero");
+        let message = format!("{err:#}");
+        assert!(message.contains("file:///shared"), "got: {message}");
+        assert!(message.contains("next"), "got: {message}");
+    }
+
+    // A local-directory `extends` (`remote: None`) has no clone to refresh --
+    // zero `update_clone` calls, and the run falls through to today's "no
+    // fetchable types" early return.
+    #[test]
+    fn run_does_not_refresh_a_directory_extends() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        let config = Config {
+            extends: Some(crate::engine::config::Extends {
+                root: root.join("shared"),
+                remote: None,
+                branch: None,
+            }),
+            ..Config::default()
+        };
+
+        let mock = MockGitRefClient::new();
+        let gh = StubGh;
+        let clickup = fake_clickup();
+
+        let result = run(root, &config, &gh, &mock, &clickup, None, None, false);
+        assert!(result.is_ok(), "no fetchable types must still exit zero");
+        assert!(
+            mock.call_log().borrow().is_empty(),
+            "a directory extends must not call update_clone"
         );
     }
 

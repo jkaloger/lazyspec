@@ -55,3 +55,51 @@ fn config_schema_json_flag_matches_default() {
 
     assert_eq!(plain.stdout, with_json.stdout, "--json output should match");
 }
+
+// STORY-284 AC13: `--store`'s help text must list every backend `parse_store`
+// accepts, not a stale subset.
+#[test]
+fn add_type_help_lists_every_store_backend() {
+    let output = Command::new(binary())
+        .args(["config", "add-type", "--help"])
+        .output()
+        .expect("failed to run lazyspec");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for backend in [
+        "filesystem",
+        "github-issues",
+        "github-milestones",
+        "github-projects",
+        "git-ref",
+        "git,",
+        "clickup-tasks",
+    ] {
+        assert!(
+            stdout.contains(backend),
+            "--store help should mention \"{backend}\", got: {stdout}"
+        );
+    }
+}
+
+// STORY-284 AC13: `fetch --help` must name the `git` backend alongside the
+// other remote-backed types it already refreshes.
+#[test]
+fn fetch_help_mentions_git_backend() {
+    let output = Command::new(binary())
+        .args(["fetch", "--help"])
+        .output()
+        .expect("failed to run lazyspec");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("git"),
+        "fetch --help should mention the git backend, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("git-ref"),
+        "fetch --help should still mention git-ref, got: {stdout}"
+    );
+}

@@ -1051,7 +1051,7 @@ fn every_list_and_get_path_resolves_under_its_types_doc_root() {
         if type_def.name == "rfc" || type_def.name == "shared" || type_def.name == "external" {
             assert!(!listed.is_empty(), "{} lists nothing", type_def.name);
         }
-        let root_for_type = doc_root(project.root(), type_def);
+        let root_for_type = doc_root(&config, project.root(), type_def);
         for meta in listed {
             let fetched = store.get(&meta.path).expect("listed path is gettable");
             for path in [&meta.path, &fetched.path] {

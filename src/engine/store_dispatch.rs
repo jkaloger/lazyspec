@@ -491,11 +491,14 @@ impl DocumentStore for FilesystemStore {
         author: &str,
         _body: &str,
     ) -> Result<CreatedDoc> {
+        let dir = store::doc_root(&self.config, &self.root, type_def)
+            .to_string_lossy()
+            .into_owned();
         let path = crate::engine::fs_ops::create_document(
             &self.root,
             &self.config,
             &type_def.name,
-            &type_def.dir,
+            &dir,
             &type_def.prefix,
             title,
             author,
@@ -7360,6 +7363,7 @@ mod tests {
             staleness: Default::default(),
             web: None,
             git_ref: Default::default(),
+            extends: None,
         };
 
         let store = Store::load(&root, &config).unwrap();

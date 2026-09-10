@@ -204,11 +204,14 @@ pub fn run_with_body(
         return Ok((root.join(&created.path), created.push_outcome));
     }
 
+    let dir = crate::engine::store::doc_root(config, root, type_def)
+        .to_string_lossy()
+        .into_owned();
     let path = fs_ops::create_document(
         root,
         config,
         doc_type,
-        &type_def.dir,
+        &dir,
         &type_def.prefix,
         title,
         author,

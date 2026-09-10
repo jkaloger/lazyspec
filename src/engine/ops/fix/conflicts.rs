@@ -90,7 +90,7 @@ fn renumber_doc(
         .types
         .iter()
         .find(|t| t.prefix.eq_ignore_ascii_case(doc_type_prefix))?;
-    let type_dir = root.join(&type_def.dir);
+    let type_dir = crate::engine::store::doc_root(config, root, type_def);
 
     let new_id = match type_def.numbering {
         NumberingStrategy::Sqids => {

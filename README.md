@@ -616,7 +616,7 @@ A config gaining its first `[[edges]]` block gets it directly after the `[[relat
 
 ### Inspecting and editing the config
 
-`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape. Each type in the JSON carries `resolved_dir`, the absolute directory its documents are read from: `dir` joined to the project root and normalised for a `filesystem` type, or `.lazyspec/cache/<name>` for a cache-backed store, which ignores `dir`.
+`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape. Each type in the JSON carries `resolved_dir`, the absolute directory its documents are read from: `dir` joined to the project root and normalised for a `filesystem` type, or `.lazyspec/cache/<name>` for a cache-backed store, which ignores `dir`. Under [`extends`](#sharing-a-doc-set), `resolved_dir` is under the extended root, and the JSON carries `.extends`, the resolved root itself.
 
 ```sh
 lazyspec config --json                      # print the resolved config as JSON
@@ -671,18 +671,19 @@ lazyspec config schema > lazyspec.schema.json
 
 Every `[[types]]` block has a `store` (default `filesystem`) that decides where its documents live and how mutations sync. Set it with `--store` on `config add-type`. Per-store config keys are documented in `lazyspec config schema`; per-command behaviour in `lazyspec <cmd> --help`.
 
-| Store                  | Documents are                                         | Auth                          |
-| ---------------------- | ----------------------------------------------------- | ----------------------------- |
-| `filesystem` (default) | Markdown files under the type's `dir`                 | none                          |
-| `github-issues`        | GitHub issues (labelled `lazyspec:{type}` by default) | `gh auth login`               |
-| `github-milestones`    | GitHub milestones                                     | `gh auth login`               |
-| `github-projects`      | Existing Projects v2 boards (associate only)          | `gh auth login`, `-s project` |
-| `git-ref`              | Docs in git custom refs, pushed live to the remote    | a writable git remote         |
-| `clickup-tasks`        | Tasks in one bound ClickUp List (read/write)          | `lazyspec setup clickup`      |
+| Store                  | Documents are                                                     | Auth                                      |
+| ---------------------- | ------------------------------------------------------------------ | ------------------------------------------ |
+| `filesystem` (default) | Markdown files under the type's `dir`                             | none                                      |
+| `github-issues`        | GitHub issues (labelled `lazyspec:{type}` by default)             | `gh auth login`                           |
+| `github-milestones`    | GitHub milestones                                                 | `gh auth login`                           |
+| `github-projects`      | Existing Projects v2 boards (associate only)                      | `gh auth login`, `-s project`              |
+| `git-ref`              | Docs in git custom refs, pushed live to the remote                | a writable git remote                      |
+| `git`                  | Files in another repo's worktree, cloned under `.lazyspec/cache/` | a readable git remote (writable to push)  |
+| `clickup-tasks`        | Tasks in one bound ClickUp List (read/write)                      | `lazyspec setup clickup`                   |
 
 A `filesystem` type's `dir` may point outside the project, either as an absolute path or as a relative path that escapes the root (`../shared-specs`). Both spell the same location, so `config --json` reports one `resolved_dir` for it and `list`/`show` report its documents as normalised absolute paths whatever the spelling. If an absolute `dir` does not exist, every command that reads the type prints a `warning:` on stderr naming the resolved path; a missing relative `dir` is skipped silently, since an unpopulated local docs dir between `init` and the first `create` is normal.
 
-Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`.
+Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`. A `git` type commits and pushes each write to its `remote`; a rejected push exits non-zero and names `lazyspec fetch` rather than staying local.
 
 `fetch` prints every warning to stderr as `warning: <message>` in both modes. `fetch --json` also prints one entry per type on stdout: `{ "type", "fetched", "new", "removed" }`, plus a `"warnings"` array repeating that type's warnings (a subtree the composed read could not refresh, so the prior cache stands; a connection truncated at its cap on one document; a document whose `Status` the authority board does not set) when it produced any, and an `"error"` string when its fetch failed.
 
@@ -700,6 +701,16 @@ lazyspec setup clickup --token pk_XXXXXXXX    # non-interactive
 ```
 
 Deeper per-store behaviour (write-through, optimistic locking, label/tag matching, relation and custom-field mapping via keys like `github_issue_tag`, `github_label`, `status_authority`, `clickup_list_id`, `clickup_custom_field_map`, and `github_native`) is described by `lazyspec config schema` and the relevant command's `--help`.
+
+### Sharing a doc set
+
+A `.lazyspec.toml` containing only `extends = "<dir-or-url>"` adopts the configuration declared at that location: its types, its DAG, its documents. No other top-level key may accompany `extends`; a config that declares one is a load error naming every sibling key, in file order. The extended config may not itself declare `extends`; a chain is a load error too.
+
+`extends` names a directory or a clone URL. A relative directory resolves against the directory containing `.lazyspec.toml`. A URL clones into the local repository's `.lazyspec/cache/config/`; a fragment (`<url>#branch`) selects a branch, and with no fragment the remote's default branch is used. `lazyspec fetch` brings an existing clone current.
+
+Only `[[types]].dir` and `[templates].dir` follow the extended root. `[governs] root`, `reviewed`/staleness anchors, `@ref` expansion, and `.lazyspec/cache/` for remote-backed types resolve against the local repository, not the extended one.
+
+The config's mutating commands (`config add-type`, `config set-edge`, and the rest), the TUI settings screen, and `fix --config` refuse to run under `extends`. `config --json` reports the resolved extended root as `.extends`.
 
 ### Custom types
 

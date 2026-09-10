@@ -193,6 +193,40 @@ impl TestFixture {
     }
 }
 
+/// Run a `git` subcommand in `repo`, asserting it succeeded. Shared by every
+/// integration test that stands up a real repository as a fixture (`git`/
+/// `git-ref`/`extends` remotes), so the same failure message shape is used
+/// wherever a fixture's git plumbing breaks.
+pub fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// [`git`], returning stdout as-is (no trimming) -- so a caller reading back
+/// a blob's exact bytes (e.g. `git show <rev>:<path>` against a file on disk)
+/// gets them unchanged. A caller that wants a bare ref/hash trims it itself.
+pub fn git_stdout(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Read-only no-op GitHub reader for tests that exercise filesystem/git-ref
 /// document paths through `show`/`status` `run_json`, which now require a
 /// `&dyn GhIssueReader`. Returns empty comment threads; never hits the network.

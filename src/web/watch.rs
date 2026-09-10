@@ -245,6 +245,47 @@ mod tests {
         drop(handle);
     }
 
+    // STORY-284 AC12: under `extends`, a doc edit under the *extended* root
+    // swaps the shared store, same as a local edit does today -- the watch
+    // set (`watch_paths`) already resolves `filesystem` type dirs against the
+    // extended root, and `reload_and_swap` re-runs `Store::load` unconditionally.
+    #[test]
+    fn live_watch_reflects_edit_under_extended_root_on_next_snapshot() {
+        use crate::engine::config::Extends;
+
+        let tmp = TempDir::new().unwrap();
+        let root_b = tmp.path().join("project-b");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&root_b).unwrap();
+        std::fs::create_dir_all(shared.join("docs/doc")).unwrap();
+        std::fs::write(root_b.join(".lazyspec.toml"), "extends = \"../shared\"\n").unwrap();
+        std::fs::write(shared.join(".lazyspec.toml"), "").unwrap();
+
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("doc", StoreBackend::Filesystem);
+        t.dir = "docs/doc".to_string();
+        config.documents.types = vec![t];
+        config.extends = Some(Extends {
+            root: shared.clone(),
+            ..Default::default()
+        });
+
+        write_doc(&shared, "DOC-001-alpha.md", "Alpha");
+
+        let shared_store = SharedStore::new(Store::load(&root_b, &config).unwrap());
+        assert_eq!(shared_store.snapshot().all_docs().len(), 1);
+
+        let _handle = start_poll_watch(&root_b, &config, shared_store.clone());
+
+        write_doc(&shared, "DOC-002-beta.md", "Beta");
+
+        let count = wait_for_doc_count(&shared_store, 2, std::time::Duration::from_secs(5));
+        assert_eq!(
+            count, 2,
+            "an edit under the extended root must be reflected on the next snapshot"
+        );
+    }
+
     // Build a `PollWatcher` with a short poll interval. The recommended (FSEvents)
     // backend is unavailable under the sandbox (per `notify`'s own docs), so the
     // live-delivery tests inject a poll watcher through `watch_with`; the reload/

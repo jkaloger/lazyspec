@@ -554,6 +554,7 @@ mod tests {
             staleness: Default::default(),
             web: None,
             git_ref: Default::default(),
+            extends: None,
         }
     }
 

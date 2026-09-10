@@ -45,6 +45,7 @@ pub fn starter_config() -> Config {
         staleness: Default::default(),
         web: None,
         git_ref: Default::default(),
+        extends: None,
     }
 }
 

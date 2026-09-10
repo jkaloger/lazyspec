@@ -1373,7 +1373,7 @@ impl Checker for TypeConstraintChecker {
                 doc_type: Some(DocType::new(&type_def.name)),
                 ..Default::default()
             });
-            let parent_root = super::store::doc_root(&store.root, parent_type_def);
+            let parent_root = super::store::doc_root(config, &store.root, parent_type_def);
             for doc in docs {
                 if !store.root.join(&doc.path).starts_with(&parent_root) {
                     issues.push((

@@ -339,7 +339,8 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Fetch remote documents (github-issues, git-ref, and clickup-tasks types)
+    /// Fetch remote documents (github-issues, github-milestones, git-ref, git,
+    /// and clickup-tasks types)
     Fetch {
         /// Output as JSON
         #[arg(long)]

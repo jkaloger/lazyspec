@@ -92,7 +92,7 @@ impl DocumentStore for GitStore {
         body: &str,
     ) -> Result<CreatedDoc> {
         let clone_root = self.root.join(".lazyspec/cache").join(&type_def.name);
-        let target = doc_root(&self.root, type_def);
+        let target = doc_root(&self.config, &self.root, type_def);
         let dir = target
             .strip_prefix(&self.root)
             .with_context(|| format!("{} is outside {}", target.display(), self.root.display()))?

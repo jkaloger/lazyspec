@@ -1,19 +1,20 @@
 ---
 title: Adopt a shared doc set with a one-line config
 type: story
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
 related:
 - implements: RFC-072
+reviewed: 4fe4f87707975ac0780871beb31ecbc3a3973b4e
 ---
 
 ## Context
 
 A code repo participates in a shared doc set by declaring one line. Everything else -- types, DAG, documents -- comes from the extended location.
 
-The trap is what "root" means. `Store` carries two: the doc root, and `governs_root` from `config.governs.root`, defaulting to `"."` (`src/engine/store.rs:188`). Moving both would point every git question about *code* at the shared spec repo -- `why.rs:45`, `validation.rs:985` and `:1138`, `staleness.rs:173`, and the `reviewed` anchors themselves. RFC-068 solved the docs/code split with `[governs] root`, and this story's exclusivity rule makes that key illegal, so the split has to be structural. RFC-072 Decision 4 records it.
+The trap is what "root" means. `Store` carries two: the doc root, and `governs_root` from `config.governs.root`, defaulting to `"."` (`src/engine/store.rs:265`). Moving both would point every git question about *code* at the shared spec repo -- `src/cli/why.rs:45`, `validation.rs:985` and `:1138`, `staleness.rs:173`, and the `reviewed` anchors themselves. RFC-068 solved the docs/code split with `[governs] root`, and this story's exclusivity rule makes that key illegal, so the split has to be structural. RFC-072 Decision 4 records it.
 
 As the maintainer of a service repo, I want to point my repo at a shared doc set with one line of config, so that it participates in that set -- its types, its DAG, its documents -- without redeclaring any of it.
 
@@ -29,7 +30,7 @@ As the maintainer of a service repo, I want to point my repo at a shared doc set
 
 - **Given** a `.lazyspec.toml` containing only `extends`
   **When** it loads
-  **Then** no "missing required `[[types]]`" or "`[[relationships]]` is required" error is raised: the `extends` branch short-circuits before `parse_inner` (`src/engine/config.rs:1803-1816`).
+  **Then** no "missing required `[[types]]`" or "`[[relationships]]` is required" error is raised: the `extends` branch short-circuits before `parse_inner` (`src/engine/config.rs:1817-1832`).
 
 - **Given** a repo using `extends`
   **When** `governs`, staleness anchors, `@ref` expansion and `.lazyspec/cache/` resolve
@@ -65,7 +66,7 @@ As the maintainer of a service repo, I want to point my repo at a shared doc set
 
 - **Given** a repo using `extends`
   **When** I open the TUI or the web view
-  **Then** documents load from the extended root, and an edit to the *extended* config triggers the reload that a local config edit does today (`src/tui/infra/event_loop.rs:494`, `src/web/watch.rs`).
+  **Then** documents load from the extended root, and an edit to the *extended* config triggers the reload that a local config edit does today (`src/tui/infra/event_loop.rs:493`, `src/web/watch.rs:105`).
 
 - **Given** I run `lazyspec config add-type --help`
   **When** I read the `--store` line
@@ -88,10 +89,10 @@ As the maintainer of a service repo, I want to point my repo at a shared doc set
 
 ## Notes
 
-`RawConfig` (`src/engine/config.rs:1416`) has no `deny_unknown_fields`, so unknown keys are dropped silently today. The exclusivity error is new machinery, not a tightening of an existing check.
+`RawConfig` (`src/engine/config.rs:1428`) has no `deny_unknown_fields`, so unknown keys are dropped silently today. The exclusivity error is new machinery, not a tightening of an existing check.
 
 Ordering inversion worth planning for: the clone must exist *before* the config parses, whereas the `git` store clones during `Store::load` with a `Config` already in hand. STORY-281's machinery does not literally serve this case -- there is no type -- which is why the config clone gets its own path under `.lazyspec/cache/config/`.
 
-`main.rs` threads `&cwd` to 63 call sites, so "the root moves" is not a one-line change.
+`main.rs` threads `&cwd` to 73 call sites, so "the root moves" is not a one-line change. The cheap shape is that `cwd` never moves: the resolved extended root rides on `Config` and only `doc_root`, the template loader and the watch set consult it.
 
 Accepted surprise: someone reading the repo sees a one-line config and no `docs/`. That is the point of the feature, and it is still a surprise.

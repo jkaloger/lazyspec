@@ -224,9 +224,9 @@ impl TypeSync for GitSync<'_> {
         _ctx: &mut SyncContext,
         root: &Path,
         td: &TypeDef,
-        _cfg: &Config,
+        cfg: &Config,
     ) -> SyncOutcome {
-        match sync_git_clone(root, self.ops, td) {
+        match sync_git_clone(root, self.ops, td, cfg) {
             Ok(c) => SyncOutcome {
                 type_name: td.name.clone(),
                 fetched: c.fetched,
@@ -239,11 +239,16 @@ impl TypeSync for GitSync<'_> {
     }
 }
 
-fn sync_git_clone(root: &Path, ops: &dyn GitRefOps, td: &TypeDef) -> Result<GitRefCounts> {
+fn sync_git_clone(
+    root: &Path,
+    ops: &dyn GitRefOps,
+    td: &TypeDef,
+    cfg: &Config,
+) -> Result<GitRefCounts> {
     use anyhow::Context as _;
 
     let clone_root = root.join(".lazyspec/cache").join(&td.name);
-    let docs = crate::engine::store::doc_root(root, td);
+    let docs = crate::engine::store::doc_root(cfg, root, td);
     let before = md_files(&docs);
 
     if clone_root.exists() {

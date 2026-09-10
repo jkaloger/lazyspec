@@ -66,7 +66,7 @@ pub struct Store {
 
 /// Resolve `..` and `.` without touching the filesystem, so path arithmetic in
 /// the engine stays I/O-free (convention principle 3).
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -115,16 +115,42 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
 /// discards it for an absolute `dir`, so every `filesystem` spelling resolves
 /// to the same shape. Cache-backed stores ignore `dir` entirely; a `git` store
 /// joins `dir` against its managed clone root under the cache.
-pub fn doc_root(root: &Path, type_def: &TypeDef) -> PathBuf {
+///
+/// Under `extends` (STORY-284), a `filesystem` type follows `config.docs_root`
+/// -- the extended root -- while every cache-backed and `git` resolution stays
+/// on the local `root` (RFC-072 Decision 4): the cache belongs to *this*
+/// repo's `.lazyspec/`, never the shared one.
+pub fn doc_root(config: &Config, root: &Path, type_def: &TypeDef) -> PathBuf {
     let cache = root.join(".lazyspec/cache").join(&type_def.name);
     match type_def.store {
-        StoreBackend::Filesystem => normalize(&root.join(&type_def.dir)),
+        StoreBackend::Filesystem => normalize(&config.docs_root(root).join(&type_def.dir)),
         StoreBackend::GithubIssues
         | StoreBackend::GithubMilestones
         | StoreBackend::GithubProjects
         | StoreBackend::GitRef
         | StoreBackend::ClickupTasks => cache,
         StoreBackend::Git => normalize(&cache.join(&type_def.dir)),
+    }
+}
+
+/// The root [`loader::load_type_directory`] makes a `filesystem` type's
+/// document paths relative to, or an empty path -- which `Path::strip_prefix`
+/// always accepts and returns the input unchanged, so the path stays absolute
+/// -- when that would silently do the wrong thing.
+///
+/// Under `extends`, a `filesystem` type's `doc_root` can land *inside* `root`
+/// by coincidence (a relative `extends` spec that happens to name a
+/// subdirectory, or a URL `extends` clone under `.lazyspec/cache/config`): a
+/// plain `strip_prefix(root)` would then turn an externally-owned document
+/// into what looks like a locally-relative one, while the same `extends`
+/// spelled as an absolute path outside `root` produces an absolute path for
+/// the identical document (RFC-072 Decision 3: one path shape per type,
+/// regardless of spelling).
+fn path_root_for_relativizing<'a>(config: &Config, root: &'a Path, type_def: &TypeDef) -> &'a Path {
+    if config.extends.is_some() && type_def.store == StoreBackend::Filesystem {
+        Path::new("")
+    } else {
+        root
     }
 }
 
@@ -189,7 +215,7 @@ impl Store {
         let mut warnings: Vec<String> = Vec::new();
 
         for type_def in &config.documents.types {
-            let full_path = doc_root(root, type_def);
+            let full_path = doc_root(config, root, type_def);
 
             if type_def.store == StoreBackend::Git {
                 let clone_root = root.join(".lazyspec/cache").join(&type_def.name);
@@ -206,7 +232,11 @@ impl Store {
                 }
                 if !fs.exists(&full_path) {
                     // A relative dir that is missing is an unpopulated local
-                    // docs dir; an absolute one that is missing is a typo.
+                    // docs dir, silent whether the repo declares its own
+                    // `[[types]]` or extends someone else's; an absolute one is
+                    // a typo (STORY-283 AC6). Git cannot commit an empty
+                    // directory, so a shared doc set with a type nobody has
+                    // populated yet must not warn on every command.
                     if type_def.store == StoreBackend::Filesystem
                         && Path::new(&type_def.dir).is_absolute()
                     {
@@ -228,7 +258,7 @@ impl Store {
             }
 
             loader::load_type_directory(
-                root,
+                path_root_for_relativizing(config, root, type_def),
                 &full_path,
                 type_def,
                 &mut docs,
@@ -1542,21 +1572,22 @@ mod tests {
     #[test]
     fn doc_root_resolves_every_filesystem_spelling_to_an_absolute_path() {
         let root = Path::new("/a/b");
+        let config = Config::default();
         let filesystem = |dir: &str| TypeDef {
             dir: dir.to_string(),
             ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
         };
 
         assert_eq!(
-            doc_root(root, &filesystem("docs/rfcs")),
+            doc_root(&config, root, &filesystem("docs/rfcs")),
             PathBuf::from("/a/b/docs/rfcs")
         );
         assert_eq!(
-            doc_root(root, &filesystem("/tmp/x/specs")),
+            doc_root(&config, root, &filesystem("/tmp/x/specs")),
             PathBuf::from("/tmp/x/specs")
         );
         assert_eq!(
-            doc_root(root, &filesystem("../shared-specs")),
+            doc_root(&config, root, &filesystem("../shared-specs")),
             PathBuf::from("/a/shared-specs")
         );
     }
@@ -1565,6 +1596,7 @@ mod tests {
     #[test]
     fn doc_root_ignores_dir_for_cache_backed_stores() {
         let root = Path::new("/a/b");
+        let config = Config::default();
         for store in [
             StoreBackend::GithubIssues,
             StoreBackend::GithubMilestones,
@@ -1577,7 +1609,7 @@ mod tests {
                 ..TypeDef::test_fixture("ticket", store)
             };
             assert_eq!(
-                doc_root(root, &type_def),
+                doc_root(&config, root, &type_def),
                 PathBuf::from("/a/b/.lazyspec/cache/ticket")
             );
         }
@@ -1591,8 +1623,173 @@ mod tests {
             ..TypeDef::test_fixture("spec", StoreBackend::Git)
         };
         assert_eq!(
-            doc_root(Path::new("/a/b"), &type_def),
+            doc_root(&Config::default(), Path::new("/a/b"), &type_def),
             PathBuf::from("/a/b/.lazyspec/cache/spec/docs/specs")
+        );
+    }
+
+    // ITERATION-442: under `extends`, a `filesystem` type's dir follows the
+    // extended root, but cache-backed and `git` stores stay local (RFC-072
+    // Decision 4 -- the doc-root / local-root split).
+    #[test]
+    fn doc_root_under_extends_moves_only_filesystem_types() {
+        use crate::engine::config::Extends;
+
+        let root = Path::new("/local/repo");
+        let config = Config {
+            extends: Some(Extends {
+                root: PathBuf::from("/shared"),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+
+        let filesystem = TypeDef {
+            dir: "docs/rfcs".to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        };
+        assert_eq!(
+            doc_root(&config, root, &filesystem),
+            PathBuf::from("/shared/docs/rfcs")
+        );
+
+        let issues = TypeDef::test_fixture("issue", StoreBackend::GithubIssues);
+        assert_eq!(
+            doc_root(&config, root, &issues),
+            PathBuf::from("/local/repo/.lazyspec/cache/issue")
+        );
+
+        let git = TypeDef {
+            dir: "docs/specs".to_string(),
+            ..TypeDef::test_fixture("spec", StoreBackend::Git)
+        };
+        assert_eq!(
+            doc_root(&config, root, &git),
+            PathBuf::from("/local/repo/.lazyspec/cache/spec/docs/specs")
+        );
+    }
+
+    #[test]
+    fn doc_root_without_extends_is_unaffected() {
+        let root = Path::new("/a/b");
+        let config = Config::default();
+        assert!(config.extends.is_none());
+        let filesystem = TypeDef {
+            dir: "docs/rfcs".to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        };
+        assert_eq!(
+            doc_root(&config, root, &filesystem),
+            PathBuf::from("/a/b/docs/rfcs")
+        );
+    }
+
+    /// One `filesystem` `rfc` type's worth of documents loaded under an
+    /// `extends` whose `root` sits at `extends_root`, against the fixed
+    /// project root `/fake/root`.
+    fn load_one_rfc_under_extends(extends_root: &Path) -> (Config, Store) {
+        use crate::engine::config::Extends;
+
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let rfc_dir = extends_root.join("docs/rfcs");
+        fs.add_dir(rfc_dir.clone());
+        fs.add_file(
+            rfc_dir.join("RFC-001-a.md"),
+            concat!(
+                "---\n",
+                "title: \"A\"\n",
+                "type: rfc\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body.\n",
+            ),
+        );
+
+        let config = Config {
+            extends: Some(Extends {
+                root: extends_root.to_path_buf(),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+        (config, store)
+    }
+
+    // Fix 1 (code review of STORY-284): a document loaded under `extends`
+    // must come out absolute and starting with the type's `resolved_dir`
+    // (RFC-072 Decision 3) in every spelling `extends` can take -- a relative
+    // spec that happens to resolve inside the local root, an absolute spec
+    // outside it, and a URL clone under the local `.lazyspec/cache/config` --
+    // not just the spellings that already nest outside `root` by luck.
+    #[test]
+    fn documents_under_extends_are_absolute_in_every_extends_spelling() {
+        let root = PathBuf::from("/fake/root");
+        for extends_root in [
+            root.join("shared"),                 // relative extends nesting inside root
+            PathBuf::from("/elsewhere/shared"),  // absolute extends outside root
+            root.join(".lazyspec/cache/config"), // URL extends clone nesting inside root
+        ] {
+            let (config, store) = load_one_rfc_under_extends(&extends_root);
+            let rfc_type = config.type_by_name("rfc").unwrap();
+            let resolved_dir = doc_root(&config, &root, rfc_type);
+
+            let docs = store.all_docs();
+            assert_eq!(docs.len(), 1, "extends_root {}", extends_root.display());
+            let doc = docs[0];
+            assert!(
+                doc.path.is_absolute(),
+                "extends_root {}: path {} should be absolute",
+                extends_root.display(),
+                doc.path.display()
+            );
+            assert!(
+                doc.path.starts_with(&resolved_dir),
+                "extends_root {}: path {} should start with resolved_dir {}",
+                extends_root.display(),
+                doc.path.display(),
+                resolved_dir.display()
+            );
+        }
+    }
+
+    // The non-`extends` shape is untouched: a `filesystem` type's document
+    // path stays relative to the project root, as every existing test here
+    // assumes.
+    #[test]
+    fn documents_without_extends_stay_relative() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let rfc_dir = root.join("docs/rfcs");
+        fs.add_dir(rfc_dir.clone());
+        fs.add_file(
+            rfc_dir.join("RFC-001-a.md"),
+            concat!(
+                "---\n",
+                "title: \"A\"\n",
+                "type: rfc\n",
+                "status: draft\n",
+                "author: \"test\"\n",
+                "date: 2026-01-01\n",
+                "tags: []\n",
+                "---\n",
+                "Body.\n",
+            ),
+        );
+
+        let config = Config::default();
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+
+        let docs = store.all_docs();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].path,
+            PathBuf::from("docs/rfcs/RFC-001-a.md"),
+            "without extends, path stays relative to root"
         );
     }
 

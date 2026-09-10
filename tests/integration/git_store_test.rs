@@ -2,6 +2,7 @@
 //! clone thereafter. The remote is a plain local repository in a `TempDir`, so
 //! no test here reaches the network.
 
+use crate::common::{git, git_stdout};
 use lazyspec::engine::config::{
     Config, NumberingStrategy, ReservedConfig, ReservedFormat, StoreBackend, TypeDef,
 };
@@ -11,19 +12,6 @@ use lazyspec::engine::store::{doc_root, Filter, Store};
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
-
-fn git(repo: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 fn write_rfc(repo: &Path, filename: &str, title: &str) {
     let dir = repo.join("docs/rfcs");
@@ -101,10 +89,11 @@ fn first_read_clones_remote_and_lists_docs_under_doc_root() {
     let type_def = &config.documents.types.last().unwrap();
     let doc = &store.list(&Filter::default())[0];
     assert!(
-        root.join(&doc.path).starts_with(doc_root(root, type_def)),
+        root.join(&doc.path)
+            .starts_with(doc_root(&config, root, type_def)),
         "{} is under {}",
         doc.path.display(),
-        doc_root(root, type_def).display()
+        doc_root(&config, root, type_def).display()
     );
 }
 
@@ -158,20 +147,6 @@ fn unclonable_remote_error_names_remote_and_default_branch() {
 
 // --- STORY-282: every registry-routed write commits in the clone and pushes ---
 
-fn git_stdout(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
 fn commit_count(repo: &Path, branch: &str) -> usize {
     git_stdout(repo, &["rev-list", "--count", branch])
         .trim()
@@ -214,7 +189,7 @@ fn create_writes_into_the_clone_and_pushes_to_the_declared_branch() {
     assert!(outcome.is_synced());
     let type_def = &config.documents.types[0];
     assert!(
-        path.starts_with(doc_root(root, type_def)),
+        path.starts_with(doc_root(&config, root, type_def)),
         "{}",
         path.display()
     );
@@ -890,7 +865,7 @@ fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
 
     assert!(outcome.is_synced());
     let type_def = &config.documents.types[0];
-    let root_dir = doc_root(root, type_def);
+    let root_dir = doc_root(&config, root, type_def);
     assert!(root_dir.join("RFC-001-a/index.md").exists());
     assert!(
         path.starts_with(root_dir.join("RFC-001-a")),

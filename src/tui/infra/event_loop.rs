@@ -1,5 +1,5 @@
 use crate::engine::clickup::ClickupClient;
-use crate::engine::config::{Config, StoreBackend};
+use crate::engine::config::{Config, Extends, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
 use crate::engine::gh::{GhCli, GhGraphql};
@@ -520,21 +520,33 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                 let mut has_non_md = false;
                 let config_path = root.join(".lazyspec.toml");
+                // STORY-284 AC12: under `extends`, the shared project's
+                // `.lazyspec.toml` also requests a reload -- `Config::load`
+                // re-resolves `extends` on that reload, so new extended types
+                // land.
+                let extended_config_path = config
+                    .extends
+                    .as_ref()
+                    .map(|e| Extends::config_path(&e.root));
                 for path in &event.paths {
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        if let Ok(relative) = path.strip_prefix(root) {
-                            let _ = app.store.reload_file(root, relative, &*app.fs);
-                            app.expanded_body_cache.remove(relative);
-                            app.disk_cache.invalidate(relative);
-                        }
+                        // A doc under the extended root is outside `root`, so
+                        // `strip_prefix` fails; STORY-283 made external doc
+                        // paths absolute in `meta.path`, so fall back to the
+                        // absolute path as the cache/store key.
+                        let key = path.strip_prefix(root).unwrap_or(path);
+                        let _ = app.store.reload_file(root, key, &*app.fs);
+                        app.expanded_body_cache.remove(key);
+                        app.disk_cache.invalidate(key);
                     } else {
                         has_non_md = true;
-                        // The root `.lazyspec.toml` changed externally (e.g. a
-                        // `git pull`). Request a full session reload; the `run`
+                        // The root `.lazyspec.toml` (or the extended project's,
+                        // under `extends`) changed externally (e.g. a `git
+                        // pull`). Request a full session reload; the `run`
                         // loop drains this flag and calls `reload_session`.
                         // `handle_app_event` only holds `&Config` and no
                         // `&mut watcher`, so it cannot reload directly.
-                        if path == &config_path {
+                        if path == &config_path || Some(path) == extended_config_path.as_ref() {
                             app.config_reload_request = true;
                         }
                     }
@@ -1413,6 +1425,90 @@ mod tests {
         );
     }
 
+    // STORY-284 AC12: a FileChange on the *extended* project's `.lazyspec.toml`
+    // also requests a reload, so a shared config edit lands the same as a local
+    // one.
+    #[test]
+    fn file_change_on_extended_lazyspec_toml_requests_reload() {
+        use crate::engine::config::Extends;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("local");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), "extends = \"../shared\"\n").unwrap();
+        std::fs::write(shared.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let mut config = Config::load(&shared, &crate::engine::fs::RealFileSystem).unwrap();
+        config.extends = Some(Extends {
+            root: shared.clone(),
+            ..Default::default()
+        });
+        let mut app = make_app(&root, &config);
+        assert!(!app.config_reload_request);
+
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(shared.join(".lazyspec.toml"));
+        handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
+
+        assert!(
+            app.config_reload_request,
+            "a FileChange on the extended .lazyspec.toml must request a reload"
+        );
+    }
+
+    // STORY-284 AC12: an edit under the *extended* root's doc dir re-reads that
+    // document in place. The path is outside `root`, so `strip_prefix` fails and
+    // the absolute path is used as the store/cache key (STORY-283 keys external
+    // docs by absolute `meta.path`).
+    #[test]
+    fn file_change_on_extended_doc_reloads_it_in_place() {
+        use crate::engine::config::{Extends, StoreBackend, TypeDef};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("local");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(shared.join("docs/rfcs")).unwrap();
+
+        let doc_path = shared.join("docs/rfcs/RFC-001-first.md");
+        let doc_content = |title: &str| {
+            format!(
+                "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nBody.\n"
+            )
+        };
+        std::fs::write(&doc_path, doc_content("Old Title")).unwrap();
+
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        t.dir = "docs/rfcs".to_string();
+        config.documents.types = vec![t];
+        config.extends = Some(Extends {
+            root: shared.clone(),
+            ..Default::default()
+        });
+
+        let mut app = make_app(&root, &config);
+        assert_eq!(
+            app.store.get(&doc_path).map(|m| m.title.as_str()),
+            Some("Old Title")
+        );
+
+        std::fs::write(&doc_path, doc_content("New Title")).unwrap();
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(doc_path.clone());
+        handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
+
+        assert_eq!(
+            app.store.get(&doc_path).map(|m| m.title.as_str()),
+            Some("New Title"),
+            "an edit under the extended root must reload in place with the absolute path as key"
+        );
+    }
+
     // AC6 negative: an md-only FileChange must NOT request a reload, otherwise
     // every doc edit would re-parse the config and rebuild the store.
     #[test]
@@ -1431,6 +1527,51 @@ mod tests {
         assert!(
             !app.config_reload_request,
             "an md-only FileChange must not request a reload"
+        );
+    }
+
+    // Regression pin for STORY-284: a local (non-extended) doc edit must still
+    // reload in place -- `path.strip_prefix(root).unwrap_or(path)` must not
+    // change behavior for the relative case.
+    #[test]
+    fn file_change_on_local_doc_reloads_it_in_place() {
+        use crate::engine::config::{StoreBackend, TypeDef};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/rfcs")).unwrap();
+
+        let doc_path = root.join("docs/rfcs/RFC-001-first.md");
+        let doc_content = |title: &str| {
+            format!(
+                "---\ntitle: \"{title}\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nBody.\n"
+            )
+        };
+        std::fs::write(&doc_path, doc_content("Old Title")).unwrap();
+
+        let mut config = Config::default();
+        let mut t = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        t.dir = "docs/rfcs".to_string();
+        config.documents.types = vec![t];
+
+        let mut app = make_app(root, &config);
+        let relative = Path::new("docs/rfcs/RFC-001-first.md");
+        assert_eq!(
+            app.store.get(relative).map(|m| m.title.as_str()),
+            Some("Old Title")
+        );
+
+        std::fs::write(&doc_path, doc_content("New Title")).unwrap();
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(doc_path.clone());
+        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert_eq!(
+            app.store.get(relative).map(|m| m.title.as_str()),
+            Some("New Title"),
+            "a local doc edit must still reload in place keyed by the relative path"
         );
     }
 
