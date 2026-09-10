@@ -1,13 +1,13 @@
 ---
 title: Compare resolved repos in the create --parent guard
 type: iteration
-status: accepted
+status: complete
 author: Jack Kaloger
 date: 2026-09-09
 tags: []
 related:
 - implements: STORY-282
-reviewed: 10607d51537a582ab71e87313ed2fe9d426e9b15
+reviewed: ab0c57e2b6f2009ea8fd4a324732cd5b2515b41b
 ---
 ## Objective
 
