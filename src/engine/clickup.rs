@@ -12,6 +12,7 @@
 //! [`ClickupError`] variant, so a TLS/DNS error can never masquerade as an HTTP
 //! status.
 
+use std::cell::OnceCell;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
@@ -462,8 +463,15 @@ pub trait ClickupClient {
 /// reqwest-backed [`ClickupClient`]. Sends the personal token in a raw
 /// `Authorization` header (ClickUp personal `pk_`-prefixed tokens take no
 /// `Bearer` prefix).
+///
+/// The reqwest client is built on first request, not at construction.
+/// `Client::new()` *panics* when the TLS backend cannot initialise -- notably
+/// `No CA certificates were loaded from the system` in a hermetic sandbox (the
+/// nix builder, a scratch container). Constructing this type must stay
+/// infallible and I/O-free so that commands which never talk to ClickUp can
+/// hold one without aborting the process.
 pub struct ClickupHttpClient {
-    http: Client,
+    http: OnceCell<Client>,
     base_url: String,
 }
 
@@ -476,9 +484,19 @@ impl ClickupHttpClient {
     /// server in integration tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         ClickupHttpClient {
-            http: Client::new(),
+            http: OnceCell::new(),
             base_url: base_url.into(),
         }
+    }
+
+    /// The lazily-built reqwest client. A TLS/builder failure surfaces as a
+    /// [`ClickupError`] on the request that needed it rather than a panic.
+    fn http(&self) -> Result<&Client, ClickupError> {
+        if let Some(client) = self.http.get() {
+            return Ok(client);
+        }
+        let client = Client::builder().build()?;
+        Ok(self.http.get_or_init(|| client))
     }
 }
 
@@ -491,7 +509,7 @@ impl Default for ClickupHttpClient {
 impl ClickupClient for ClickupHttpClient {
     fn auth_status(&self, token: &str) -> Result<ClickupUser, ClickupError> {
         let url = format!("{}/user", self.base_url);
-        let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+        let response = self.http()?.get(&url).header(AUTHORIZATION, token).send()?;
 
         let status = response.status();
         if status.is_success() {
@@ -510,7 +528,7 @@ impl ClickupClient for ClickupHttpClient {
                 "{}/list/{}/task?page={}&include_closed=true&subtasks=true&include_markdown_description=true",
                 self.base_url, list_id, page
             );
-            let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+            let response = self.http()?.get(&url).header(AUTHORIZATION, token).send()?;
 
             let status = response.status();
             if !status.is_success() {
@@ -534,7 +552,7 @@ impl ClickupClient for ClickupHttpClient {
         list_id: &str,
     ) -> Result<Vec<ClickupStatus>, ClickupError> {
         let url = format!("{}/list/{}", self.base_url, list_id);
-        let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+        let response = self.http()?.get(&url).header(AUTHORIZATION, token).send()?;
 
         let status = response.status();
         if !status.is_success() {
@@ -553,7 +571,7 @@ impl ClickupClient for ClickupHttpClient {
     ) -> Result<ClickupTask, ClickupError> {
         let url = format!("{}/list/{}/task", self.base_url, list_id);
         let response = self
-            .http
+            .http()?
             .post(&url)
             .header(AUTHORIZATION, token)
             .json(payload)
@@ -577,7 +595,7 @@ impl ClickupClient for ClickupHttpClient {
     ) -> Result<ClickupTask, ClickupError> {
         let url = format!("{}/task/{}", self.base_url, task_id);
         let response = self
-            .http
+            .http()?
             .put(&url)
             .header(AUTHORIZATION, token)
             .json(payload)
@@ -598,7 +616,7 @@ impl ClickupClient for ClickupHttpClient {
             "{}/task/{}?include_markdown_description=true",
             self.base_url, task_id
         );
-        let response = self.http.get(&url).header(AUTHORIZATION, token).send()?;
+        let response = self.http()?.get(&url).header(AUTHORIZATION, token).send()?;
 
         let status = response.status();
         if !status.is_success() {
@@ -616,7 +634,7 @@ impl ClickupClient for ClickupHttpClient {
         // used. The echoed task body is ignored -- only the status matters.
         let url = format!("{}/task/{}", self.base_url, task_id);
         let response = self
-            .http
+            .http()?
             .put(&url)
             .header(AUTHORIZATION, token)
             .json(&serde_json::json!({ "archived": true }))
@@ -638,7 +656,7 @@ impl ClickupClient for ClickupHttpClient {
     ) -> Result<(), ClickupError> {
         let url = format!("{}/task/{}/field/{}", self.base_url, task_id, field_id);
         let response = self
-            .http
+            .http()?
             .post(&url)
             .header(AUTHORIZATION, token)
             .json(&serde_json::json!({ "value": value }))
@@ -1027,6 +1045,17 @@ mod tests {
             r#"{"user":{"id":123,"username":"Jack","email":"jack@example.com","color":"red"}}"#;
         let envelope: UserEnvelope = serde_json::from_str(body).unwrap();
         assert_eq!(envelope.user, user(123));
+    }
+
+    // `Client::new()` panics when rustls finds no system CA bundle, which aborts
+    // any command merely *holding* a client in a hermetic sandbox (the nix
+    // builder) -- it took out six `fetch` integration tests that never touch
+    // ClickUp. Construction must stay lazy so the cost, and the failure, land on
+    // the request that actually needs the transport.
+    #[test]
+    fn construction_does_not_build_the_transport() {
+        let client = ClickupHttpClient::new();
+        assert!(client.http.get().is_none());
     }
 
     #[test]

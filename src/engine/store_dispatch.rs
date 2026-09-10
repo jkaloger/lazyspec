@@ -3064,11 +3064,12 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
     // `build_registry` free of keychain I/O on every command; the write path
     // will load it when it lands.
     //
-    // Only register the real store when a clickup-tasks type actually exists:
-    // `ClickupHttpClient::new()` eagerly builds a reqwest client (system CA
-    // load), so registering it unconditionally would touch the network stack on
-    // every command and panic in CA-less environments. Mirrors the poll seam's
-    // `has_clickup_types` gate in `tui::infra::event_loop`.
+    // Only register the real store when a clickup-tasks type actually exists, so
+    // a project that never speaks to ClickUp gets an `UnavailableStore` that
+    // errors by name instead of a live client. Mirrors the poll seam's
+    // `has_clickup_types` gate in `tui::infra::event_loop`. Correctness no longer
+    // rides on this gate -- `ClickupHttpClient` builds its transport lazily -- but
+    // it keeps the registry honest about which backends a project actually has.
     let has_clickup_types = config
         .documents
         .types
@@ -5681,10 +5682,8 @@ mod tests {
             .contains("github-milestones backend"));
     }
 
-    // A project with no clickup-tasks type must not construct a real
-    // ClickupHttpClient (eager reqwest client -> system CA load -> panics in
-    // CA-less/hermetic environments). build_registry registers an
-    // UnavailableStore instead, which errors loudly only on use.
+    // A project with no clickup-tasks type gets an UnavailableStore, which names
+    // the missing backend on use rather than silently holding a live client.
     #[test]
     fn build_registry_without_clickup_type_registers_unavailable() {
         let root = tmp_root("registry_no_clickup");
