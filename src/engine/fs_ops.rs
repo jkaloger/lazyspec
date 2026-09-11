@@ -305,6 +305,25 @@ const RESERVED_UPDATE_KEYS: &[&str] =
 /// `reviewed` (RFC-069) is only ever written with a sha.
 const INSERTED_WHEN_MISSING: &[&str] = &["assignee", "reviewed"];
 
+/// Render one reserved-key frontmatter line, quoting the value when YAML needs
+/// it (BUG-027).
+///
+/// The line-editing update path writes reserved keys as text, so a value opening
+/// with an indicator character (`@jkaloger`) or carrying one (`Plan: phase 2`)
+/// would otherwise produce frontmatter that no longer parses -- and an
+/// unparseable document is dropped from the store rather than reported, so it
+/// vanishes from `list`/`show` with only `validate` naming the cause. Deferring
+/// to `serde_yaml` quotes exactly when required and leaves plain values bare.
+/// The same reasoning drives the whole-frontmatter round-trip in
+/// `git_ref_store::update` (AUDIT-018 C3); the two paths differ only in that
+/// this one preserves key order and formatting by editing in place.
+fn reserved_line(key: &str, value: &str) -> String {
+    let scalar = serde_yaml::to_string(&serde_yaml::Value::String(value.to_string()))
+        .map(|s| s.trim_end().to_string())
+        .unwrap_or_else(|_| value.to_string());
+    format!("{}: {}", key, scalar)
+}
+
 /// Update a filesystem document's frontmatter. Reserved keys (status/title/body/
 /// author) follow the in-place replace path; any other key is a declared custom
 /// attribute, coerced and validated via [`apply_attrs`] against `type_def` and
@@ -373,9 +392,9 @@ pub fn update_document_with_type(
                 (Some(i), true) => {
                     lines.remove(i);
                 }
-                (Some(i), false) => lines[i] = format!("{}: {}", key, value),
+                (Some(i), false) => lines[i] = reserved_line(key, value),
                 (None, true) => {}
-                (None, false) => lines.push(format!("{}: {}", key, value)),
+                (None, false) => lines.push(reserved_line(key, value)),
             }
             continue;
         }
@@ -385,7 +404,7 @@ pub fn update_document_with_type(
                 .iter_mut()
                 .find(|l| l.trim_start().starts_with(&prefix))
             {
-                *line = format!("{}: {}", key, value);
+                *line = reserved_line(key, value);
             }
         }
     }
@@ -657,6 +676,39 @@ mod tests {
         let (_, before_body) = split_frontmatter(&before).unwrap();
         let (_, after_body) = split_frontmatter(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(before_body, after_body);
+    }
+
+    /// BUG-027: a reserved value carrying a YAML indicator character has to
+    /// survive the write as data, not break the frontmatter. Asserted by
+    /// reloading through `Store`, because an unparseable document is silently
+    /// dropped there -- the symptom that made the original bug invisible to
+    /// everything but `validate`.
+    #[test]
+    fn update_quotes_reserved_values_that_yaml_would_otherwise_choke_on() {
+        for (key, value) in [("assignee", "@jkaloger"), ("title", "Plan: phase 2")] {
+            let tmp = TempDir::new().unwrap();
+            let config = Config::default();
+            rfc_with_body(tmp.path(), "body");
+            let store = Store::load(tmp.path(), &config).unwrap();
+
+            update_document(
+                tmp.path(),
+                &store,
+                "docs/rfcs/RFC-001-test.md",
+                &[(key, value)],
+            )
+            .unwrap();
+
+            let reloaded = Store::load(tmp.path(), &config).unwrap();
+            let doc = reloaded
+                .resolve_shorthand("RFC-001")
+                .unwrap_or_else(|e| panic!("{key} = {value:?} unloaded the document: {e}"));
+            let actual = match key {
+                "assignee" => doc.assignee.clone().unwrap(),
+                _ => doc.title.clone(),
+            };
+            assert_eq!(actual, value);
+        }
     }
 
     /// `reviewed` reaching `update_document_with_type` as an ordinary key would
