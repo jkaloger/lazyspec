@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2](https://github.com/jkaloger/lazyspec/compare/v0.12.1...v0.12.2) - 2026-09-14
+
+### Fixed
+
+- BUG-030 tui freeze
+
+### Other
+
+- bug reports
+- RFC071 stories
+
 ## [0.12.1](https://github.com/jkaloger/lazyspec/compare/v0.12.0...v0.12.1) - 2026-09-11
 
 ### Fixed
