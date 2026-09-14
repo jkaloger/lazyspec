@@ -1,11 +1,12 @@
 ---
 title: "TUI freezes after startup poll: cache rewrite storm runs full validation per watcher event"
 type: bug
-status: reported
+status: fixed
 author: "Jack Kaloger"
 date: 2026-09-14
 tags: []
 related: []
+reviewed: d717d90219edb9f960d08f0f0ecf2f873a15f434
 ---
 
 ## Expected

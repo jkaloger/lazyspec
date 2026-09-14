@@ -2754,6 +2754,11 @@ pub fn write_cache_file(
         .unwrap_or_else(|| cache_dir.join(format!("{}.md", meta.id)));
 
     let cache_content = render_cache_content(meta, body)?;
+    // BUG-030: every write is watched, and an atomic write fires two to three
+    // events. Writing content that already matches storms the TUI for nothing.
+    if std::fs::read_to_string(&cache_path).ok().as_deref() == Some(cache_content.as_str()) {
+        return Ok(());
+    }
     crate::engine::fs::atomic_write(&cache_path, &cache_content)?;
     Ok(())
 }
@@ -7107,6 +7112,53 @@ mod tests {
         assert!(
             !root.join(".lazyspec/cache/rfc/.md").exists(),
             "no empty-stem cache file should be written"
+        );
+    }
+
+    // BUG-030: an unconditional rewrite of every cached doc per poll fires the
+    // file watcher for docs that did not change, which storms the TUI.
+    #[test]
+    fn write_cache_file_skips_the_write_when_content_is_unchanged() {
+        use chrono::NaiveDate;
+
+        let root = tmp_root("cache_unchanged");
+        let td = test_type_def(StoreBackend::GithubIssues);
+        let meta = DocMeta {
+            path: PathBuf::new(),
+            title: "Same".to_string(),
+            doc_type: DocType::new("rfc"),
+            status: Status::new("draft"),
+            author: "a".to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 28).unwrap(),
+            tags: vec![],
+            provenance: vec![],
+            governs: vec![],
+            reviewed: None,
+            related: vec![],
+            validate_ignore: false,
+            virtual_doc: false,
+            assignee: None,
+            attributes: Default::default(),
+            id: "RFC-042".to_string(),
+        };
+
+        write_cache_file(&root, &td, &meta, "body").unwrap();
+        let path = root.join(".lazyspec/cache/rfc/RFC-042.md");
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        write_cache_file(&root, &td, &meta, "body").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            first,
+            "identical content must not touch the file"
+        );
+
+        write_cache_file(&root, &td, &meta, "different body").unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("different body"),
+            "changed content must still be written"
         );
     }
 

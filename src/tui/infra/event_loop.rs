@@ -511,7 +511,15 @@ fn reload_session(
     Ok(())
 }
 
-fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) {
+/// Returns whether the caller still owes a `refresh_validation`. BUG-030: a
+/// full validation costs hundreds of milliseconds on a large store, and one
+/// cache-rewrite storm delivers hundreds of `FileChange` events -- validating
+/// per event makes the drain loop unable to keep up with its own queue. The
+/// arms that fire once per user action validate inline; `FileChange` defers,
+/// and `run` validates once after the batch is drained.
+#[must_use]
+fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config) -> bool {
+    let mut needs_validation = false;
     match event {
         AppEvent::Terminal(key) => {
             app.handle_key(key.code, key.modifiers, root, config);
@@ -555,7 +563,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     app.expanded_body_cache.clear();
                     app.disk_cache.clear();
                 }
-                app.refresh_validation(config);
+                needs_validation = true;
                 app.git_status_cache.invalidate();
             }
             _ => {}
@@ -626,7 +634,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         }
         AppEvent::CreateComplete { result } => {
             if !app.create_form.active {
-                return;
+                return needs_validation;
             }
             match result {
                 Ok(create_result) => {
@@ -669,6 +677,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         #[cfg(feature = "agent")]
         AppEvent::AgentFinished => {}
     }
+    needs_validation
 }
 
 pub fn run(store: Store, config: &Config) -> Result<()> {
@@ -946,10 +955,13 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 perf_log::log_duration("recv_wait", t);
                 let t2 = Instant::now();
                 let mut event_count = 1u32;
-                handle_app_event(&mut app, event, &root, &config);
+                let mut needs_validation = handle_app_event(&mut app, event, &root, &config);
                 while let Ok(event) = rx.try_recv() {
                     event_count += 1;
-                    handle_app_event(&mut app, event, &root, &config);
+                    needs_validation |= handle_app_event(&mut app, event, &root, &config);
+                }
+                if needs_validation {
+                    app.refresh_validation(&config);
                 }
                 perf_log::log_duration(&format!("handle_events({})", event_count), t2);
             }
@@ -1417,7 +1429,7 @@ mod tests {
 
         let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(root.join(".lazyspec.toml"));
-        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
 
         assert!(
             app.config_reload_request,
@@ -1450,7 +1462,7 @@ mod tests {
 
         let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(shared.join(".lazyspec.toml"));
-        handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
 
         assert!(
             app.config_reload_request,
@@ -1500,12 +1512,41 @@ mod tests {
             notify::event::DataChange::Content,
         )))
         .add_path(doc_path.clone());
-        handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), &root, &config);
 
         assert_eq!(
             app.store.get(&doc_path).map(|m| m.title.as_str()),
             Some("New Title"),
             "an edit under the extended root must reload in place with the absolute path as key"
+        );
+    }
+
+    // BUG-030: validation is the most expensive thing a FileChange can trigger,
+    // and a cache-rewrite storm delivers hundreds of them. The handler must
+    // defer it to the caller, which runs it once per drained batch.
+    #[test]
+    fn file_change_defers_validation_to_the_caller() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.validation_errors = vec!["sentinel".to_string()];
+
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(root.join("docs/type0/STORY-001-example.md"));
+        let needs_validation =
+            handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert!(
+            needs_validation,
+            "a FileChange must ask the caller to validate"
+        );
+        assert_eq!(
+            app.validation_errors,
+            vec!["sentinel".to_string()],
+            "the handler must not re-fold validation itself"
         );
     }
 
@@ -1522,7 +1563,7 @@ mod tests {
 
         let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(root.join("docs/type0/STORY-001-example.md"));
-        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
 
         assert!(
             !app.config_reload_request,
@@ -1566,7 +1607,7 @@ mod tests {
             notify::event::DataChange::Content,
         )))
         .add_path(doc_path.clone());
-        handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
 
         assert_eq!(
             app.store.get(relative).map(|m| m.title.as_str()),
