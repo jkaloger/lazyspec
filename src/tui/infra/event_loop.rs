@@ -443,6 +443,16 @@ fn poll_sync(
     warnings
 }
 
+// The scratch file `crate::engine::fs::atomic_write` writes before renaming it
+// over its target: a `tempfile::NamedTempFile` in the target's own directory,
+// so its create/modify events land in the watch set. Matched by name, not by
+// "has no extension", so `.lazyspec.toml` still reaches the reload arm.
+fn is_atomic_write_temp(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(".tmp"))
+}
+
 // Rebuild the watcher over the current config's watch set. `notify` has no
 // reliable cross-reload "unwatch all" when the watched dirs change, so we
 // replace the watcher wholesale: a fresh watcher is constructed and the old one
@@ -503,8 +513,7 @@ fn reload_session(
     app.filtered_docs_cache = None;
     app.build_doc_tree();
     app.git_status_cache.invalidate();
-    app.expanded_body_cache.clear();
-    app.disk_cache.clear();
+    app.invalidate_all_expansions();
 
     // 4. Re-establish the watcher over the new config's watch set (AC4, AC5).
     rewatch(watcher, root, config, tx)?;
@@ -537,6 +546,14 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     .as_ref()
                     .map(|e| Extends::config_path(&e.root));
                 for path in &event.paths {
+                    // BUG-031: `atomic_write` renames from an extensionless
+                    // `.tmpXXXXXX` beside its target, so one document write
+                    // delivers three events that look like "some unknown
+                    // non-md file changed". Acting on them cleared every
+                    // cached body and wiped the on-disk expansion cache.
+                    if is_atomic_write_temp(path) {
+                        continue;
+                    }
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
                         // A doc under the extended root is outside `root`, so
                         // `strip_prefix` fails; STORY-283 made external doc
@@ -544,8 +561,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         // absolute path as the cache/store key.
                         let key = path.strip_prefix(root).unwrap_or(path);
                         let _ = app.store.reload_file(root, key, &*app.fs);
-                        app.expanded_body_cache.remove(key);
-                        app.disk_cache.invalidate(key);
+                        app.invalidate_expansion(key);
                     } else {
                         has_non_md = true;
                         // The root `.lazyspec.toml` (or the extended project's,
@@ -560,8 +576,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     }
                 }
                 if has_non_md {
-                    app.expanded_body_cache.clear();
-                    app.disk_cache.clear();
+                    app.invalidate_all_expansions();
                 }
                 needs_validation = true;
                 app.git_status_cache.invalidate();
@@ -602,8 +617,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     }
                     app.filtered_docs_cache = None;
                     app.refresh_validation(config);
-                    app.expanded_body_cache.clear();
-                    app.disk_cache.clear();
+                    app.invalidate_all_expansions();
                 }
                 Err(msg) => {
                     app.gh_conflict_message = Some(msg);
@@ -1064,8 +1078,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
-                app.expanded_body_cache.remove(relative);
-                app.disk_cache.invalidate(relative);
+                app.invalidate_expansion(relative);
                 if let Some(ref shared_store) = shared_gh_store {
                     let push_root = root.clone();
                     let push_relative = relative.to_path_buf();
@@ -1263,6 +1276,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use crate::engine::config::TypeDef;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     // Build an App over `root` with the given config, using a deterministic
@@ -1547,6 +1561,111 @@ mod tests {
             app.validation_errors,
             vec!["sentinel".to_string()],
             "the handler must not re-fold validation itself"
+        );
+    }
+
+    // BUG-031: the preview renders `expanded_body_cache.get(..).unwrap_or_default()`,
+    // so dropping the entry paints an empty document until the background
+    // expansion returns. Invalidation marks the path stale instead; the body it
+    // already has stays on screen until the new one lands.
+    #[test]
+    fn file_change_marks_the_body_stale_without_dropping_it() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        let doc = PathBuf::from("docs/type0/STORY-001-example.md");
+        app.expanded_body_cache
+            .insert(doc.clone(), "on screen".to_string());
+
+        let event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(root.join(&doc));
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert_eq!(
+            app.expanded_body_cache.get(&doc).map(String::as_str),
+            Some("on screen"),
+            "the rendered body must survive its own invalidation"
+        );
+        assert!(
+            app.expansion_stale.contains(&doc),
+            "the changed document must be queued for re-expansion"
+        );
+    }
+
+    // BUG-031: one `atomic_write` of a document fires three events for the
+    // extensionless temp file it renames from. Classifying those as "some
+    // non-md file changed" cleared every cached body and wiped the on-disk
+    // expansion cache, so each poll blanked the view and forced a cold
+    // re-expansion. BUG-030 identified this and deferred the fix.
+    #[test]
+    fn atomic_write_temp_paths_leave_the_caches_alone() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        let doc = PathBuf::from("docs/type0/STORY-001-example.md");
+        app.expanded_body_cache
+            .insert(doc.clone(), "on screen".to_string());
+
+        let event = notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+            .add_path(root.join("docs/type0/.tmpVPV59x"));
+        let _ = handle_app_event(&mut app, AppEvent::FileChange(event), root, &config);
+
+        assert_eq!(
+            app.expanded_body_cache.get(&doc).map(String::as_str),
+            Some("on screen"),
+            "an atomic-write temp path must not clear the body cache"
+        );
+        assert!(
+            app.expansion_stale.is_empty(),
+            "an atomic-write temp path must not queue re-expansion"
+        );
+    }
+
+    // BUG-031: marking stale is only half the contract -- the dispatcher has to
+    // act on it, or the stale body would stay on screen forever.
+    #[test]
+    fn request_expansion_redispatches_a_stale_body() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/type0")).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        let doc = PathBuf::from("docs/type0/STORY-001-example.md");
+        std::fs::write(
+            root.join(&doc),
+            "---\ntitle: \"Example\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        app.expanded_body_cache
+            .insert(doc.clone(), "on screen".to_string());
+        app.request_expansion(&tx);
+        assert!(
+            app.expansion_in_flight.is_none(),
+            "a fresh cached body must not be re-expanded"
+        );
+
+        app.expansion_stale.insert(doc.clone());
+        app.request_expansion(&tx);
+
+        assert_eq!(
+            app.expansion_in_flight.as_ref(),
+            Some(&doc),
+            "a stale cached body must be re-expanded"
+        );
+        assert!(
+            app.expansion_stale.is_empty(),
+            "dispatching must consume the stale mark, or every frame re-dispatches"
         );
     }
 

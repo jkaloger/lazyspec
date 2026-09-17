@@ -16,13 +16,16 @@ impl App {
             None => return,
         };
 
-        if self.expanded_body_cache.contains_key(&doc_path) {
+        if self.expanded_body_cache.contains_key(&doc_path)
+            && !self.expansion_stale.contains(&doc_path)
+        {
             return;
         }
 
         if self.expansion_in_flight.as_ref() == Some(&doc_path) {
             return;
         }
+        self.expansion_stale.remove(&doc_path);
 
         if let Some(cancel) = &self.expansion_cancel {
             cancel.store(true, Ordering::Relaxed);
@@ -86,6 +89,25 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Queue one document for re-expansion, keeping the body already on screen
+    /// until the new one arrives (BUG-031). Every caller that used to drop the
+    /// entry outright goes through here.
+    pub fn invalidate_expansion(&mut self, path: &std::path::Path) {
+        if self.expanded_body_cache.contains_key(path) {
+            self.expansion_stale.insert(path.to_path_buf());
+        }
+        self.disk_cache.invalidate(path);
+    }
+
+    /// [`App::invalidate_expansion`] for the whole cache: what a config reload
+    /// or a change to a file the expansion depends on (a template, a `@ref`
+    /// source) invalidates.
+    pub fn invalidate_all_expansions(&mut self) {
+        let paths: Vec<_> = self.expanded_body_cache.keys().cloned().collect();
+        self.expansion_stale.extend(paths);
+        self.disk_cache.clear();
     }
 
     /// Dispatch the selected document's staleness band to the background worker

@@ -732,6 +732,11 @@ pub struct App {
     #[cfg(feature = "agent")]
     pub interactive_request: Option<super::forms::InteractiveRequest>,
     pub expanded_body_cache: HashMap<PathBuf, String>,
+    /// Documents whose cached body is out of date but still on screen (BUG-031).
+    /// The preview falls back to an empty body on a cache miss, so invalidation
+    /// marks a path here rather than dropping its entry; `request_expansion`
+    /// re-dispatches and `ExpansionResult` overwrites in place.
+    pub expansion_stale: HashSet<PathBuf>,
     pub expansion_in_flight: Option<PathBuf>,
     pub event_tx: crossbeam_channel::Sender<AppEvent>,
     pub expansion_cancel: Option<Arc<AtomicBool>>,
@@ -918,6 +923,7 @@ impl App {
             #[cfg(feature = "agent")]
             interactive_request: None,
             expanded_body_cache: HashMap::new(),
+            expansion_stale: HashSet::new(),
             expansion_in_flight: None,
             event_tx,
             expansion_cancel: None,
@@ -4039,6 +4045,7 @@ pub(crate) mod parity_seed {
             #[cfg(feature = "agent")]
             interactive_request: None,
             expanded_body_cache: HashMap::new(),
+            expansion_stale: HashSet::new(),
             expansion_in_flight: None,
             event_tx: tx,
             expansion_cancel: None,
@@ -4548,6 +4555,7 @@ mod tests {
             #[cfg(feature = "agent")]
             interactive_request: None,
             expanded_body_cache: HashMap::new(),
+            expansion_stale: HashSet::new(),
             expansion_in_flight: None,
             event_tx: tx,
             expansion_cancel: None,
