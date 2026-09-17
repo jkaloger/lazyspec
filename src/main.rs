@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
+use lazyspec::cli::govern::GovernCommand;
 use lazyspec::cli::provenance::ProvenanceCommand;
 use lazyspec::cli::reservations::ReservationsCommand;
 use lazyspec::cli::setup::SetupCommand;
@@ -886,6 +887,27 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Some(Commands::Govern { command }) => {
+            let store = load_store(&cwd, &config)?;
+            let (id, governs, json) = match command {
+                GovernCommand::Add { id, globs, json } => (
+                    id.clone(),
+                    lazyspec::cli::govern::run_add(&store, &config, &GitCli, &fs, &id, &globs)?,
+                    json,
+                ),
+                GovernCommand::Remove { id, globs, json } => (
+                    id.clone(),
+                    lazyspec::cli::govern::run_remove(&store, &config, &GitCli, &fs, &id, &globs)?,
+                    json,
+                ),
+                GovernCommand::List { id, json } => (
+                    id.clone(),
+                    lazyspec::cli::govern::run_list(&store, &id)?,
+                    json,
+                ),
+            };
+            lazyspec::cli::govern::print(&id, &governs, json)?;
         }
         Some(Commands::Provenance { command }) => {
             let store = load_store(&cwd, &config)?;

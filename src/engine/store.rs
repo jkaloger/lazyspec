@@ -1,5 +1,6 @@
 mod links;
 mod loader;
+pub use loader::compile_governs;
 
 pub use links::Link;
 

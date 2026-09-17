@@ -6,6 +6,7 @@ pub mod create;
 pub mod delete;
 pub mod fetch;
 pub mod fix;
+pub mod govern;
 pub mod ignore;
 pub mod init;
 pub mod json;
@@ -29,6 +30,7 @@ pub mod why;
 pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
+use crate::cli::govern::GovernCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
 use crate::cli::setup::SetupCommand;
@@ -371,6 +373,11 @@ pub enum Commands {
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
+    },
+    /// Manage the source globs a document governs
+    Govern {
+        #[command(subcommand)]
+        command: GovernCommand,
     },
     /// Manage document provenance citations
     Provenance {

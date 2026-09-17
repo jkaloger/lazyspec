@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Result};
 
 pub use crate::engine::ops::update::{run, run_with_config};
 
-const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author", "reviewed"];
+const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author", "reviewed", "governs"];
 
 /// Parse repeatable `--attr key=value` flags into owned `(key, value)` pairs.
 ///
@@ -19,7 +19,7 @@ pub fn parse_attr_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
                 bail!("invalid --attr, empty key: {entry}");
             }
             if RESERVED_ATTR_KEYS.contains(&key) {
-                bail!("'{key}' is a reserved frontmatter field and cannot be set via --attr; use --status, --title or --body, set author at `create`, and let `--status` or `pin` stamp reviewed");
+                bail!("'{key}' is a reserved frontmatter field and cannot be set via --attr; use --status, --title or --body, set author at `create`, and let `--status` or `pin` stamp reviewed; `governs` is edited with `govern add|remove`");
             }
             Ok((key.to_string(), value.to_string()))
         })
@@ -92,5 +92,13 @@ mod tests {
     fn parse_attr_pairs_refuses_reviewed() {
         let err = parse_attr_pairs(&["reviewed=deadbeef".to_string()]).unwrap_err();
         assert!(err.to_string().contains("reserved"), "got: {err}");
+    }
+
+    /// `governs` is a list field with its own verb (BUG-029). Refusing it here
+    /// points at that verb rather than failing later as an unknown attribute.
+    #[test]
+    fn parse_attr_pairs_refuses_governs_and_names_the_verb() {
+        let err = parse_attr_pairs(&["governs=src/**".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("govern add"), "got: {err}");
     }
 }

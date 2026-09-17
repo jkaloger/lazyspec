@@ -1,12 +1,13 @@
 ---
 title: No CLI subcommand writes governs; update --attr governs rejects it as unknown
 type: bug
-status: reported
+status: fixed
 author: Jack Kaloger
 date: 2026-09-14
 tags: []
 related:
 - related-to: RFC-068
+reviewed: 1d003a74de918cb9c35468fa07e74d3ec874683c
 ---
 
 ## Expected
