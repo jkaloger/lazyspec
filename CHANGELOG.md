@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3](https://github.com/jkaloger/lazyspec/compare/v0.12.2...v0.12.3) - 2026-09-18
+
+### Added
+
+- wiki sync action ([#104](https://github.com/jkaloger/lazyspec/pull/104))
+
+### Other
+
+- workflow dispatch
+- dont validate wiki sync
+- mark rfc for review
+
 ## [0.12.2](https://github.com/jkaloger/lazyspec/compare/v0.12.1...v0.12.2) - 2026-09-17
 
 ### Fixed
