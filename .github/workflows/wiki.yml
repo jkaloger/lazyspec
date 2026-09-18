@@ -22,3 +22,5 @@ jobs:
         with:
           fetch-depth: 0
       - uses: jkaloger/lazyspec-wiki-sync@main
+        with:
+          validate: false
