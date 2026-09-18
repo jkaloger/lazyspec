@@ -1,7 +1,7 @@
 ---
 title: 'TUI rethink: one list, many scopes, a command palette'
 type: rfc
-status: draft
+status: review
 author: Jack Kaloger
 date: 2026-09-08
 tags: []
@@ -15,6 +15,7 @@ related:
 - related-to: BUG-009
 - related-to: STORY-035
 - related-to: STORY-130
+reviewed: 715886f2e44b017fd22d18cf77aba63d4dedfd80
 ---
 
 ## Summary
