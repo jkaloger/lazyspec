@@ -1,0 +1,24 @@
+name: Wiki Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - .lazyspec.toml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: jkaloger/lazyspec-wiki-sync@main
