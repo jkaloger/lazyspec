@@ -6,6 +6,7 @@ on:
     paths:
       - docs/**
       - .lazyspec.toml
+  workflow_dispatch:
 
 permissions:
   contents: write
