@@ -1,12 +1,13 @@
 ---
 title: 'Web view app shell: sidebar + header, back-link, clickable tag filter'
 type: iteration
-status: complete
+status: superseded
 author: agent
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-182
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Objective

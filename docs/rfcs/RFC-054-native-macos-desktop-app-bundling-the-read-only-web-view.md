@@ -1,12 +1,13 @@
 ---
 title: Native macOS desktop app bundling the read-only web view
 type: rfc
-status: accepted
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - related-to: RFC-052
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Summary
 
 Package the read-only web view (RFC-052, `lazyspec serve`) as a native macOS desktop application, so non-technical collaborators can review a lazyspec project without a terminal, a browser, or git. The app is a Tauri shell that opens a system webview (WKWebView) and drives every request through the **existing** axum `Router` in-process, with no TCP port bound. On launch the user picks a local lazyspec project folder (with a recents list); the folder is watched for changes and the view reloads live. Distribution is a `.app` bundle behind a new `app` cargo feature that depends on `web`. This RFC adds packaging and an in-process transport; it introduces no new rendering path.

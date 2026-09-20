@@ -1,7 +1,7 @@
 ---
 title: Agent Integration
 type: spec
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-03-25
 tags:
@@ -12,6 +12,7 @@ related:
 - implements: STORY-051
 - implements: STORY-052
 - implements: STORY-053
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 

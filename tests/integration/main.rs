@@ -61,8 +61,6 @@ mod sqids_numbering_test;
 mod staleness_cost_test;
 mod store_test;
 mod surface_parity_test;
-mod tui_agent_dialog_test;
-mod tui_agent_management_test;
 mod tui_create_form_test;
 mod tui_delete_dialog_test;
 mod tui_diagram_test;
@@ -88,5 +86,3 @@ mod tui_tree_test;
 mod tui_view_mode_test;
 mod tui_warnings_test;
 mod validate_ignore_test;
-#[cfg(feature = "web")]
-mod web_serve_test;

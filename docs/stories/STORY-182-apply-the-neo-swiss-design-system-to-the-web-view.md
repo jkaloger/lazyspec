@@ -1,12 +1,13 @@
 ---
 title: Apply the Neo-Swiss design system to the web view
 type: story
-status: complete
+status: superseded
 author: unknown
 date: 2026-06-30
 tags: []
 related:
   - implements: RFC-053
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 <\!-- intent: one thin slice of user-observable value, testable -->

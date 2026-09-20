@@ -41,12 +41,6 @@ fn test_view_mode_next_cycles() {
     #[cfg(not(feature = "metrics"))]
     assert_eq!(ViewMode::Filters.next(), ViewMode::Graph);
     assert_eq!(ViewMode::Graph.next(), ViewMode::Settings);
-    #[cfg(feature = "agent")]
-    {
-        assert_eq!(ViewMode::Settings.next(), ViewMode::Agents);
-        assert_eq!(ViewMode::Agents.next(), ViewMode::Types);
-    }
-    #[cfg(not(feature = "agent"))]
     assert_eq!(ViewMode::Settings.next(), ViewMode::Types);
 }
 

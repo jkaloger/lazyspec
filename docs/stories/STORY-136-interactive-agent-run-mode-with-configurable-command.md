@@ -1,12 +1,13 @@
 ---
 title: Interactive agent run mode with configurable command
 type: story
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
 related:
 - implements: RFC-046
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

@@ -1,13 +1,14 @@
 ---
 title: Template-driven TUI agent action dialog
 type: story
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
 related:
 - implements: RFC-046
 - supersedes: STORY-051
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

@@ -1,12 +1,13 @@
 ---
 title: Agent execution actions
 type: iteration
-status: accepted
+status: superseded
 author: agent
 date: 2026-03-08
 tags: []
 related:
 - implements: STORY-051
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 

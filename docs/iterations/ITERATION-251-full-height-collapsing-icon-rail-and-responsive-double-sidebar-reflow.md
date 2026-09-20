@@ -1,12 +1,13 @@
 ---
 title: Full-height collapsing icon rail and responsive double-sidebar reflow
 type: iteration
-status: complete
+status: superseded
 author: jkaloger
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-184
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Changes

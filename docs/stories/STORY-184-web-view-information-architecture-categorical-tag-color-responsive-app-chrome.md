@@ -1,12 +1,13 @@
 ---
 title: 'Web view: information architecture, categorical tag color, responsive app chrome'
 type: story
-status: complete
+status: superseded
 author: jkaloger
 date: 2026-07-01
 tags: []
 related:
 - implements: RFC-053
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Story

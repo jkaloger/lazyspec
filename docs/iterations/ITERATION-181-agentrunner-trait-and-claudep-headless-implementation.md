@@ -1,12 +1,13 @@
 ---
 title: AgentRunner trait and ClaudeP headless implementation
 type: iteration
-status: complete
+status: superseded
 author: agent
 date: 2026-06-18
 tags: []
 related:
 - implements: STORY-132
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

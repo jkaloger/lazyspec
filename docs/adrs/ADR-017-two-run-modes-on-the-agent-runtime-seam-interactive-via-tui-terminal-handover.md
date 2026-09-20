@@ -1,12 +1,13 @@
 ---
 title: Interactive run mode via a configurable shell command and TUI terminal handover
 type: adr
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
 related:
 - related-to: RFC-046
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

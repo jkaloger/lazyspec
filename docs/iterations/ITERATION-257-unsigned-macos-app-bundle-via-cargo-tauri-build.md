@@ -1,12 +1,13 @@
 ---
 title: Unsigned macOS app bundle via cargo tauri build
 type: iteration
-status: complete
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-188
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Objective
 
 `cargo tauri build --features app` produces an unsigned `lazyspec.app` that renders a project through the in-process bridge, with every web asset resolving from bytes compiled into the binary — no external path.

@@ -199,7 +199,6 @@ Running `lazyspec` with no subcommand opens the interactive dashboard. It provid
 | `r`                 | Add relation                                        |
 | `p`                 | Provenance                                          |
 | `R`                 | Reload config from `.lazyspec.toml`                 |
-| `a`                 | Agent (only with the `agent` cargo feature)         |
 | `x`                 | Toggle wrap                                         |
 | `/`                 | Fuzzy search (a source file path lists the documents governing it) |
 | `w`                 | Warnings / validation panel                         |
@@ -909,9 +908,9 @@ There is no spelling for "legal here, and stop demanding the broader edge". Narr
 
 Traversal composes: an edge joins a walk when any matching row gives it a role. Two rows that can both cover one concrete edge and name different roles fail config load, naming both rows and the `traversal` each writes. Specificity does not resolve such a disagreement, so a concrete row contradicting a wildcard row fails the same way an equally specific pair does. A row that omits `traversal` names no role: it joins no walk and contradicts nothing, however specific it is.
 
-Both walks read these rows, and one engine walk over them produces the chain and the neighbourhood every surface renders: `context`, the TUI Graph view and Relations tab, and the web view. No surface derives the walk for itself, so a row changes what all three show at once. Chain membership is asymmetric for a nested child document that inherits its parent's chain relation: it is a chain descendant of the document its parent links to, and at the same time a root of the forest the Graph view and `context` without an id render. The forest's parent edges read each document's own frontmatter, and such a child declares no chain parent there. A row carrying `traversal = "chain"` makes the edge walk the chain for the triples it names: a source type from `from`, a relationship from `via`, a target type from `to`. No other triple walks on account of that row.
+Both walks read these rows, and one engine walk over them produces the chain and the neighbourhood every surface renders: `context` and the TUI Graph view and Relations tab. No surface derives the walk for itself, so a row changes what all three show at once. Chain membership is asymmetric for a nested child document that inherits its parent's chain relation: it is a chain descendant of the document its parent links to, and at the same time a root of the forest the Graph view and `context` without an id render. The forest's parent edges read each document's own frontmatter, and such a child declares no chain parent there. A row carrying `traversal = "chain"` makes the edge walk the chain for the triples it names: a source type from `from`, a relationship from `via`, a target type from `to`. No other triple walks on account of that row.
 
-A row carrying `traversal = "related"` scopes the related neighbourhood to the triple it names in the same way. `context` follows those rows when it walks out from the chain, and the Graph view's `related` column, the TUI Relations tab and the web document page read the same declaration, so all of them follow whatever relationships the config gives the related role rather than a fixed `related-to`. A relation whose target resolves to no document in the store joins neither walk. It has no type for a row to admit, so it appears in no chain and no neighbourhood on any surface, and carries its own broken-link finding instead. A single row with `from = "*"`, `to = "*"`, `via = "related-to"` and `traversal = "related"` gives that relationship the role between every pair of declared types, which is what a blanket `traversal = "related"` on `[[relationships]]` means.
+A row carrying `traversal = "related"` scopes the related neighbourhood to the triple it names in the same way. `context` follows those rows when it walks out from the chain, and the Graph view's `related` column and the TUI Relations tab read the same declaration, so all of them follow whatever relationships the config gives the related role rather than a fixed `related-to`. A relation whose target resolves to no document in the store joins neither walk. It has no type for a row to admit, so it appears in no chain and no neighbourhood on any surface, and carries its own broken-link finding instead. A single row with `from = "*"`, `to = "*"`, `via = "related-to"` and `traversal = "related"` gives that relationship the role between every pair of declared types, which is what a blanket `traversal = "related"` on `[[relationships]]` means.
 
 The table is therefore precise where a row is spent and blanket where it is not. A row naming concrete types walks those type pairs and no others. A wildcard position restores the blanket behaviour for the position it wildcards, so a config that walks every pair with one wildcard row is no more precise than a global marker.
 
@@ -1112,47 +1111,6 @@ If the remote is unreachable, `create` fails rather than silently falling back. 
 Markdown templates live in the templates directory (`.lazyspec/templates/` by default). `init` materializes a single `template.md` carrying general authoring guidance; because the tool is config-driven, no per-type templates are shipped. `{title}`, `{author}`, `{date}`, and `{type}` are substituted when a document is created, so one template serves every type.
 
 When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (for example `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
-
-### Agents
-
-The global `[agents]` block configures interactive agent run mode. When an interactive-mode template is selected in the agent dialog, the configured shell command runs via `bash -lc` with the rendered template body exported as `$LAZYSPEC_PROMPT` and the document path as `$LAZYSPEC_DOC_PATH`.
-
-```toml
-[agents]
-interactive = 'claude "$LAZYSPEC_PROMPT"'
-# or 'opencode -p "$LAZYSPEC_PROMPT"', 'pi', 'tmux new-window claude "$LAZYSPEC_PROMPT"'
-```
-
-Zero-defaults: when `[agents] interactive` is unset, interactive-mode templates (`mode: interactive`) are not offered. Headless-mode templates (`mode: headless`) continue to work using the standard `claude -p` command.
-
-</details>
-
-<details>
-<summary><h2>Web view</h2></summary>
-
-A read-only web view of the project's documents is available behind the `web` cargo feature, so default builds carry no async/HTTP dependencies:
-
-```sh
-cargo run --features web -- serve            # binds 127.0.0.1:8787
-cargo run --features web -- serve --port 9000
-```
-
-`serve` loads the store once and renders a server-side document list (grouped by type) with htmx status/tag filtering. It binds loopback only.
-
-Each document page carries an outbound "edit on GitHub" deep-link, derived from the document's store backend: filesystem docs link to the blob (`/blob/{branch}/{path}`), `github-issues` docs to the issue, `github-milestones` docs to the milestone. The repo coordinates resolve from the `origin` remote (owner/repo) and current branch, overridable per field with an optional `[web]` table:
-
-```toml
-[web]
-owner = "acme"      # optional; defaults to the origin remote's owner
-repo = "widgets"    # optional; defaults to the origin remote's repo
-branch = "main"     # optional; defaults to the current branch
-```
-
-When owner/repo can't be resolved (no `origin` remote and no override), deep-links are omitted and `serve` logs a single startup warning rather than rendering broken links.
-
-### Native macOS app (deprecated)
-
-The native macOS app (the Tauri build behind the `app` cargo feature) is deprecated and is no longer built or shipped by CI. The `app` cargo feature and its source remain in-tree but are unsupported and unbuilt in releases. crates.io (`cargo install`) is the supported install and artifact channel.
 
 </details>
 

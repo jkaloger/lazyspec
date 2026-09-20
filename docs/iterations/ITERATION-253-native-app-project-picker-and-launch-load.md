@@ -1,12 +1,13 @@
 ---
 title: Native app project picker and launch-load
 type: iteration
-status: complete
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-186
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Objective
 
 On launch the app shows the native macOS folder picker, validates the chosen folder is a `.lazyspec/` project (re-prompting in plain language on failure), and loads it into `AppState` so the webview's `GET /` renders that project instead of a hardcoded path.

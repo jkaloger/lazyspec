@@ -688,8 +688,6 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 }
             }
         }
-        #[cfg(feature = "agent")]
-        AppEvent::AgentFinished => {}
     }
     needs_validation
 }
@@ -960,9 +958,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
         perf_log::log_duration("between_frames", t);
 
-        #[cfg(feature = "agent")]
-        app.agent_spawner.poll_finished();
-
         let t = Instant::now();
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(event) => {
@@ -1159,53 +1154,6 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     drop(_stdin_guard);
                 }
             }
-        }
-
-        #[cfg(feature = "agent")]
-        if let Some(session_id) = app.resume_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
-            while rx.try_recv().is_ok() {}
-
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            disable_raw_mode()?;
-            let _ = Command::new("claude")
-                .args(["--resume", &session_id])
-                .status();
-            enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-            terminal.clear()?;
-
-            drain_stdin();
-            while rx.try_recv().is_ok() {}
-            drop(_stdin_guard);
-            let root = app.store.root().to_path_buf();
-            app.store = Store::load(&root, &config)?;
-            app.refresh_validation(&config);
-        }
-
-        #[cfg(feature = "agent")]
-        if let Some(req) = app.interactive_request.take() {
-            let _stdin_guard = stdin_lock.lock().unwrap_or_else(PoisonError::into_inner);
-            while rx.try_recv().is_ok() {}
-
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            disable_raw_mode()?;
-            let mut command = crate::engine::agent_interactive::build_interactive_command(
-                &req.cmd,
-                &req.prompt,
-                &req.doc_path,
-            );
-            let _ = command.status();
-            enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-            terminal.clear()?;
-
-            drain_stdin();
-            while rx.try_recv().is_ok() {}
-            drop(_stdin_guard);
-            let root = app.store.root().to_path_buf();
-            app.store = Store::load(&root, &config)?;
-            app.refresh_validation(&config);
         }
 
         if app.fix_request {

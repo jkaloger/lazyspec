@@ -19,8 +19,6 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
-#[cfg(feature = "agent")]
-use crate::tui::agent::AgentStatus;
 use crate::tui::state::{
     anchor_to_flat, App, ConfigDep, DocListNode, EdgeKey, EditableField, FieldEditor, FieldPath,
     FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
@@ -1673,101 +1671,6 @@ pub fn render_filter_panel(
             render_relationship_sections(f, app, right[1], block, doc.as_ref(), colors)
         }
     }
-}
-
-#[cfg(feature = "agent")]
-pub fn draw_agents_screen(f: &mut Frame, app: &App, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-
-    let main_area = layout[0];
-    let footer_area = layout[1];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Agents ");
-
-    if app.agent_spawner.records.is_empty() {
-        let paragraph = Paragraph::new(
-            "No agents have been invoked yet. Press `a` on a document to start one.",
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(block);
-        f.render_widget(paragraph, main_area);
-    } else {
-        let rows: Vec<Row> = app
-            .agent_spawner
-            .records
-            .iter()
-            .map(|record| {
-                let (icon, color) = match record.status {
-                    AgentStatus::Running => ("●", Color::Yellow),
-                    AgentStatus::Complete => ("✔", Color::Green),
-                    AgentStatus::Failed => ("✘", Color::Red),
-                };
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        format!("  {}", icon),
-                        Style::default().fg(color),
-                    )),
-                    Cell::from(Span::raw(format!(
-                        "{:<14}",
-                        record
-                            .session_id
-                            .split('-')
-                            .next()
-                            .unwrap_or(&record.session_id)
-                    ))),
-                    Cell::from(Span::raw(&*record.doc_title)),
-                    Cell::from(Span::raw(&*record.action)),
-                    Cell::from(Span::styled(
-                        &*record.started_at,
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Length(4),
-            Constraint::Length(14),
-            Constraint::Fill(1),
-            Constraint::Length(18),
-            Constraint::Min(20),
-        ];
-
-        let table = Table::new(rows, widths)
-            .block(block)
-            .header(
-                Row::new(vec!["  ", "Session", "Document", "Action", "Started"]).style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-        let mut state = TableState::default().with_selected(Some(app.agent_selected_index));
-        f.render_stateful_widget(table, main_area, &mut state);
-    }
-
-    let footer = Line::from(vec![
-        Span::styled("e", Style::default().fg(Color::Cyan)),
-        Span::raw(": open document  "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(": resume session  "),
-        Span::styled("`", Style::default().fg(Color::Cyan)),
-        Span::raw(": switch view"),
-    ]);
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        footer_area,
-    );
 }
 
 #[cfg(feature = "metrics")]

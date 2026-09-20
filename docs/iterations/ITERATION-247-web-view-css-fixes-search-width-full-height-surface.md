@@ -1,12 +1,13 @@
 ---
 title: "Web view CSS fixes: search width, full-height surface"
 type: iteration
-status: complete
+status: superseded
 author: "agent"
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-182
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 <!-- intent: plan the concrete changes that satisfy a story's acceptance criteria -->
 

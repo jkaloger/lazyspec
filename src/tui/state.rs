@@ -13,8 +13,6 @@ pub use app::{
     AppEvent, ConfigDep, CreateResult, DocListNode, FilterField, GraphAnchor, GraphNode,
     PreviewTab, ScaffoldResult, SearchRequest, StaleFindingsRequest, StalenessRequest, ViewMode,
 };
-#[cfg(feature = "agent")]
-pub use forms::AgentDialog;
 pub use forms::{
     CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, FormField,
     LinkEditor, OpenRequest, OverrideKeyPrompt, ProvenanceEditor, RelKey, SettingsDeleteConfirm,

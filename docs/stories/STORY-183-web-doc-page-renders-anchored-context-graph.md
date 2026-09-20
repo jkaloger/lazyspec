@@ -1,12 +1,13 @@
 ---
 title: Web doc page renders anchored context graph
 type: story
-status: review
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
   - implements: RFC-052
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Value

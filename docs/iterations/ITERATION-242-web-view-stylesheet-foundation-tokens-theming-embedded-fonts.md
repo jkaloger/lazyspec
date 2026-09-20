@@ -1,13 +1,14 @@
 ---
 title: 'Web view stylesheet foundation: tokens, theming, embedded fonts'
 type: iteration
-status: complete
+status: superseded
 author: unknown
 date: 2026-06-30
 tags: []
 related:
 - implements: STORY-182
 - blocks: ITERATION-243
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 <\!-- intent: one session-sized slice handed to a coding agent -->

@@ -1,7 +1,7 @@
 ---
 title: Agent Workflow Skills
 type: story
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-03-05
 tags:
@@ -10,6 +10,7 @@ tags:
 - superpowers
 related:
 - implements: RFC-002
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 

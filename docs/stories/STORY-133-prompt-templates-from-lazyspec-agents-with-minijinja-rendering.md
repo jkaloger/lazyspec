@@ -1,13 +1,14 @@
 ---
 title: Prompt templates from .lazyspec/agents with minijinja rendering
 type: story
-status: complete
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
 related:
 - implements: RFC-046
 - supersedes: STORY-053
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

@@ -1,12 +1,13 @@
 ---
 title: Native app recents, File menu, and project switching
 type: iteration
-status: complete
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-186
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Objective
 
 Persist a recents list in the platform config dir, add a native File menu (Open Project… + recents), reopen the most-recent valid project on launch (falling back to the picker), and switch projects by rebuilding `AppState` and re-pointing the watcher.

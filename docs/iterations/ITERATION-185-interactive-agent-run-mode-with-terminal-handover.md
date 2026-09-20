@@ -1,12 +1,13 @@
 ---
 title: Interactive agent run mode with terminal handover
 type: iteration
-status: complete
+status: superseded
 author: agent
 date: 2026-06-18
 tags: []
 related:
 - implements: STORY-136
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

@@ -1,12 +1,13 @@
 ---
 title: Unsigned macOS app bundle
 type: story
-status: in-progress
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: RFC-054
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---<!-- intent: define a vertical slice of value with testable acceptance criteria -->
 
 ## Context

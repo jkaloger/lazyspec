@@ -1,12 +1,13 @@
 ---
 title: Agent management screen
 type: story
-status: accepted
+status: superseded
 author: jkaloger
 date: 2026-03-08
 tags: []
 related:
 - implements: RFC-016
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 

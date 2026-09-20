@@ -25,17 +25,11 @@ pub enum KeyContext {
     StatusPicker,
     LinkEditor,
     ProvenanceEditor,
-    #[cfg(feature = "agent")]
-    AgentDialog,
-    #[cfg(feature = "agent")]
-    AgentTextInput,
     Search,
     Fullscreen,
     Types,
     Filters,
     Graph,
-    #[cfg(feature = "agent")]
-    Agents,
     Settings,
     SettingsEditing,
     SettingsQuitPrompt,
@@ -279,29 +273,6 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
             ],
         }],
 
-        // handle_agent_dialog_key, keys.rs:269.
-        #[cfg(feature = "agent")]
-        KeyContext::AgentDialog => vec![KeybindGroup {
-            title: "Agent",
-            binds: vec![
-                bind!("Esc", "Close", [k(KeyCode::Esc)]),
-                bind!("Up/Down", "Navigate", [k(KeyCode::Up), k(KeyCode::Down)]),
-                bind!("Enter", "Select", [k(KeyCode::Enter)]),
-            ],
-        }],
-
-        // handle_agent_text_input_key, keys.rs:387.
-        #[cfg(feature = "agent")]
-        KeyContext::AgentTextInput => vec![KeybindGroup {
-            title: "Agent · Custom prompt",
-            binds: vec![
-                bind!("Esc", "Cancel", [k(KeyCode::Esc)]),
-                bind!("Enter", "Submit", [k(KeyCode::Enter)]),
-                bind!("Backspace", "Delete char", [k(KeyCode::Backspace)]),
-                type_text(),
-            ],
-        }],
-
         // handle_search_key, keys.rs:431.
         KeyContext::Search => vec![KeybindGroup {
             title: "Search",
@@ -391,8 +362,6 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                     bind!("r", "Relation", [k(KeyCode::Char('r'))]),
                     bind!("p", "Provenance", [k(KeyCode::Char('p'))]),
                     bind!("R", "Reload config", [k(KeyCode::Char('R'))]),
-                    #[cfg(feature = "agent")]
-                    bind!("a", "Agent", [k(KeyCode::Char('a'))]),
                 ],
             },
             KeybindGroup {
@@ -509,32 +478,6 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                 bind!("G", "Bottom", [k(KeyCode::Char('G'))]),
                 bind!("Enter", "Open", [k(KeyCode::Enter)]),
                 bind!("e", "Edit", [k(KeyCode::Char('e'))]),
-                bind!("`", "Cycle mode", [k(KeyCode::Char('`'))]),
-                bind!("5", "Settings", [k(KeyCode::Char('5'))]),
-                bind!("?", "Toggle help", [k(KeyCode::Char('?'))]),
-                bind!("q", "Quit", [k(KeyCode::Char('q'))]),
-            ],
-        }],
-
-        // handle_agents_key, keys.rs:476. T4 wires `?` here.
-        #[cfg(feature = "agent")]
-        KeyContext::Agents => vec![KeybindGroup {
-            title: "Agents",
-            binds: vec![
-                bind!(
-                    "j/k",
-                    "Navigate",
-                    [
-                        k(KeyCode::Char('j')),
-                        k(KeyCode::Down),
-                        k(KeyCode::Char('k')),
-                        k(KeyCode::Up)
-                    ]
-                ),
-                bind!("Ctrl-d", "Half page down", [ctrl(KeyCode::Char('d'))]),
-                bind!("Ctrl-u", "Half page up", [ctrl(KeyCode::Char('u'))]),
-                bind!("e", "Edit", [k(KeyCode::Char('e'))]),
-                bind!("r", "Resume", [k(KeyCode::Char('r'))]),
                 bind!("`", "Cycle mode", [k(KeyCode::Char('`'))]),
                 bind!("5", "Settings", [k(KeyCode::Char('5'))]),
                 bind!("?", "Toggle help", [k(KeyCode::Char('?'))]),
@@ -688,17 +631,11 @@ pub fn context_label(ctx: KeyContext) -> &'static str {
         KeyContext::StatusPicker => "Status",
         KeyContext::LinkEditor => "Relation",
         KeyContext::ProvenanceEditor => "Provenance",
-        #[cfg(feature = "agent")]
-        KeyContext::AgentDialog => "Agent",
-        #[cfg(feature = "agent")]
-        KeyContext::AgentTextInput => "Agent · Custom prompt",
         KeyContext::Search => "Search",
         KeyContext::Fullscreen => "Fullscreen",
         KeyContext::Types => "Types",
         KeyContext::Filters => "Filters",
         KeyContext::Graph => "Graph",
-        #[cfg(feature = "agent")]
-        KeyContext::Agents => "Agents",
         KeyContext::Settings => "Settings",
         KeyContext::SettingsEditing => "Settings · Edit field",
         KeyContext::SettingsQuitPrompt => "Settings · Unsaved changes",
@@ -724,17 +661,11 @@ mod tests {
         KeyContext::StatusPicker,
         KeyContext::LinkEditor,
         KeyContext::ProvenanceEditor,
-        #[cfg(feature = "agent")]
-        KeyContext::AgentDialog,
-        #[cfg(feature = "agent")]
-        KeyContext::AgentTextInput,
         KeyContext::Search,
         KeyContext::Fullscreen,
         KeyContext::Types,
         KeyContext::Filters,
         KeyContext::Graph,
-        #[cfg(feature = "agent")]
-        KeyContext::Agents,
         KeyContext::Settings,
         KeyContext::SettingsEditing,
         KeyContext::SettingsQuitPrompt,

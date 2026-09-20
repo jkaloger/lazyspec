@@ -1,12 +1,13 @@
 ---
 title: 'App in-process protocol bridge: Tauri custom scheme over the web router'
 type: story
-status: in-progress
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: RFC-054
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Context
 
 RFC-052 gave the doc graph a URL served by an axum `Router`; RFC-054 packages that

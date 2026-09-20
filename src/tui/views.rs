@@ -24,8 +24,6 @@ use crate::engine::status_colors::StatusColors;
 use crate::tui::state::{App, ViewMode};
 use status_bar::draw_status_bar;
 
-#[cfg(feature = "agent")]
-use overlays::draw_agent_dialog;
 use overlays::{
     draw_create_form, draw_delete_confirm, draw_gh_conflict, draw_help_overlay, draw_link_editor,
     draw_open_message, draw_override_key_prompt, draw_provenance_editor, draw_search_overlay,
@@ -33,8 +31,6 @@ use overlays::{
     draw_settings_set_picker, draw_settings_variant_picker, draw_status_picker,
     draw_warnings_panel,
 };
-#[cfg(feature = "agent")]
-use panels::draw_agents_screen;
 #[cfg(feature = "metrics")]
 use panels::draw_metrics_skeleton;
 use panels::{
@@ -228,8 +224,6 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
         ViewMode::Metrics => draw_metrics_skeleton(f, outer[1]),
         ViewMode::Graph => draw_graph(f, app, outer[1], config, &palette),
         ViewMode::Settings => draw_settings(f, app, outer[1], &app.settings_buffer),
-        #[cfg(feature = "agent")]
-        ViewMode::Agents => draw_agents_screen(f, app, outer[1]),
     }
 
     if app.status_bar_enabled {
@@ -274,11 +268,6 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
 
     if app.provenance_editor.active {
         draw_provenance_editor(f, app);
-    }
-
-    #[cfg(feature = "agent")]
-    if app.agent_dialog.active {
-        draw_agent_dialog(f, app);
     }
 
     if app.gh_conflict_message.is_some() {

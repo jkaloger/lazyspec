@@ -1,12 +1,13 @@
 ---
 title: Native app project selection and recents
 type: story
-status: in-progress
+status: superseded
 author: unknown
 date: 2026-07-01
 tags: []
 related:
 - implements: RFC-054
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---## Value
 
 As a non-technical macOS collaborator with no terminal and no git, I want to pick which lazyspec project the app shows me — from a normal folder picker or a list of ones I opened before — so that I can open and switch between projects myself without anyone running a command for me.

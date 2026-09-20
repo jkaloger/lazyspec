@@ -1,11 +1,12 @@
 ---
 title: "Web view design system: Neo Swiss industrial information design"
 type: rfc
-status: accepted
+status: superseded
 author: "jkaloger"
 date: 2026-06-30
 tags: []
 related: []
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 <!-- intent: propose a design and the decisions it forces, before code -->

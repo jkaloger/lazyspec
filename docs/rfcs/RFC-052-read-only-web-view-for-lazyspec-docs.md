@@ -1,11 +1,12 @@
 ---
 title: "Read-only web view for lazyspec docs"
 type: rfc
-status: accepted
+status: superseded
 author: "unknown"
 date: 2026-06-29
 tags: []
 related: []
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Summary

@@ -1,12 +1,13 @@
 ---
 title: 'Single-sidebar IA: view plus shared filter/pivot, sticky header, remove graph rail'
 type: iteration
-status: complete
+status: superseded
 author: jkaloger
 date: 2026-07-01
 tags: []
 related:
 - implements: STORY-184
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Changes

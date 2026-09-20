@@ -241,8 +241,6 @@ fn mode_bg(mode: &ViewMode) -> Color {
         ViewMode::Metrics => Color::Cyan,
         ViewMode::Graph => Color::Green,
         ViewMode::Settings => Color::White,
-        #[cfg(feature = "agent")]
-        ViewMode::Agents => Color::Yellow,
     }
 }
 

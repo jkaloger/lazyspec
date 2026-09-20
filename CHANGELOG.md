@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Web view, native macOS app, and agent subsystem (`web`, `app`, `agent` cargo features and their source, deps, and assets), per ADR-037.
+
 ## [0.12.2](https://github.com/jkaloger/lazyspec/compare/v0.12.1...v0.12.2) - 2026-09-17
 
 ### Fixed

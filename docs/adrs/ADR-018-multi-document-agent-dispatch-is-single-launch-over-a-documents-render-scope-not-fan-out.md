@@ -1,12 +1,13 @@
 ---
 title: Multi-document agent dispatch is single-launch over a documents render scope, not fan-out
 type: adr
-status: draft
+status: superseded
 author: jkaloger
 date: 2026-06-18
 tags: []
 related:
 - related-to: RFC-047
+reviewed: 021d5970ba85a507c51decb414a929610fe7b411
 ---
 
 ## Context

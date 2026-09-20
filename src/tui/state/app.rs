@@ -1,5 +1,3 @@
-#[cfg(feature = "agent")]
-use super::forms::AgentDialog;
 use super::forms::{
     CreateForm, DeleteConfirm, EdgeKey, EditableField, FieldEditor, FieldPath, LinkEditor,
     OpenRequest, OverrideKeyPrompt, PickerKind, ProvenanceEditor, RelKey, SetPicker,
@@ -24,8 +22,6 @@ use crate::engine::ops::open::{resolve_open_target, OpenTarget};
 use crate::engine::reservation::ReservationProgress;
 use crate::engine::staleness::Staleness;
 use crate::engine::store::{Filter, Store};
-#[cfg(feature = "agent")]
-use crate::tui::agent::{load_all_records, AgentSpawner};
 use crate::tui::views::keybinds::KeyContext;
 use crate::tui::views::panels::UNSET_VARIANT;
 use crate::tui::views::status_bar::StatusBarComponents;
@@ -374,8 +370,6 @@ pub enum AppEvent {
         warnings: Vec<String>,
     },
     GhPushResult(Result<(), String>),
-    #[cfg(feature = "agent")]
-    AgentFinished,
 }
 
 fn update_tags(
@@ -528,8 +522,6 @@ pub enum ViewMode {
     Metrics,
     Graph,
     Settings,
-    #[cfg(feature = "agent")]
-    Agents,
 }
 
 impl ViewMode {
@@ -543,12 +535,7 @@ impl ViewMode {
             #[cfg(not(feature = "metrics"))]
             ViewMode::Filters => ViewMode::Graph,
             ViewMode::Graph => ViewMode::Settings,
-            #[cfg(feature = "agent")]
-            ViewMode::Settings => ViewMode::Agents,
-            #[cfg(not(feature = "agent"))]
             ViewMode::Settings => ViewMode::Types,
-            #[cfg(feature = "agent")]
-            ViewMode::Agents => ViewMode::Types,
         }
     }
 
@@ -560,8 +547,6 @@ impl ViewMode {
             ViewMode::Metrics => "Metrics",
             ViewMode::Graph => "Graph",
             ViewMode::Settings => "Settings",
-            #[cfg(feature = "agent")]
-            ViewMode::Agents => "Agents",
         }
     }
 }
@@ -678,14 +663,6 @@ pub struct App {
     pub status_picker: StatusPicker,
     pub link_editor: LinkEditor,
     pub provenance_editor: ProvenanceEditor,
-    #[cfg(feature = "agent")]
-    pub agent_dialog: AgentDialog,
-    #[cfg(feature = "agent")]
-    pub agent_spawner: AgentSpawner,
-    /// User-authored prompt templates discovered under `.lazyspec/agents/`,
-    /// loaded once at construction (ADR-015 zero-defaults: empty when absent).
-    #[cfg(feature = "agent")]
-    pub agent_prompts: Vec<crate::engine::prompt::AgentPrompt>,
     pub view_mode: ViewMode,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_selected: usize,
@@ -722,15 +699,6 @@ pub struct App {
     pub doc_list_offset: usize,
     pub doc_list_height: usize,
     pub fullscreen_height: usize,
-    #[cfg(feature = "agent")]
-    pub agent_selected_index: usize,
-    #[cfg(feature = "agent")]
-    pub resume_request: Option<String>,
-    /// A pending interactive-agent terminal handover (RFC-046 slice 5). Set when a
-    /// `mode: interactive` template is selected; drained by the event loop, which
-    /// suspends/runs/restores the terminal. No AgentRecord is written (AC7).
-    #[cfg(feature = "agent")]
-    pub interactive_request: Option<super::forms::InteractiveRequest>,
     pub expanded_body_cache: HashMap<PathBuf, String>,
     /// Documents whose cached body is out of date but still on screen (BUG-031).
     /// The preview falls back to an empty body on a cache miss, so invalidation
@@ -833,15 +801,6 @@ impl App {
         let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
-        #[cfg(feature = "agent")]
-        let agent_spawner = AgentSpawner::new(store.root());
-        // ADR-015 zero-defaults: an absent agents dir yields no prompts; discovery
-        // warnings are surfaced to stderr inside `discover_prompts`, not stored.
-        #[cfg(feature = "agent")]
-        let agent_prompts = {
-            let (prompts, _warnings) = crate::engine::prompt::discover_prompts(store.root(), &*fs);
-            prompts
-        };
 
         let mut app = App {
             fs,
@@ -880,12 +839,6 @@ impl App {
             status_picker: StatusPicker::new(),
             link_editor: LinkEditor::new(),
             provenance_editor: ProvenanceEditor::new(),
-            #[cfg(feature = "agent")]
-            agent_dialog: AgentDialog::new(),
-            #[cfg(feature = "agent")]
-            agent_spawner,
-            #[cfg(feature = "agent")]
-            agent_prompts,
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -916,12 +869,6 @@ impl App {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
-            #[cfg(feature = "agent")]
-            agent_selected_index: 0,
-            #[cfg(feature = "agent")]
-            resume_request: None,
-            #[cfg(feature = "agent")]
-            interactive_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_stale: HashSet::new(),
             expansion_in_flight: None,
@@ -1064,13 +1011,6 @@ impl App {
             self.enter_filters_mode();
             self.selected_doc = 0;
         }
-        #[cfg(feature = "agent")]
-        if self.view_mode == ViewMode::Agents {
-            if let Ok(records) = load_all_records(Some(self.agent_spawner.history_dir())) {
-                self.agent_spawner.records = records;
-            }
-            self.agent_selected_index = 0;
-        }
     }
 
     /// The [`KeyContext`] whose handler is currently live, mirroring
@@ -1114,14 +1054,6 @@ impl App {
         if self.provenance_editor.active {
             return KeyContext::ProvenanceEditor;
         }
-        #[cfg(feature = "agent")]
-        if self.agent_dialog.active {
-            return if self.agent_dialog.text_input.is_some() {
-                KeyContext::AgentTextInput
-            } else {
-                KeyContext::AgentDialog
-            };
-        }
         if self.search_mode {
             return KeyContext::Search;
         }
@@ -1132,8 +1064,6 @@ impl App {
             ViewMode::Filters => KeyContext::Filters,
             ViewMode::Graph => KeyContext::Graph,
             ViewMode::Settings => self.active_settings_key_context(),
-            #[cfg(feature = "agent")]
-            ViewMode::Agents => KeyContext::Agents,
             _ => KeyContext::Types,
         }
     }
@@ -3813,19 +3743,6 @@ impl App {
             .as_ref()
             .map(|p| format!("{}|{:?}", p.selected, p.path));
 
-        #[cfg(feature = "agent")]
-        let agent = format!(
-            "agent_dialog.active={} sel={} text={:?} agent_idx={} resume={} interactive={}",
-            self.agent_dialog.active,
-            self.agent_dialog.selected_index,
-            self.agent_dialog.text_input,
-            self.agent_selected_index,
-            self.resume_request.is_some(),
-            self.interactive_request.is_some(),
-        );
-        #[cfg(not(feature = "agent"))]
-        let agent = String::new();
-
         format!(
             concat!(
                 "view_mode={:?} selected_type={} selected_doc={} doc_list_offset={} ",
@@ -3848,7 +3765,7 @@ impl App {
                 "settings_category={} settings_field={} settings_entry={} settings_drill={:?} ",
                 "settings_quit_prompt.active={} set_picker={:?} variant={:?} ",
                 "scaffold_offer={} settings_footer_error={} settings_edit_error={} ",
-                "graph_sort_col={} graph_sort_rev={} {}",
+                "graph_sort_col={} graph_sort_rev={}",
             ),
             self.view_mode,
             self.selected_type,
@@ -3914,7 +3831,6 @@ impl App {
             self.settings_edit_error.is_some(),
             self.graph_sort_col,
             self.graph_sort_rev,
-            agent,
         )
     }
 }
@@ -3962,8 +3878,6 @@ pub(crate) mod parity_seed {
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
         let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
-        #[cfg(feature = "agent")]
-        let agent_spawner = AgentSpawner::new(store.root());
         let config = Config::default();
         let mut app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
@@ -4002,12 +3916,6 @@ pub(crate) mod parity_seed {
             status_picker: StatusPicker::new(),
             link_editor: LinkEditor::new(),
             provenance_editor: ProvenanceEditor::new(),
-            #[cfg(feature = "agent")]
-            agent_dialog: AgentDialog::new(),
-            #[cfg(feature = "agent")]
-            agent_spawner,
-            #[cfg(feature = "agent")]
-            agent_prompts: Vec::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -4038,12 +3946,6 @@ pub(crate) mod parity_seed {
             doc_list_offset: 0,
             doc_list_height: 10,
             fullscreen_height: 20,
-            #[cfg(feature = "agent")]
-            agent_selected_index: 0,
-            #[cfg(feature = "agent")]
-            resume_request: None,
-            #[cfg(feature = "agent")]
-            interactive_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_stale: HashSet::new(),
             expansion_in_flight: None,
@@ -4144,14 +4046,10 @@ pub(crate) mod parity_seed {
     }
 
     /// Build a fully-seeded `App` for `ctx`, returning the owning TempDir and the
-    /// `Config` the parity test must pass to `handle_key` (it differs from the
-    /// default only for the `agent`-feature Types `a` case, which needs the
-    /// selected doc's type to carry an agent so `open_agent_dialog` opens).
+    /// `Config` the parity test must pass to `handle_key`.
     pub(crate) fn seed(ctx: KeyContext) -> (TempDir, App, Config) {
         let (tmp, mut app) = bare_app();
-        // `config` is mutated only under the `agent` feature (Types `a` setup).
-        #[cfg_attr(not(feature = "agent"), allow(unused_mut))]
-        let mut config = Config::default();
+        let config = Config::default();
         match ctx {
             KeyContext::GhConflict => {
                 app.gh_conflict_message = Some("boom".to_string());
@@ -4214,32 +4112,6 @@ pub(crate) mod parity_seed {
                 app.provenance_editor.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
                 app.provenance_editor.input = "cite".to_string();
             }
-            #[cfg(feature = "agent")]
-            KeyContext::AgentDialog => {
-                use crate::tui::state::forms::{AgentAction, AgentDialog};
-                app.agent_dialog = AgentDialog {
-                    active: true,
-                    selected_index: 0,
-                    actions: vec![AgentAction::Custom, AgentAction::Custom],
-                    missing: Vec::new(),
-                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
-                    doc_title: "t".to_string(),
-                    text_input: None,
-                };
-            }
-            #[cfg(feature = "agent")]
-            KeyContext::AgentTextInput => {
-                use crate::tui::state::forms::{AgentAction, AgentDialog};
-                app.agent_dialog = AgentDialog {
-                    active: true,
-                    selected_index: 0,
-                    actions: vec![AgentAction::Custom],
-                    missing: Vec::new(),
-                    doc_path: PathBuf::from("docs/rfcs/RFC-001-a.md"),
-                    doc_title: "t".to_string(),
-                    text_input: Some("draft".to_string()),
-                };
-            }
             KeyContext::Search => {
                 populate_docs(&mut app);
                 app.search_mode = true;
@@ -4281,30 +4153,6 @@ pub(crate) mod parity_seed {
                 );
                 app.selected_doc = parents[1];
                 app.preview_tab = PreviewTab::Preview;
-
-                // (agent) Make `a` live: the selected doc's type (convention)
-                // must carry an agent whose template is loaded, so
-                // open_agent_dialog resolves at least one action and opens.
-                #[cfg(feature = "agent")]
-                {
-                    use crate::engine::prompt::{AgentPrompt, RunMode};
-                    let conv_name = app.doc_types[conv_idx].as_str().to_string();
-                    if let Some(t) = config
-                        .documents
-                        .types
-                        .iter_mut()
-                        .find(|t| t.name == conv_name)
-                    {
-                        t.agents = vec!["review".to_string()];
-                    }
-                    app.agent_prompts = vec![AgentPrompt {
-                        name: "review".to_string(),
-                        description: "review".to_string(),
-                        mode: RunMode::Headless,
-                        allowed_tools: None,
-                        body_template: "body".to_string(),
-                    }];
-                }
             }
             KeyContext::Filters => {
                 populate_docs(&mut app);
@@ -4329,23 +4177,6 @@ pub(crate) mod parity_seed {
                 app.graph_selected = 1;
                 // A measured viewport so Ctrl-d/Ctrl-u (half-page) move the cursor.
                 app.graph_list_height = 4;
-            }
-            #[cfg(feature = "agent")]
-            KeyContext::Agents => {
-                use crate::tui::agent::{AgentRecord, AgentStatus};
-                app.view_mode = ViewMode::Agents;
-                app.agent_spawner.records = (0..3)
-                    .map(|i| AgentRecord {
-                        session_id: format!("s{i}"),
-                        doc_title: format!("doc {i}"),
-                        doc_path: PathBuf::from(format!("docs/rfcs/RFC-{i:03}-a.md")),
-                        action: "a".to_string(),
-                        status: AgentStatus::Complete, // not Running, so `r` resumes
-                        started_at: "t".to_string(),
-                        finished_at: None,
-                    })
-                    .collect();
-                app.agent_selected_index = 1; // middle: j/k both move
             }
             KeyContext::Settings => {
                 populate_docs(&mut app);
@@ -4472,9 +4303,6 @@ mod tests {
         let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
-        #[cfg(feature = "agent")]
-        let agent_spawner = AgentSpawner::new(store.root());
-
         let app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
             git: Box::new(crate::engine::git_ref::test_support::MockGitRefClient::new()),
@@ -4512,12 +4340,6 @@ mod tests {
             status_picker: StatusPicker::new(),
             link_editor: LinkEditor::new(),
             provenance_editor: ProvenanceEditor::new(),
-            #[cfg(feature = "agent")]
-            agent_dialog: AgentDialog::new(),
-            #[cfg(feature = "agent")]
-            agent_spawner,
-            #[cfg(feature = "agent")]
-            agent_prompts: Vec::new(),
             view_mode: ViewMode::Types,
             graph_nodes: Vec::new(),
             graph_selected: 0,
@@ -4548,12 +4370,6 @@ mod tests {
             doc_list_offset: 0,
             doc_list_height: 0,
             fullscreen_height: 0,
-            #[cfg(feature = "agent")]
-            agent_selected_index: 0,
-            #[cfg(feature = "agent")]
-            resume_request: None,
-            #[cfg(feature = "agent")]
-            interactive_request: None,
             expanded_body_cache: HashMap::new(),
             expansion_stale: HashSet::new(),
             expansion_in_flight: None,
@@ -10486,25 +10302,6 @@ center = ["warnings"]
         assert_eq!(app.active_key_context(), KeyContext::SettingsVariantPicker);
     }
 
-    #[cfg(feature = "agent")]
-    #[test]
-    fn active_key_context_agent_dialog_vs_text_input() {
-        let mut app = make_test_app(1);
-        app.agent_dialog.active = true;
-        assert_eq!(app.active_key_context(), KeyContext::AgentDialog);
-
-        app.agent_dialog.text_input = Some(String::new());
-        assert_eq!(app.active_key_context(), KeyContext::AgentTextInput);
-    }
-
-    #[cfg(feature = "agent")]
-    #[test]
-    fn active_key_context_agents_view_mode() {
-        let mut app = make_test_app(1);
-        app.view_mode = ViewMode::Agents;
-        assert_eq!(app.active_key_context(), KeyContext::Agents);
-    }
-
     /// Render the help overlay for `app` into a fresh TestBackend and return the
     /// whole buffer flattened to a single string.
     fn render_help_to_string(app: &mut App, w: u16, h: u16) -> String {
@@ -10617,21 +10414,6 @@ center = ["warnings"]
         let config = Config::default();
         app.view_mode = ViewMode::Settings;
         // Plain nav: no sub-state active.
-        app.help_scroll = 7;
-
-        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);
-
-        assert!(app.show_help);
-        assert_eq!(app.help_scroll, 0);
-    }
-
-    #[cfg(feature = "agent")]
-    #[test]
-    fn help_opens_in_agents_context() {
-        let mut app = make_test_app(1);
-        let root = PathBuf::from(".");
-        let config = Config::default();
-        app.view_mode = ViewMode::Agents;
         app.help_scroll = 7;
 
         app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &root, &config);

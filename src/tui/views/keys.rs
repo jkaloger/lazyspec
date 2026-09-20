@@ -2,9 +2,6 @@ use crate::engine::config::Config;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::Path;
 
-#[cfg(feature = "agent")]
-use crate::tui::agent::AgentStatus;
-
 use crate::tui::state::forms::SettingsVariantPicker;
 use crate::tui::state::{App, FieldEditor, FilterField, PreviewTab, ViewMode};
 
@@ -68,10 +65,6 @@ impl App {
         }
         if self.provenance_editor.active {
             return self.handle_provenance_editor_key(code, root, config);
-        }
-        #[cfg(feature = "agent")]
-        if self.agent_dialog.active {
-            return self.handle_agent_dialog_key(code, config);
         }
         if self.search_mode {
             return self.handle_search_key(code, modifiers);
@@ -227,231 +220,6 @@ impl App {
         }
     }
 
-    /// Open the template-driven agent dialog for the selected doc (RFC-046 slice
-    /// 4). Lists one entry per prompt template resolved for the doc's type, plus a
-    /// Custom entry. Opens nothing when the type exposes no agents (AC7).
-    #[cfg(feature = "agent")]
-    fn open_agent_dialog(&mut self, config: &Config) {
-        use crate::tui::state::forms::{AgentAction, AgentDialog};
-
-        let doc = match self.selected_doc_meta() {
-            Some(d) => d,
-            None => return,
-        };
-        let doc_type = doc.doc_type.as_str().to_string();
-        let doc_path = doc.path.clone();
-        let doc_title = doc.title.clone();
-
-        let type_agents = config
-            .type_by_name(&doc_type)
-            .map(|t| t.agents.clone())
-            .unwrap_or_default();
-
-        let loaded_names: Vec<String> = self.agent_prompts.iter().map(|p| p.name.clone()).collect();
-        let resolved = crate::engine::agent::resolve_agent_actions(&type_agents, &loaded_names);
-
-        // AC5: interactive templates are offered ONLY when `[agents] interactive`
-        // is configured (zero-defaults). Headless templates are always included.
-        let interactive_available = config.agents.interactive.is_some();
-
-        let mut actions: Vec<AgentAction> = resolved
-            .actions
-            .iter()
-            .filter_map(|name| {
-                self.agent_prompts
-                    .iter()
-                    .find(|p| &p.name == name)
-                    .cloned()
-                    .map(AgentAction::Template)
-            })
-            .filter(|action| match action {
-                AgentAction::Template(p) => {
-                    interactive_available || p.mode != crate::engine::prompt::RunMode::Interactive
-                }
-                AgentAction::Custom => true,
-            })
-            .collect();
-
-        if !type_agents.is_empty() {
-            actions.push(AgentAction::Custom);
-        }
-
-        // AC7: no resolvable actions (type exposes no agents) -> open nothing.
-        if actions.is_empty() {
-            return;
-        }
-
-        self.agent_dialog = AgentDialog {
-            active: true,
-            selected_index: 0,
-            actions,
-            missing: resolved.missing,
-            doc_path,
-            doc_title,
-            text_input: None,
-        };
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agent_dialog_key(&mut self, code: KeyCode, config: &Config) {
-        use crate::tui::state::forms::AgentAction;
-
-        if self.agent_dialog.text_input.is_some() {
-            self.handle_agent_text_input_key(code);
-            return;
-        }
-
-        match code {
-            KeyCode::Esc => {
-                self.agent_dialog.active = false;
-            }
-            KeyCode::Up => {
-                if self.agent_dialog.selected_index > 0 {
-                    self.agent_dialog.selected_index -= 1;
-                } else {
-                    self.agent_dialog.selected_index =
-                        self.agent_dialog.actions.len().saturating_sub(1);
-                }
-            }
-            KeyCode::Down => {
-                if self.agent_dialog.actions.is_empty() {
-                    return;
-                }
-                self.agent_dialog.selected_index =
-                    (self.agent_dialog.selected_index + 1) % self.agent_dialog.actions.len();
-            }
-            KeyCode::Enter => {
-                let action = match self
-                    .agent_dialog
-                    .actions
-                    .get(self.agent_dialog.selected_index)
-                    .cloned()
-                {
-                    Some(a) => a,
-                    None => return,
-                };
-
-                match action {
-                    AgentAction::Custom => {
-                        // Full Custom spawn is the next unit; just open the input.
-                        self.agent_dialog.text_input = Some(String::new());
-                    }
-                    AgentAction::Template(prompt) => {
-                        use crate::engine::prompt::RunMode;
-                        match prompt.mode {
-                            RunMode::Headless => {
-                                // Existing slice-4 path (AgentSpawner/AgentRunner, records AgentRecord).
-                                let doc_path = self.agent_dialog.doc_path.clone();
-                                let doc_title = self.agent_dialog.doc_title.clone();
-                                self.agent_dialog.active = false;
-
-                                let doc = match self.store.get(&doc_path).cloned() {
-                                    Some(d) => d,
-                                    None => return,
-                                };
-
-                                let ctx = match crate::engine::prompt::build_render_context(
-                                    &self.store,
-                                    &doc,
-                                    &*self.fs,
-                                ) {
-                                    Ok(c) => c,
-                                    Err(_) => return,
-                                };
-
-                                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
-                                    Ok(r) => r,
-                                    Err(_) => return,
-                                };
-
-                                let full_path = self.store.root.join(&doc_path);
-                                let _ = self.agent_spawner.spawn(
-                                    &rendered,
-                                    prompt.allowed_tools.as_deref(),
-                                    &full_path,
-                                    &doc_title,
-                                    &prompt.name,
-                                );
-                            }
-                            RunMode::Interactive => {
-                                // Render the tmpl body for the doc (slice-2 render entrypoint).
-                                let doc_path = self.agent_dialog.doc_path.clone();
-                                let doc = match self.store.get(&doc_path).cloned() {
-                                    Some(d) => d,
-                                    None => return,
-                                };
-                                let ctx = match crate::engine::prompt::build_render_context(
-                                    &self.store,
-                                    &doc,
-                                    &*self.fs,
-                                ) {
-                                    Ok(c) => c,
-                                    Err(_) => return,
-                                };
-                                let rendered = match crate::engine::prompt::render(&prompt, &ctx) {
-                                    Ok(r) => r,
-                                    Err(_) => return,
-                                };
-                                self.agent_dialog.active = false;
-                                self.interactive_request =
-                                    Some(crate::tui::state::forms::InteractiveRequest {
-                                        cmd: config.agents.interactive.clone().unwrap(),
-                                        prompt: rendered,
-                                        doc_path: self.store.root.join(&doc_path),
-                                    });
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agent_text_input_key(&mut self, code: KeyCode) {
-        let buffer = match self.agent_dialog.text_input.as_mut() {
-            Some(b) => b,
-            None => return,
-        };
-
-        match code {
-            KeyCode::Esc => {
-                self.agent_dialog.text_input = None;
-            }
-            KeyCode::Enter => {
-                let prompt = buffer.clone();
-                let full_path = self.store.root.join(&self.agent_dialog.doc_path);
-                self.agent_dialog.active = false;
-                self.agent_dialog.text_input = None;
-
-                if !prompt.is_empty() {
-                    let doc_title = self.agent_dialog.doc_title.clone();
-                    if let Ok(content) = self.fs.read_to_string(&full_path) {
-                        let full_prompt = format!(
-                            "Here is the document:\n\n{}\n\nUser request: {}",
-                            content, prompt
-                        );
-                        let _ = self.agent_spawner.spawn(
-                            &full_prompt,
-                            None,
-                            &full_path,
-                            &doc_title,
-                            "Custom prompt",
-                        );
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                buffer.push(c);
-            }
-            _ => {}
-        }
-    }
-
     fn handle_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match code {
             KeyCode::Esc => self.exit_search(),
@@ -494,65 +262,6 @@ impl App {
                     .saturating_sub(self.fullscreen_height as u16 / 2);
             }
             (KeyCode::Char('?'), _) => {
-                self.show_help = true;
-                self.help_scroll = 0;
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg(feature = "agent")]
-    fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let record_count = self.agent_spawner.records.len();
-
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            match code {
-                KeyCode::Char('d') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index =
-                        (self.agent_selected_index + jump).min(record_count.saturating_sub(1));
-                }
-                KeyCode::Char('u') => {
-                    let jump = self.doc_list_height / 2;
-                    self.agent_selected_index = self.agent_selected_index.saturating_sub(jump);
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.agent_selected_index =
-                    (self.agent_selected_index + 1).min(record_count.saturating_sub(1));
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.agent_selected_index = self.agent_selected_index.saturating_sub(1);
-            }
-            KeyCode::Char('e') => {
-                if record_count > 0 {
-                    let doc_path = &self.agent_spawner.records[self.agent_selected_index].doc_path;
-                    self.editor_request = Some(self.store.root.join(doc_path));
-                }
-            }
-            KeyCode::Char('r') => {
-                if record_count > 0 {
-                    let record = &self.agent_spawner.records[self.agent_selected_index];
-                    if record.status != AgentStatus::Running {
-                        self.resume_request = Some(record.session_id.clone());
-                    }
-                }
-            }
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('`') => {
-                self.cycle_mode();
-            }
-            KeyCode::Char('5') => {
-                self.enter_settings();
-            }
-            KeyCode::Char('?') => {
                 self.show_help = true;
                 self.help_scroll = 0;
             }
@@ -1066,7 +775,6 @@ impl App {
         }
     }
 
-    #[cfg_attr(not(feature = "agent"), allow(unused_variables))]
     fn handle_normal_key(
         &mut self,
         code: KeyCode,
@@ -1078,8 +786,6 @@ impl App {
             ViewMode::Filters => return self.handle_filters_key(code, modifiers, root, config),
             ViewMode::Graph => return self.handle_graph_key(code, modifiers, root, config),
             ViewMode::Settings => return self.handle_settings_key(code, modifiers, root, config),
-            #[cfg(feature = "agent")]
-            ViewMode::Agents => return self.handle_agents_key(code, modifiers),
             _ => {}
         }
 
@@ -1184,10 +890,6 @@ impl App {
             }
             (KeyCode::Char('R'), _) => {
                 self.config_reload_request = true;
-            }
-            #[cfg(feature = "agent")]
-            (KeyCode::Char('a'), _) => {
-                self.open_agent_dialog(config);
             }
             _ => {}
         }
