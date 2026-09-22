@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/jkaloger/lazyspec/compare/v0.12.2...v0.13.0) - 2026-09-20
+
+### Added
+
+- wiki sync action ([#104](https://github.com/jkaloger/lazyspec/pull/104))
+
+### Other
+
+- [**breaking**] delete web and app views
+- workflow dispatch
+- dont validate wiki sync
+- mark rfc for review
+
 ### Removed
 
 - Web view, native macOS app, and agent subsystem (`web`, `app`, `agent` cargo features and their source, deps, and assets), per ADR-037.
