@@ -2,6 +2,7 @@ use lazyspec::engine::config::{
     starter_edges, starter_relationships, starter_types, Config, RelSelector, RelationshipDef,
     Traversal, TypeSelector,
 };
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::Store;
 use std::fs;
 use tempfile::TempDir;
@@ -320,8 +321,17 @@ fn story_context_after_linking(from: &str, relation: &str, to: &str) -> serde_js
     let config = parse_written_config(root);
     let mut store = Store::load(root, &config).unwrap();
     for (doc_type, title) in [("rfc", "a"), ("story", "b")] {
-        lazyspec::cli::create::run(root, &config, &store, doc_type, title, "tester", |_| {})
-            .unwrap();
+        lazyspec::cli::create::run(
+            root,
+            &config,
+            &store,
+            doc_type,
+            title,
+            "tester",
+            &GitCli,
+            |_| {},
+        )
+        .unwrap();
         store = Store::load(root, &config).unwrap();
     }
 

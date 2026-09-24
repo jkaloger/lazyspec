@@ -1,6 +1,7 @@
 use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
+use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::ops::resolve::resolve_shorthand_or_path;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
@@ -8,7 +9,7 @@ use anyhow::Result;
 use std::path::Path;
 
 pub fn run(root: &Path, store: &Store, doc_path: &str) -> Result<PushOutcome> {
-    run_with_config(root, store, doc_path, None)
+    run_with_config(root, store, doc_path, None, &GitCli)
 }
 
 pub fn run_with_config(
@@ -16,6 +17,7 @@ pub fn run_with_config(
     store: &Store,
     doc_path: &str,
     config: Option<&Config>,
+    git: &dyn GitRefOps,
 ) -> Result<PushOutcome> {
     if let Some(config) = config {
         let doc = resolve_shorthand_or_path(store, doc_path)?;
@@ -44,6 +46,15 @@ pub fn run_with_config(
                 let mut registry = crate::engine::store_dispatch::build_registry(root, config);
                 return registry.for_type(type_def)?.delete(type_def, &doc.id);
             }
+
+            crate::engine::fs_ops::delete_document(root, store, doc_path)?;
+            return crate::engine::git_store::commit_if_extends_backed(
+                root,
+                config,
+                type_def,
+                git,
+                &format!("delete {}", doc.id),
+            );
         }
     }
 

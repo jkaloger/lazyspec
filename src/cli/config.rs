@@ -1379,7 +1379,11 @@ inverse = "implemented-by"
             ("spec", "/tmp/x/specs", "/tmp/x/specs"),
             ("shared", "../shared-specs", "/a/shared-specs"),
             ("issue", "docs/issues", "/a/b/.lazyspec/cache/issue"),
-            ("team", "docs/rfcs", "/a/b/.lazyspec/cache/team/docs/rfcs"),
+            (
+                "team",
+                "docs/rfcs",
+                "/a/b/.lazyspec/git/github-com-org-shared-specs-git-0f507c58/docs/rfcs",
+            ),
         ] {
             let ty = type_named(&json, name);
             assert_eq!(ty["dir"], dir, "raw dir survives for {name}");

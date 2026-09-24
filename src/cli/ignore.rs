@@ -3,8 +3,9 @@ use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::git_ref::GitRefOps;
-use crate::engine::git_store::commit_if_git_backed;
+use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::store::Store;
+use crate::engine::store_dispatch::PushOutcome;
 use anyhow::Result;
 use std::path::Path;
 
@@ -15,7 +16,7 @@ pub fn ignore(
     git: &dyn GitRefOps,
     doc_path: &str,
     fs: &dyn FileSystem,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, doc_path)?;
     let full_path = root.join(&resolved);
     rewrite_frontmatter(&full_path, fs, |doc| {
@@ -23,7 +24,7 @@ pub fn ignore(
         Ok(())
     })?;
     let id = resolve_to_id(store, doc_path)?;
-    commit_if_git_backed(root, config, &resolved, git, &format!("ignore {id}"))
+    commit_if_git_backed_outcome(root, config, &resolved, git, &format!("ignore {id}"))
 }
 
 pub fn unignore(
@@ -33,7 +34,7 @@ pub fn unignore(
     git: &dyn GitRefOps,
     doc_path: &str,
     fs: &dyn FileSystem,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let resolved = resolve_to_path(store, doc_path)?;
     let full_path = root.join(&resolved);
     rewrite_frontmatter(&full_path, fs, |doc| {
@@ -43,5 +44,5 @@ pub fn unignore(
         Ok(())
     })?;
     let id = resolve_to_id(store, doc_path)?;
-    commit_if_git_backed(root, config, &resolved, git, &format!("unignore {id}"))
+    commit_if_git_backed_outcome(root, config, &resolved, git, &format!("unignore {id}"))
 }

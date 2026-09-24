@@ -76,6 +76,24 @@ pub fn sync_indicator_text(elapsed_secs: u64, cache_ttl: u64) -> (String, Color)
     (label, color)
 }
 
+/// The header's unpushed-commit indicator (BUG-032 AC7): `None` hides it --
+/// nothing to push, so nothing renders -- and `Some` carries the arrow badge
+/// text for a positive count.
+pub fn unpushed_indicator_text(unpushed_count: usize) -> Option<String> {
+    if unpushed_count == 0 {
+        return None;
+    }
+    Some(format!("↑{} ", unpushed_count))
+}
+
+/// Whether the header shows the push spinner or the `↑n` badge (BUG-032 F2):
+/// gated on the count/spinner alone, never on a `git` type being configured
+/// -- `unpushed_count` also covers a URL-`extends` clone with no `git` type
+/// at all, so that project's push activity must still surface here.
+pub fn push_badge_visible(unpushed_count: usize, push_in_flight: bool) -> bool {
+    push_in_flight || unpushed_count > 0
+}
+
 pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
     app.git_status_cache.refresh();
     let palette = StatusPalette::new(
@@ -180,6 +198,32 @@ pub fn draw(f: &mut Frame, app: &mut App, config: &Config) {
             let (text, color) = sync_indicator_text(elapsed, cache_ttl);
             right_spans.push(Span::styled(text, Style::default().fg(color)));
             right_spans.push(Span::raw("  "));
+        }
+    }
+    // Independent of `has_pollable_types`: `has_pollable_types` excludes
+    // `git`/`git-ref` (see `tui::has_pollable_types`), so a project with no
+    // *other* pollable type never schedules a poll at all -- `next_poll`
+    // stays `None` for the life of the session, regardless of whether this
+    // badge shows. `unpushed_count` is still read off local clones with no
+    // network, so it -- and the push spinner -- must show here regardless of
+    // whether the poll countdown does.
+    //
+    // Gated on the count/spinner themselves, not on a `git` type existing:
+    // `unpushed_count` also covers a URL-`extends` clone with no `git` type
+    // configured at all, so a project extending a shared remote still sees
+    // its unpushed commits and its push spinner.
+    let push_in_flight = app.push_in_flight.load(Ordering::Relaxed);
+    if push_badge_visible(app.unpushed_count, push_in_flight) {
+        if push_in_flight {
+            let frame = crate::spinners::spinner("face")
+                .compact(crate::spinners::SpinnerState::Loading, app.frame_idx);
+            right_spans.push(Span::styled(
+                frame.lines[0].clone(),
+                colors::frame_style(frame.colour),
+            ));
+            right_spans.push(Span::raw(" "));
+        } else if let Some(text) = unpushed_indicator_text(app.unpushed_count) {
+            right_spans.push(Span::styled(text, Style::default().fg(Color::Yellow)));
         }
     }
     right_spans.push(Span::styled(
@@ -293,7 +337,9 @@ mod tests {
     use std::path::Path;
 
     use super::panels;
-    use super::{sync_indicator_text, sync_spinner_state};
+    use super::{
+        push_badge_visible, sync_indicator_text, sync_spinner_state, unpushed_indicator_text,
+    };
     use crate::spinners::SpinnerState;
     use std::time::Duration;
 
@@ -655,5 +701,35 @@ mod tests {
         let (text, color) = sync_indicator_text(125, 120);
         assert_eq!(text, "synced 2m ago");
         assert_eq!(color, Color::Yellow);
+    }
+
+    // BUG-032 AC7: hidden at 0, shown once there is something to push.
+    #[test]
+    fn unpushed_indicator_hidden_at_zero() {
+        assert_eq!(unpushed_indicator_text(0), None);
+    }
+
+    #[test]
+    fn unpushed_indicator_shown_when_positive() {
+        assert_eq!(unpushed_indicator_text(3), Some("↑3 ".to_string()));
+    }
+
+    // F2: the header badge is gated on the count/spinner alone -- never on a
+    // `git` type existing -- so a URL-`extends`-only project (no `[[types]]`
+    // entry with `store = "git"`) still sees its unpushed extends-clone
+    // commits and its push spinner.
+    #[test]
+    fn push_badge_hidden_with_nothing_unpushed_and_no_push_in_flight() {
+        assert!(!push_badge_visible(0, false));
+    }
+
+    #[test]
+    fn push_badge_visible_for_an_unpushed_count_alone() {
+        assert!(push_badge_visible(2, false));
+    }
+
+    #[test]
+    fn push_badge_visible_for_a_push_in_flight_alone() {
+        assert!(push_badge_visible(0, true));
     }
 }

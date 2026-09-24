@@ -4,9 +4,9 @@ use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::DocType;
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
-use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
-use crate::engine::git_store::commit_if_git_backed;
+use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::reservation;
@@ -18,6 +18,7 @@ use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: &Path,
     config: &Config,
@@ -25,6 +26,7 @@ pub fn run(
     doc_type: &str,
     title: &str,
     author: &str,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     run_with_body(
@@ -36,6 +38,7 @@ pub fn run(
         author,
         None,
         None,
+        git,
         on_progress,
     )
     .map(|(path, _)| path)
@@ -57,6 +60,7 @@ pub fn run_with_body(
     author: &str,
     parent: Option<&str>,
     body: Option<&str>,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<(PathBuf, PushOutcome)> {
     let type_def = config.type_by_name(doc_type).ok_or_else(|| {
@@ -88,9 +92,8 @@ pub fn run_with_body(
     // too and whose write lands (and commits) inside the parent's clone.
     if let Some(parent_id) = parent {
         return create_with_parent(
-            root, config, store, type_def, title, author, body, parent_id,
-        )
-        .map(|path| (path, PushOutcome::Synced));
+            root, config, store, type_def, title, author, body, parent_id, git,
+        );
     }
 
     if type_def.store == StoreBackend::Git {
@@ -225,7 +228,12 @@ pub fn run_with_body(
         fs_ops::replace_body(&path, body_text)?;
     }
 
-    Ok((path, PushOutcome::Synced))
+    let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+    let id = crate::engine::store::extract_id(&relative);
+    let push_outcome =
+        commit_if_git_backed_outcome(root, config, &relative, git, &format!("create {id}"))?;
+
+    Ok((path, push_outcome))
 }
 
 /// Author a child of `parent_id`, branching on the child type's store.
@@ -251,7 +259,8 @@ fn create_with_parent(
     author: &str,
     body: Option<&str>,
     parent_id: &str,
-) -> Result<PathBuf> {
+    git: &dyn GitRefOps,
+) -> Result<(PathBuf, PushOutcome)> {
     let parent_meta = store
         .resolve_shorthand(parent_id)
         .map_err(|_| anyhow!("could not resolve parent document: {}", parent_id))?;
@@ -310,7 +319,7 @@ fn create_with_parent(
             author,
             body.unwrap_or(""),
         )?;
-        return Ok(root.join(&created.path));
+        return Ok((root.join(&created.path), PushOutcome::Synced));
     }
 
     let parent_path = root.join(&parent_meta.path);
@@ -357,16 +366,18 @@ fn create_with_parent(
 
     // Keyed on the parent's path, not the child's: that is the clone the
     // rename and the new file both landed in, even when child and parent are
-    // two `git` types sharing a remote (RFC-072 "The git store").
-    commit_if_git_backed(
+    // two `git` types sharing a remote (RFC-072 "The git store"). Never
+    // `Synced` for a `git` write (BUG-032 AC2); every other backend reaching
+    // here (e.g. filesystem) has no push concept and is a no-op `Synced`.
+    let push_outcome = commit_if_git_backed_outcome(
         root,
         config,
         &parent_meta.path,
-        &GitCli,
+        git,
         &format!("create child of {parent_id}"),
     )?;
 
-    Ok(child_path)
+    Ok((child_path, push_outcome))
 }
 
 /// Same store, same remote, same branch: the repo two types resolve to, not
@@ -396,7 +407,18 @@ mod tests {
             std::fs::write(&full, contents).unwrap();
         }
         for name in precloned {
-            std::fs::create_dir_all(tmp.path().join(".lazyspec/cache").join(name)).unwrap();
+            let type_def = config
+                .type_by_name(name)
+                .unwrap_or_else(|| panic!("no type named '{name}' in config"));
+            let clone_root = crate::engine::git_store::clone_root(
+                tmp.path(),
+                type_def
+                    .remote
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("type '{name}' has no remote to clone")),
+                type_def.branch.as_deref(),
+            );
+            std::fs::create_dir_all(clone_root).unwrap();
         }
         let store = Store::load(tmp.path(), config).unwrap();
         (tmp, store)
@@ -467,6 +489,7 @@ mod tests {
             "tester",
             None,
             "RFC-001",
+            &GitCli,
         )
         .unwrap_err();
 
@@ -491,7 +514,7 @@ mod tests {
         let child_type_def = config.documents.types[1].clone();
         let (tmp, store) = project(
             &[(
-                ".lazyspec/cache/a/docs/a/A-001-parent.md",
+                ".lazyspec/git/a-git-af7cc265/docs/a/A-001-parent.md",
                 &doc_md("Parent", "a", "[]"),
             )],
             &["b"],
@@ -507,6 +530,7 @@ mod tests {
             "tester",
             None,
             "A-001",
+            &GitCli,
         )
         .unwrap_err();
 
@@ -514,11 +538,13 @@ mod tests {
         assert!(msg.contains("/a.git"), "{msg}");
         assert!(msg.contains("/b.git"), "{msg}");
         assert!(
-            !tmp.path().join(".lazyspec/cache/b/docs/b").exists(),
+            !tmp.path()
+                .join(".lazyspec/git/b-git-5690daa2/docs/b")
+                .exists(),
             "no file written under the child's own cache dir"
         );
         assert_eq!(
-            fs::read_dir(tmp.path().join(".lazyspec/cache/a/docs/a"))
+            fs::read_dir(tmp.path().join(".lazyspec/git/a-git-af7cc265/docs/a"))
                 .unwrap()
                 .count(),
             1,

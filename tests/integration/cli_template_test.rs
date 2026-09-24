@@ -1,6 +1,7 @@
 use lazyspec::cli::show;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::Store;
 use lazyspec::engine::template;
 use lazyspec::tui::content::gfm::{extract_gfm_segments, render_gfm_segments};
@@ -31,9 +32,17 @@ fn created_doc_contains_comments() {
     let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &store, "story", "User Auth", "agent", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "story",
+        "User Auth",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
 
     let body = fs::read_to_string(&path).unwrap();
     assert!(
@@ -57,12 +66,28 @@ fn created_doc_substitutes_type() {
     let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let story =
-        lazyspec::cli::create::run(root, &config, &store, "story", "Slice", "agent", |_| {})
-            .unwrap();
-    let iteration =
-        lazyspec::cli::create::run(root, &config, &store, "iteration", "Build", "agent", |_| {})
-            .unwrap();
+    let story = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "story",
+        "Slice",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
+    let iteration = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "iteration",
+        "Build",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
 
     assert!(fs::read_to_string(&story).unwrap().contains("type: story"));
     assert!(fs::read_to_string(&iteration)
@@ -104,9 +129,17 @@ fn show_json_retains_comments() {
     let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &store, "story", "Json Body", "agent", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "story",
+        "Json Body",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
 
     let store = Store::load(root, &config).unwrap();
     let rel = path
@@ -226,9 +259,17 @@ fn shared_template_override_wins() {
     let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let path =
-        lazyspec::cli::create::run(root, &config, &store, "story", "Override", "agent", |_| {})
-            .unwrap();
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "story",
+        "Override",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
 
     let body = fs::read_to_string(&path).unwrap();
     assert!(
@@ -252,12 +293,28 @@ fn per_type_override_beats_shared() {
     let config = load_config(root);
     let store = Store::load(root, &config).unwrap();
 
-    let story =
-        lazyspec::cli::create::run(root, &config, &store, "story", "Typed", "agent", |_| {})
-            .unwrap();
-    let iteration =
-        lazyspec::cli::create::run(root, &config, &store, "iteration", "Plain", "agent", |_| {})
-            .unwrap();
+    let story = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "story",
+        "Typed",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
+    let iteration = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "iteration",
+        "Plain",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
 
     assert!(fs::read_to_string(&story)
         .unwrap()

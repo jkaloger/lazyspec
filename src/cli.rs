@@ -14,6 +14,7 @@ pub mod link;
 pub mod list;
 pub mod pin;
 pub mod provenance;
+pub mod push;
 pub mod reservations;
 pub mod resolve;
 pub mod search;
@@ -350,6 +351,13 @@ pub enum Commands {
         /// Filter to a single document type
         #[arg(long = "type")]
         doc_type: Option<String>,
+    },
+    /// Publish locally committed `git`-store writes: rebase each shared clone
+    /// onto its remote, then push
+    Push {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Set up a store backend. Bare `setup` runs github-issues auth + fetch;
     /// `setup clickup` captures and stores a ClickUp personal API token.

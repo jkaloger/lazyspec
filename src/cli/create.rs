@@ -1,6 +1,7 @@
 use crate::cli::json::{doc_to_json, merge_push_outcome};
 use crate::engine::config::Config;
 use crate::engine::document::DocMeta;
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use anyhow::Result;
@@ -9,6 +10,7 @@ use std::path::Path;
 
 pub use crate::engine::ops::create::{run, run_with_body};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_json(
     root: &Path,
     config: &Config,
@@ -16,6 +18,7 @@ pub fn run_json(
     doc_type: &str,
     title: &str,
     author: &str,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
     run_json_with_body(
@@ -27,6 +30,7 @@ pub fn run_json(
         author,
         None,
         None,
+        git,
         on_progress,
     )
 }
@@ -41,6 +45,7 @@ pub fn run_json_with_body(
     author: &str,
     parent: Option<&str>,
     body: Option<&str>,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<String> {
     let (path, push_outcome) = run_with_body(
@@ -52,6 +57,7 @@ pub fn run_json_with_body(
         author,
         parent,
         body,
+        git,
         on_progress,
     )?;
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();

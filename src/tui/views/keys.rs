@@ -891,6 +891,9 @@ impl App {
             (KeyCode::Char('R'), _) => {
                 self.config_reload_request = true;
             }
+            (KeyCode::Char('P'), _) => {
+                self.push_request = true;
+            }
             _ => {}
         }
     }

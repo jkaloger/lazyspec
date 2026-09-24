@@ -91,6 +91,19 @@ pub fn run(
         .map(|t| t.name.as_str())
         .collect();
 
+    let (removed_legacy_clones, legacy_clone_warnings) =
+        crate::engine::git_store::migrate_legacy_clones(root, config, git_ref_ops)?;
+    for w in &legacy_clone_warnings {
+        eprintln!("warning: {}", w);
+    }
+    for r in &removed_legacy_clones {
+        eprintln!(
+            "note: removed legacy clone for type `{}`: {}",
+            r.type_name,
+            r.path.display()
+        );
+    }
+
     if gh_types.is_empty()
         && milestone_types.is_empty()
         && git_ref_types.is_empty()
@@ -274,6 +287,13 @@ pub fn run(
                     o.type_name, o.fetched, o.new, o.removed
                 ),
             }
+        }
+        for r in &removed_legacy_clones {
+            println!(
+                "removed legacy clone for type `{}`: {}",
+                r.type_name,
+                r.path.display()
+            );
         }
     }
 

@@ -3,6 +3,7 @@ use lazyspec::cli::json::doc_to_json;
 use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::issue_map::IssueMap;
 use std::fs;
 
@@ -106,6 +107,7 @@ fn update_body_file_matches_create_body_file() {
         "agent",
         None,
         Some(body.as_str()),
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -212,6 +214,7 @@ fn delete_github_milestones_type_routes_to_milestone_branch() {
         &store,
         "MILESTONE-1",
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap_err()
     .to_string();

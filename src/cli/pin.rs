@@ -6,6 +6,7 @@ use crate::engine::fs::FileSystem;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::{parse_refs, Ref};
 use crate::engine::store::{ResolveError, Store};
+use crate::engine::store_dispatch::PushOutcome;
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -91,8 +92,8 @@ pub fn pin_document(
     }
 }
 
-fn json_output(result: &PinResult) -> serde_json::Value {
-    serde_json::json!({
+fn json_output(result: &PinResult, push_outcome: &PushOutcome) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "pinned": result.pinned.iter().map(|p| serde_json::json!({
             "target": p.target,
             "hash": p.hash,
@@ -102,7 +103,9 @@ fn json_output(result: &PinResult) -> serde_json::Value {
             "message": e.message,
         })).collect::<Vec<_>>(),
         "reviewed": result.reviewed,
-    })
+    });
+    crate::cli::json::merge_push_outcome(&mut value, push_outcome);
+    value
 }
 
 /// Stamp `reviewed: <sha>` onto the document's frontmatter, through the YAML
@@ -128,7 +131,7 @@ pub fn run(
     fs: &dyn FileSystem,
     id: &str,
     json: bool,
-) -> Result<()> {
+) -> Result<PushOutcome> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
         Err(ResolveError::Ambiguous { id, matches }) => {
@@ -149,7 +152,7 @@ pub fn run(
                     eprintln!("  {}", m.display());
                 }
             }
-            return Ok(());
+            return Ok(PushOutcome::Synced);
         }
         Err(ResolveError::NotFound(id)) => {
             return Err(anyhow::anyhow!("document not found: {}", id));
@@ -194,7 +197,7 @@ pub fn run(
     }
 
     stamp_reviewed(&full_path, fs, &result.reviewed)?;
-    crate::engine::git_store::commit_if_git_backed(
+    let push_outcome = crate::engine::git_store::commit_if_git_backed_outcome(
         root,
         config,
         &doc.path,
@@ -204,7 +207,10 @@ pub fn run(
 
     // Output results
     if json {
-        println!("{}", serde_json::to_string_pretty(&json_output(&result))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_output(&result, &push_outcome))?
+        );
     } else {
         eprintln!("Reviewed at {}", result.reviewed);
         let pinned_count = result.pinned.len();
@@ -223,9 +229,12 @@ pub fn run(
         for e in &result.errors {
             eprintln!("  error: {}: {}", e.target, e.message);
         }
+        if let Some(warning) = push_outcome.warning() {
+            eprintln!("{}", warning);
+        }
     }
 
-    Ok(())
+    Ok(push_outcome)
 }
 
 /// Find the byte offset where the body starts (after the frontmatter closing delimiter and its newline).
@@ -460,11 +469,11 @@ mod tests {
         store.resolve_shorthand("RFC-001").unwrap().reviewed.clone()
     }
 
-    fn pin_rfc(root: &Path, git: &dyn GitRefOps) -> Result<()> {
+    fn pin_rfc(root: &Path, git: &dyn GitRefOps) -> Result<PushOutcome> {
         pin_rfc_with(root, git, &Config::default())
     }
 
-    fn pin_rfc_with(root: &Path, git: &dyn GitRefOps, config: &Config) -> Result<()> {
+    fn pin_rfc_with(root: &Path, git: &dyn GitRefOps, config: &Config) -> Result<PushOutcome> {
         let store = Store::load(root, config).unwrap();
         run(
             &store,
@@ -544,7 +553,10 @@ mod tests {
             FAKE_HEAD,
         );
 
-        assert_eq!(json_output(&result)["reviewed"], FAKE_HEAD);
+        assert_eq!(
+            json_output(&result, &PushOutcome::Synced)["reviewed"],
+            FAKE_HEAD
+        );
     }
 
     /// The sha `reviewed` carries is diffed against in `[governs] root` by

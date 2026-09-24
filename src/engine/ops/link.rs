@@ -10,7 +10,7 @@ use crate::engine::gh::{
 use crate::engine::gh_subissue::{ADD_SUB_ISSUE_MUTATION, REMOVE_SUB_ISSUE_MUTATION};
 use crate::engine::git_ref::GitCli;
 use crate::engine::git_ref_store::GitRefStore;
-use crate::engine::git_store::commit_if_git_backed;
+use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::ops::resolve::{resolve_to_id, resolve_to_path};
@@ -166,14 +166,19 @@ fn link_inner<
         Ok(())
     })?;
 
-    let push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
-    commit_if_git_backed(
+    let mut push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+    let git_outcome = commit_if_git_backed_outcome(
         root,
         config,
         &resolved_from,
         &GitCli,
         &format!("link {from_id}"),
     )?;
+    // A doc is git-ref-backed or git-backed, never both, so whichever call
+    // actually touched a clone is the outcome that matters.
+    if !git_outcome.is_synced() {
+        push_outcome = git_outcome;
+    }
 
     // ClickUp-backed docs persist relations by serializing the doc's complete
     // relation set (now mirrored into the cache above) into the configured text
@@ -761,14 +766,17 @@ fn unlink_inner<
         Ok(())
     })?;
 
-    let push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
-    commit_if_git_backed(
+    let mut push_outcome = push_if_git_ref_backed(root, &resolved_from, Some(config))?;
+    let git_outcome = commit_if_git_backed_outcome(
         root,
         config,
         &resolved_from,
         &GitCli,
         &format!("unlink {from_id}"),
     )?;
+    if !git_outcome.is_synced() {
+        push_outcome = git_outcome;
+    }
 
     // Unlink is the same full-replace write as link: the edge was dropped from
     // the cache above, so re-serializing the doc's remaining relations and
@@ -823,24 +831,9 @@ fn push_if_clickup_backed<C: ClickupClient>(
         None => return Ok(()),
     };
 
-    if !doc_path.starts_with(".lazyspec/cache/") {
+    let Some(type_def) = crate::engine::store::type_for_cache_path(config, doc_path) else {
         return Ok(());
-    }
-
-    let type_name = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+    };
 
     if type_def.store != StoreBackend::ClickupTasks {
         return Ok(());
@@ -855,7 +848,7 @@ fn push_if_clickup_backed<C: ClickupClient>(
                 "type '{}' is clickup-tasks but has no '{}' entry in \
                  clickup_custom_field_map; add the ClickUp text custom field id to \
                  persist relations",
-                type_name,
+                type_def.name,
                 CLICKUP_RELATIONS_FIELD
             )
         })?
@@ -915,25 +908,9 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql + Send + '
         None => return Ok(()),
     };
 
-    if !doc_path.starts_with(".lazyspec/cache/") {
+    let Some(type_def) = crate::engine::store::type_for_cache_path(config, doc_path) else {
         return Ok(());
-    }
-
-    // Extract type name from cache path: .lazyspec/cache/<type_name>/...
-    let type_name = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+    };
 
     if type_def.store != StoreBackend::GithubIssues {
         return Ok(());
@@ -942,13 +919,13 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql + Send + '
     let gh_config = config.documents.github.as_ref().ok_or_else(|| {
         anyhow!(
             "type '{}' uses github-issues store but no [github] config found",
-            type_name
+            type_def.name
         )
     })?;
     let repo = gh_config.repo.as_ref().ok_or_else(|| {
         anyhow!(
             "type '{}' uses github-issues store but no github.repo configured",
-            type_name
+            type_def.name
         )
     })?;
 
@@ -988,24 +965,9 @@ fn push_if_git_ref_backed(
         None => return Ok(PushOutcome::Synced),
     };
 
-    if !doc_path.starts_with(".lazyspec/cache/") {
+    let Some(type_def) = crate::engine::store::type_for_cache_path(config, doc_path) else {
         return Ok(PushOutcome::Synced);
-    }
-
-    let type_name = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+    };
 
     if type_def.store != StoreBackend::GitRef {
         return Ok(PushOutcome::Synced);

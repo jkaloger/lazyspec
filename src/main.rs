@@ -160,6 +160,10 @@ fn main() -> anyhow::Result<()> {
                 json,
             )?;
         }
+        Some(Commands::Push { json }) => {
+            let git_ref_ops = GitCli;
+            lazyspec::cli::push::run(&cwd, &config, &git_ref_ops, json)?;
+        }
         Some(Commands::Setup { command }) => match command {
             None => {
                 let gh = GhCli::new();
@@ -193,6 +197,7 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
+                    &GitCli,
                     |p| {
                         if let Some(pb) = &pb {
                             pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
@@ -219,6 +224,7 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
+                    &GitCli,
                     |p| {
                         if let Some(pb) = &pb {
                             pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
@@ -342,8 +348,13 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Delete { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            let push_outcome =
-                lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
+            let push_outcome = lazyspec::cli::delete::run_with_config(
+                &cwd,
+                &store,
+                &path,
+                Some(&config),
+                &GitCli,
+            )?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
                 let mut out = serde_json::json!({
@@ -485,35 +496,45 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Ignore { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::ignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
+            let push_outcome =
+                lazyspec::cli::ignore::ignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "action": "ignored",
                     "id": id,
                     "path": resolved.to_string_lossy(),
                     "validate_ignore": true,
                 });
+                lazyspec::cli::json::merge_push_outcome(&mut out, &push_outcome);
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!("Ignoring {}", resolved.display());
+                if let Some(warning) = push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Unignore { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            lazyspec::cli::ignore::unignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
+            let push_outcome =
+                lazyspec::cli::ignore::unignore(&cwd, &store, &config, &GitCli, &path, &fs)?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "action": "unignored",
                     "id": id,
                     "path": resolved.to_string_lossy(),
                     "validate_ignore": false,
                 });
+                lazyspec::cli::json::merge_push_outcome(&mut out, &push_outcome);
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!("Unignoring {}", resolved.display());
+                if let Some(warning) = push_outcome.warning() {
+                    eprintln!("{}", warning);
+                }
             }
         }
         Some(Commands::Search {
@@ -530,14 +551,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Status { json }) => {
             let store = load_store(&cwd, &config)?;
+            let git_ref_ops = GitCli;
             if json {
                 let gh = GhCli::new();
                 println!(
                     "{}",
-                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh)
+                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh, &git_ref_ops)
                 );
             } else {
-                let output = lazyspec::cli::status::run_human(&store);
+                let output = lazyspec::cli::status::run_human(&store, &config, &cwd, &git_ref_ops);
                 if output.is_empty() {
                     println!("No documents found.");
                 } else {
@@ -890,24 +912,26 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Govern { command }) => {
             let store = load_store(&cwd, &config)?;
-            let (id, governs, json) = match command {
-                GovernCommand::Add { id, globs, json } => (
-                    id.clone(),
-                    lazyspec::cli::govern::run_add(&store, &config, &GitCli, &fs, &id, &globs)?,
-                    json,
-                ),
-                GovernCommand::Remove { id, globs, json } => (
-                    id.clone(),
-                    lazyspec::cli::govern::run_remove(&store, &config, &GitCli, &fs, &id, &globs)?,
-                    json,
-                ),
+            let (id, governs, push_outcome, json) = match command {
+                GovernCommand::Add { id, globs, json } => {
+                    let (governs, push_outcome) =
+                        lazyspec::cli::govern::run_add(&store, &config, &GitCli, &fs, &id, &globs)?;
+                    (id.clone(), governs, push_outcome, json)
+                }
+                GovernCommand::Remove { id, globs, json } => {
+                    let (governs, push_outcome) = lazyspec::cli::govern::run_remove(
+                        &store, &config, &GitCli, &fs, &id, &globs,
+                    )?;
+                    (id.clone(), governs, push_outcome, json)
+                }
                 GovernCommand::List { id, json } => (
                     id.clone(),
                     lazyspec::cli::govern::run_list(&store, &id)?,
+                    lazyspec::engine::store_dispatch::PushOutcome::Synced,
                     json,
                 ),
             };
-            lazyspec::cli::govern::print(&id, &governs, json)?;
+            lazyspec::cli::govern::print(&id, &governs, &push_outcome, json)?;
         }
         Some(Commands::Provenance { command }) => {
             let store = load_store(&cwd, &config)?;

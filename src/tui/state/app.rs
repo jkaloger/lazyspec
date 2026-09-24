@@ -370,6 +370,13 @@ pub enum AppEvent {
         warnings: Vec<String>,
     },
     GhPushResult(Result<(), String>),
+    /// A `git`-store external-edit save committed to its clone (BUG-032 AC2):
+    /// lighter than `GhPushResult(Ok(()))` since only the header's unpushed
+    /// count needs a refresh, not a full store reload.
+    GitCommitted,
+    /// The manual `push` keybind's background push finished (BUG-032 AC7):
+    /// one entry per shared git clone `engine::ops::push::run` visited.
+    PushResult(Vec<crate::engine::ops::push::CloneResult>),
 }
 
 fn update_tags(
@@ -389,13 +396,14 @@ fn update_tags(
         Ok(())
     })?;
     let id = crate::engine::store::extract_id(relative);
-    crate::engine::git_store::commit_if_git_backed(
+    crate::engine::git_store::commit_if_git_backed_outcome(
         root,
         config,
         relative,
         &crate::engine::git_ref::GitCli,
         &format!("tag {id}"),
     )
+    .map(|_| ())
 }
 
 pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {
@@ -729,6 +737,20 @@ pub struct App {
     /// Mirror of the event loop's local `refresh_in_flight` atomic, refreshed
     /// each frame so the header sync face can reflect an in-flight poll.
     pub refresh_in_flight: bool,
+    /// Every existing shared git clone's `unpushed` commit count, summed
+    /// (BUG-032 AC7). Read-only from the render path -- `recompute_unpushed_count`
+    /// is the only writer, called after a local git write, a `push`, or a poll
+    /// that rebased a clone, never from `draw`.
+    pub unpushed_count: usize,
+    /// True while the manual `push` keybind's background push is running
+    /// (BUG-032 AC7), so the header can show a loading spinner in its place.
+    /// Distinct from `gh_push_in_flight`, which tracks the editor's
+    /// push-on-save for `github-issues`.
+    pub push_in_flight: Arc<AtomicBool>,
+    /// Set by the `push` keybind; the run loop drains it and spawns the
+    /// background push (BUG-032 AC7), mirroring `fix_request`/
+    /// `config_reload_request`.
+    pub push_request: bool,
     pub last_sync: Option<Instant>,
     pub gh_issue_map_stale: bool,
     pub status_bar_enabled: bool,
@@ -890,6 +912,9 @@ impl App {
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
+            unpushed_count: 0,
+            push_in_flight: Arc::new(AtomicBool::new(false)),
+            push_request: false,
             last_sync: if crate::tui::has_pollable_types(config) {
                 Some(Instant::now())
             } else {
@@ -971,6 +996,22 @@ impl App {
     pub fn refresh_validation(&mut self, config: &Config) {
         self.fold_validation(config);
         self.request_stale_findings(config);
+    }
+
+    /// Sums `unpushed` over every existing shared git clone (BUG-032 AC7),
+    /// through `self.git` -- `unpushed` reads the local ahead-count against
+    /// the clone's remote-tracking ref and never fetches, so this never
+    /// touches the network. A clone that has not been cloned to disk yet
+    /// contributes nothing (nothing local to be ahead of); a clone whose
+    /// count cannot be read the same. Call after a local git write, a
+    /// `push`, or a poll that rebased a clone -- never from the render path.
+    pub fn recompute_unpushed_count(&mut self, config: &Config) {
+        let root = self.store.root().to_path_buf();
+        self.unpushed_count = crate::engine::ops::push::distinct_clones(&root, config)
+            .into_iter()
+            .filter(crate::engine::ops::push::CloneGroup::exists)
+            .filter_map(|clone| self.git.unpushed(&clone.path, clone.branch.as_deref()).ok())
+            .sum();
     }
 
     /// Everything the panel shows, rebuilt from the cheap rules plus the
@@ -2858,6 +2899,7 @@ impl App {
                         &doc_type_str,
                         &title,
                         &author,
+                        &crate::engine::git_ref::GitCli,
                         |p| {
                             let message = match &p {
                                 ReservationProgress::QueryingRemote => {
@@ -2937,6 +2979,7 @@ impl App {
             &doc_type_str,
             &title,
             &author,
+            &crate::engine::git_ref::GitCli,
             |_| {},
         )?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
@@ -2982,6 +3025,7 @@ impl App {
 
         self.close_create_form();
         self.gh_issue_map_stale = true;
+        self.recompute_unpushed_count(config);
         Ok(())
     }
 
@@ -3019,6 +3063,7 @@ impl App {
             &self.store,
             &doc_path_str,
             Some(config),
+            &*self.git,
         )?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;
@@ -3026,6 +3071,7 @@ impl App {
         self.close_delete_confirm();
         self.build_doc_tree();
         self.clamp_selected_doc();
+        self.recompute_unpushed_count(config);
         Ok(())
     }
 
@@ -3352,6 +3398,7 @@ impl App {
         self.build_doc_tree();
         self.status_picker.error = None;
         self.close_status_picker();
+        self.recompute_unpushed_count(config);
         Ok(())
     }
 
@@ -3522,6 +3569,7 @@ impl App {
         self.filtered_docs_cache = None;
         self.build_doc_tree();
         self.close_provenance_editor();
+        self.recompute_unpushed_count(config);
         Ok(())
     }
 
@@ -3636,6 +3684,7 @@ impl App {
         self.build_doc_tree();
         self.link_editor.error = None;
         self.close_link_editor();
+        self.recompute_unpushed_count(config);
         Ok(())
     }
 
@@ -3750,7 +3799,7 @@ impl App {
                 "search_mode={} fullscreen_doc={} should_quit={} preview_tab={:?} ",
                 "filter_focused={:?} filter_status={:?} filter_tag={:?} selected_relation={} ",
                 "expanded_len={} expanded={:?} ",
-                "editor_request={} open_request={} open_message={} config_reload_request={} fix_request={} ",
+                "editor_request={} open_request={} open_message={} config_reload_request={} fix_request={} push_request={} ",
                 "create_form.active={} create_form.field={:?} create_form.title={} ",
                 "create_form.author={} create_form.tags={} create_form.related={} ",
                 "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
@@ -3791,6 +3840,7 @@ impl App {
             self.open_message.is_some(),
             self.config_reload_request,
             self.fix_request,
+            self.push_request,
             self.create_form.active,
             self.create_form.focused_field,
             self.create_form.title,
@@ -3967,6 +4017,9 @@ pub(crate) mod parity_seed {
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
+            unpushed_count: 0,
+            push_in_flight: Arc::new(AtomicBool::new(false)),
+            push_request: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
@@ -4391,6 +4444,9 @@ mod tests {
             gh_conflict_message: None,
             gh_push_in_flight: Arc::new(AtomicBool::new(false)),
             refresh_in_flight: false,
+            unpushed_count: 0,
+            push_in_flight: Arc::new(AtomicBool::new(false)),
+            push_request: false,
             last_sync: None,
             gh_issue_map_stale: false,
             status_bar_enabled: true,
@@ -4834,6 +4890,20 @@ mod tests {
         app.validation_warnings = vec!["warn1".to_string()];
 
         assert_eq!(app.total_warnings_count(), 3);
+    }
+
+    // BUG-032 AC7: `P` in Types requests the manual push the run loop drains
+    // (mirrors `config_reload_request`'s `R`).
+    #[test]
+    fn types_p_requests_a_push() {
+        let mut app = make_test_app(0);
+        let root = std::path::PathBuf::from(".");
+        let config = Config::default();
+        assert!(!app.push_request);
+
+        app.handle_key(KeyCode::Char('P'), KeyModifiers::NONE, &root, &config);
+
+        assert!(app.push_request);
     }
 
     #[test]
@@ -6236,6 +6306,62 @@ mod tests {
         assert_eq!(staleness.band, Band::Stale);
         assert_eq!(staleness.drift.files, 12);
         assert_eq!(staleness.anchor, Anchor::Sha("abc1234".to_string()));
+    }
+
+    // BUG-032 AC7: the header's unpushed count sums `unpushed` over every
+    // shared clone that already exists on disk, through `self.git` -- never
+    // fetching, so this is safe to call outside a poll.
+    // A git type's clone path is separate from the config the App's own
+    // `Store` was loaded with, so `app` is built over the plain default
+    // config (no `git` types -- `Store::load` never clones anything) while
+    // `recompute_unpushed_count` is called with a second config that
+    // declares the `git` type. Only the clone path (derived from `tmp`,
+    // shared by both configs) and the mock ops need to agree.
+    #[test]
+    fn recompute_unpushed_count_sums_across_existing_clones() {
+        use crate::engine::config::TypeDef;
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let (tmp, mut app) = app_with_store_config(&[], &Config::default());
+        let mut git_config = Config::default();
+        git_config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some("https://example.com/specs.git".to_string()),
+            branch: Some("next".to_string()),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+        }];
+        let clone_path = crate::engine::ops::push::distinct_clones(tmp.path(), &git_config)[0]
+            .path
+            .clone();
+        std::fs::create_dir_all(&clone_path).unwrap();
+        app.git = Box::new(MockGitRefClient::new().with_unpushed_result(Ok(3)));
+
+        app.recompute_unpushed_count(&git_config);
+
+        assert_eq!(app.unpushed_count, 3);
+    }
+
+    // A clone never cloned to disk has nothing local to be ahead of, so it
+    // contributes nothing -- the count must not spuriously ask git about a
+    // clone `push` would skip too (`CloneGroup::exists`).
+    #[test]
+    fn recompute_unpushed_count_ignores_a_clone_never_cloned_to_disk() {
+        use crate::engine::config::TypeDef;
+        use crate::engine::git_ref::test_support::MockGitRefClient;
+
+        let (_tmp, mut app) = app_with_store_config(&[], &Config::default());
+        let mut git_config = Config::default();
+        git_config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some("https://example.com/specs.git".to_string()),
+            branch: Some("next".to_string()),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+        }];
+        app.git = Box::new(MockGitRefClient::new().with_unpushed_result(Ok(3)));
+
+        app.recompute_unpushed_count(&git_config);
+
+        assert_eq!(app.unpushed_count, 0);
     }
 
     // AC: the characters that matched are visually highlighted in the rendered

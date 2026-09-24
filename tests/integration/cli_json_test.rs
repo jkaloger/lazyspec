@@ -1,4 +1,5 @@
 use lazyspec::cli::json::doc_to_json;
+use lazyspec::engine::git_ref::GitCli;
 
 fn setup() -> (crate::common::TestFixture, lazyspec::engine::store::Store) {
     let fixture = crate::common::TestFixture::new();
@@ -101,6 +102,7 @@ fn create_json_output() {
         "rfc",
         "New Feature",
         "jkaloger",
+        &GitCli,
         |_| {},
     )
     .unwrap();

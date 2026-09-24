@@ -362,6 +362,7 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                     bind!("r", "Relation", [k(KeyCode::Char('r'))]),
                     bind!("p", "Provenance", [k(KeyCode::Char('p'))]),
                     bind!("R", "Reload config", [k(KeyCode::Char('R'))]),
+                    bind!("P", "Push git stores", [k(KeyCode::Char('P'))]),
                 ],
             },
             KeybindGroup {

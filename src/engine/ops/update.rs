@@ -150,14 +150,14 @@ pub fn run_with_config(
                     .update(type_def, &doc.id, updates);
             }
 
-            return fs_ops::update_document_with_type(
+            fs_ops::update_document_with_type(root, store, doc_path, updates, Some(type_def))?;
+            return crate::engine::git_store::commit_if_extends_backed(
                 root,
-                store,
-                doc_path,
-                updates,
-                Some(type_def),
-            )
-            .map(|_| PushOutcome::Synced);
+                config,
+                type_def,
+                git,
+                &format!("update {}", doc.id),
+            );
         }
     }
 

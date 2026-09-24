@@ -1,4 +1,5 @@
 use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::template;
 use std::fs;
 
@@ -58,6 +59,7 @@ TODO: Describe the proposal.
         "rfc",
         "Event Sourcing",
         "jkaloger",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -91,6 +93,7 @@ fn create_auto_increments_number() {
         "rfc",
         "New Feature",
         "a",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -121,6 +124,7 @@ fn create_with_date_pattern() {
         "rfc",
         "My Feature",
         "a",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -141,6 +145,7 @@ fn create_uses_default_template_when_custom_missing() {
         "story",
         "API Design",
         "jkaloger",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -164,6 +169,7 @@ fn create_uses_generic_default_template() {
         "iteration",
         "Auth Impl 1",
         "agent",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -188,6 +194,7 @@ fn create_unknown_type_returns_error_with_valid_types() {
         "foobar",
         "Test",
         "a",
+        &GitCli,
         |_| {},
     );
     let err = result.unwrap_err().to_string();
@@ -221,6 +228,7 @@ fn create_github_milestones_type_routes_to_milestone_branch() {
         "milestone",
         "v1.0",
         "author",
+        &GitCli,
         |_| {},
     );
 
@@ -259,6 +267,7 @@ fn singleton_create_first_succeeds() {
         "convention",
         "Code Style",
         "alice",
+        &GitCli,
         |_| {},
     );
     assert!(
@@ -289,6 +298,7 @@ fn singleton_create_second_fails() {
         "convention",
         "Code Style",
         "alice",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -302,6 +312,7 @@ fn singleton_create_second_fails() {
         "convention",
         "Another Convention",
         "bob",
+        &GitCli,
         |_| {},
     );
 
@@ -334,6 +345,7 @@ fn create_with_body_sets_content() {
         "agent",
         None,
         Some(body_content),
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -372,6 +384,7 @@ fn create_with_body_file_sets_content() {
         "agent",
         None,
         Some(body_content.as_str()),
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -414,6 +427,7 @@ fn non_singleton_create_multiple_succeeds() {
         "rfc",
         "First RFC",
         "alice",
+        &GitCli,
         |_| {},
     );
     assert!(
@@ -430,6 +444,7 @@ fn non_singleton_create_multiple_succeeds() {
         "rfc",
         "Second RFC",
         "bob",
+        &GitCli,
         |_| {},
     );
     assert!(
@@ -456,6 +471,7 @@ fn create_json_filesystem_reports_synced_true_no_warnings() {
         "rfc",
         "Synced RFC",
         "agent",
+        &GitCli,
         |_| {},
     )
     .unwrap();

@@ -16,6 +16,10 @@ fn setup() -> (crate::common::TestFixture, lazyspec::engine::store::Store) {
     (fixture, store)
 }
 
+fn no_git() -> lazyspec::engine::git_ref::test_support::MockGitRefClient {
+    lazyspec::engine::git_ref::test_support::MockGitRefClient::new()
+}
+
 #[test]
 fn status_json_has_documents_and_validation() {
     let (fixture, store) = setup();
@@ -24,6 +28,7 @@ fn status_json_has_documents_and_validation() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -31,6 +36,10 @@ fn status_json_has_documents_and_validation() {
     assert!(parsed["validation"].is_object());
     assert!(parsed["validation"]["errors"].is_array());
     assert!(parsed["validation"]["warnings"].is_array());
+    assert!(
+        parsed["git_stores"].is_array(),
+        "git_stores is always present, even with no `git` type configured"
+    );
 }
 
 #[test]
@@ -41,6 +50,7 @@ fn status_json_includes_all_documents() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -61,6 +71,7 @@ fn status_json_documents_use_full_schema() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -85,6 +96,7 @@ fn status_json_documents_have_attributes() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -100,8 +112,9 @@ fn status_json_documents_have_attributes() {
 
 #[test]
 fn status_human_grouped_by_type() {
-    let (_fixture, store) = setup();
-    let output = lazyspec::cli::status::run_human(&store);
+    let (fixture, store) = setup();
+    let output =
+        lazyspec::cli::status::run_human(&store, &fixture.config(), fixture.root(), &no_git());
 
     assert!(output.contains("RFC"));
     assert!(output.contains("STORY"));
@@ -126,6 +139,7 @@ fn status_json_includes_parse_errors() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -146,11 +160,18 @@ fn status_empty_project() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     );
     let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
     assert_eq!(parsed["documents"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        parsed["git_stores"].as_array().unwrap().len(),
+        0,
+        "git_stores is always present, empty when no `git` type is configured"
+    );
 
-    let human_output = lazyspec::cli::status::run_human(&store);
+    let human_output =
+        lazyspec::cli::status::run_human(&store, &fixture.config(), fixture.root(), &no_git());
     assert!(human_output.is_empty() || human_output.trim().is_empty());
 }
 
@@ -169,6 +190,7 @@ fn status_json_findings_have_the_same_shape_as_validate_json() {
         &fixture.config(),
         fixture.root(),
         &crate::common::NoopGh,
+        &no_git(),
     ))
     .unwrap();
     let validate: serde_json::Value = serde_json::from_str(&lazyspec::cli::validate::run_json(

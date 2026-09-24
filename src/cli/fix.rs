@@ -11,11 +11,12 @@ use crate::engine::fs::FileSystem;
 use crate::engine::store::Store;
 
 use crate::engine::git_ref::GitRefOps;
-use crate::engine::git_store::commit_if_git_backed;
+use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::ops::fix::{
     collect_config_fixes, collect_governs_fixes, plan_field_and_conflict_fixes,
 };
 pub use crate::engine::ops::fix::{ConfigFixResult, GovernsFixResult, ReferenceUpdate};
+use crate::engine::store_dispatch::PushOutcome;
 
 use output::{format_config_human, format_governs_human, format_human};
 use renumber::collect_renumber_output;
@@ -50,20 +51,21 @@ struct RenumberOutput {
 }
 
 /// Commit every document a fix reached when it sits in a `git` type's clone
-/// (STORY-282 AC2). An `Err` is a rejected push with the clone rolled back, so
-/// nothing the plan reports as `written` still is; the caller prints the error
-/// in place of the plan (DICTUM-006).
+/// (STORY-282 AC2), reporting each write's outcome so the caller can merge
+/// them into `--json` (BUG-032 AC1). An `Err` is a rejected push with the
+/// clone rolled back, so nothing the plan reports as `written` still is; the
+/// caller prints the error in place of the plan (DICTUM-006).
 fn commit_written<'a>(
     root: &Path,
     config: &Config,
     git: &dyn GitRefOps,
     paths: impl IntoIterator<Item = &'a str>,
     message: &str,
-) -> anyhow::Result<()> {
-    for path in paths {
-        commit_if_git_backed(root, config, Path::new(path), git, message)?;
-    }
-    Ok(())
+) -> anyhow::Result<Vec<PushOutcome>> {
+    paths
+        .into_iter()
+        .map(|path| commit_if_git_backed_outcome(root, config, Path::new(path), git, message))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -78,22 +80,29 @@ pub fn run(
     fs: &dyn FileSystem,
 ) -> i32 {
     let output = plan_field_and_conflict_fixes(root, store, config, paths, dry_run, fs);
-    if let Err(e) = commit_written(root, config, git, output.written_paths(), "fix") {
-        eprintln!("error: {e:#}");
-        return 1;
-    }
+    let outcomes = match commit_written(root, config, git, output.written_paths(), "fix") {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return 1;
+        }
+    };
     let has_fixes = !output.field_fixes.iter().all(|r| r.fields_added.is_empty())
         || !output.conflict_fixes.is_empty()
         || !output.relation_fixes.is_empty()
         || !output.status_fixes.is_empty();
 
     if json {
-        let json_str = serde_json::to_string_pretty(&output).unwrap();
-        println!("{}", json_str);
+        let mut value = serde_json::to_value(&output).unwrap();
+        crate::cli::json::merge_push_outcomes(&mut value, &outcomes);
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
     } else {
         let human = format_human(&output, dry_run);
         if !human.is_empty() {
             print!("{}", human);
+        }
+        for warning in distinct_warnings(&outcomes) {
+            eprintln!("{warning}");
         }
     }
 
@@ -170,17 +179,25 @@ pub fn run_governs(
         .iter()
         .filter(|r| r.written)
         .map(|r| r.path.as_str());
-    if let Err(e) = commit_written(root, config, git, written, "fix governs") {
-        eprintln!("error: {e:#}");
-        return 1;
-    }
+    let outcomes = match commit_written(root, config, git, written, "fix governs") {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return 1;
+        }
+    };
 
     if json {
-        println!("{}", governs_json(&rewrites));
+        let mut value = serde_json::json!({ "governs": &rewrites });
+        crate::cli::json::merge_push_outcomes(&mut value, &outcomes);
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
     } else {
         let human = format_governs_human(&rewrites, dry_run);
         if !human.is_empty() {
             print!("{}", human);
+        }
+        for warning in distinct_warnings(&outcomes) {
+            eprintln!("{warning}");
         }
     }
 
@@ -193,6 +210,19 @@ pub fn run_governs(
 
 fn governs_json(rewrites: &[GovernsFixResult]) -> String {
     serde_json::to_string_pretty(&serde_json::json!({ "governs": rewrites })).unwrap()
+}
+
+/// Each distinct local-only warning in `outcomes`, once, in first-seen order --
+/// the human-mode counterpart to [`crate::cli::json::merge_push_outcomes`],
+/// which collapses the same clone's repeated warning across several commits.
+fn distinct_warnings(outcomes: &[PushOutcome]) -> Vec<&str> {
+    let mut warnings: Vec<&str> = Vec::new();
+    for warning in outcomes.iter().filter_map(PushOutcome::warning) {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
+    warnings
 }
 
 pub fn run_governs_json(
@@ -233,13 +263,17 @@ pub fn run_renumber(
         std::iter::once(c.new_path.as_str())
             .chain(c.references_updated.iter().map(|u| u.file.as_str()))
     });
-    if let Err(e) = commit_written(root, config, git, written, "fix renumber") {
-        eprintln!("error: {e:#}");
-        return 1;
-    }
+    let outcomes = match commit_written(root, config, git, written, "fix renumber") {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return 1;
+        }
+    };
 
     if json {
-        let wrapper = serde_json::json!({ "renumber": output });
+        let mut wrapper = serde_json::json!({ "renumber": output });
+        crate::cli::json::merge_push_outcomes(&mut wrapper, &outcomes);
         println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
     } else {
         for c in &output.changes {
@@ -283,6 +317,9 @@ pub fn run_renumber(
             for ext in &output.external_references {
                 println!("  {}:{} references {}", ext.file, ext.line, ext.old_name);
             }
+        }
+        for warning in distinct_warnings(&outcomes) {
+            eprintln!("{warning}");
         }
     }
 
