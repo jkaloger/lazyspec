@@ -384,19 +384,29 @@ mod tests {
     use crate::engine::store::Store;
     use tempfile::TempDir;
 
-    /// Docs on disk under a fresh `TempDir`, with an empty `.lazyspec/cache/<name>`
-    /// pre-created for every `git`-typed name in `precloned` -- `Store::load`
+    /// Docs on disk under a fresh `TempDir`, with an empty clone directory
+    /// pre-created for every `git`-typed def in `precloned` -- `Store::load`
     /// clones only when the cache dir is missing, and these tests exercise the
     /// same-repo guard, not a real clone (DICTUM-004: no network in a unit test).
-    fn project(files: &[(&str, &str)], precloned: &[&str], config: &Config) -> (TempDir, Store) {
+    /// Keyed by `git_clone_key`, not the type's name (see that function's doc).
+    fn project(
+        files: &[(&str, &str)],
+        precloned: &[&TypeDef],
+        config: &Config,
+    ) -> (TempDir, Store) {
         let tmp = TempDir::new().unwrap();
         for (rel_path, contents) in files {
             let full = tmp.path().join(rel_path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, contents).unwrap();
         }
-        for name in precloned {
-            std::fs::create_dir_all(tmp.path().join(".lazyspec/cache").join(name)).unwrap();
+        for type_def in precloned {
+            std::fs::create_dir_all(
+                tmp.path()
+                    .join(".lazyspec/cache")
+                    .join(crate::engine::store::git_clone_key(type_def)),
+            )
+            .unwrap();
         }
         let store = Store::load(tmp.path(), config).unwrap();
         (tmp, store)
@@ -454,7 +464,7 @@ mod tests {
         config.documents.types = vec![parent_type, child_type.clone()];
         let (tmp, store) = project(
             &[("docs/rfc/RFC-001-a.md", &doc_md("A", "rfc", "[]"))],
-            &["spec"],
+            &[&child_type],
             &config,
         );
 
@@ -488,13 +498,14 @@ mod tests {
                 ..child_type
             },
         ];
+        let parent_type_def = config.documents.types[0].clone();
         let child_type_def = config.documents.types[1].clone();
+        let parent_key = crate::engine::store::git_clone_key(&parent_type_def);
+        let child_key = crate::engine::store::git_clone_key(&child_type_def);
+        let parent_seed_path = format!(".lazyspec/cache/{parent_key}/docs/a/A-001-parent.md");
         let (tmp, store) = project(
-            &[(
-                ".lazyspec/cache/a/docs/a/A-001-parent.md",
-                &doc_md("Parent", "a", "[]"),
-            )],
-            &["b"],
+            &[(parent_seed_path.as_str(), &doc_md("Parent", "a", "[]"))],
+            &[&child_type_def],
             &config,
         );
 
@@ -514,13 +525,22 @@ mod tests {
         assert!(msg.contains("/a.git"), "{msg}");
         assert!(msg.contains("/b.git"), "{msg}");
         assert!(
-            !tmp.path().join(".lazyspec/cache/b/docs/b").exists(),
+            !tmp.path()
+                .join(".lazyspec/cache")
+                .join(&child_key)
+                .join("docs/b")
+                .exists(),
             "no file written under the child's own cache dir"
         );
         assert_eq!(
-            fs::read_dir(tmp.path().join(".lazyspec/cache/a/docs/a"))
-                .unwrap()
-                .count(),
+            fs::read_dir(
+                tmp.path()
+                    .join(".lazyspec/cache")
+                    .join(&parent_key)
+                    .join("docs/a")
+            )
+            .unwrap()
+            .count(),
             1,
             "no file written under the parent's cache dir"
         );

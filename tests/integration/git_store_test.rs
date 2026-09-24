@@ -8,7 +8,7 @@ use lazyspec::engine::config::{
 };
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
-use lazyspec::engine::store::{doc_root, Filter, Store};
+use lazyspec::engine::store::{doc_root, git_clone_key, Filter, Store};
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -83,7 +83,9 @@ fn first_read_clones_remote_and_lists_docs_under_doc_root() {
     let store = Store::load(root, &config).unwrap();
 
     assert!(root
-        .join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md")
+        .join(".lazyspec/cache")
+        .join(git_clone_key(&config.documents.types[0]))
+        .join("docs/rfcs/RFC-001-a.md")
         .exists());
     assert_eq!(ids(&store), vec!["RFC-001"]);
     let type_def = &config.documents.types.last().unwrap();
@@ -155,9 +157,18 @@ fn commit_count(repo: &Path, branch: &str) -> usize {
 }
 
 /// The clone has no `user.*` of its own, and the tests must not lean on the
-/// host's global config (DICTUM-004).
-fn identify_clone(root: &Path) -> std::path::PathBuf {
-    let clone = root.join(".lazyspec/cache/rfc");
+/// host's global config (DICTUM-004). Takes `remote`/`branch` rather than a
+/// `Config` so it works for both the in-process `Config` tests and the ones
+/// that write `.lazyspec.toml` for the binary; every caller's `rfc` type
+/// shares the one `dir` ("docs/rfcs") the clone directory is keyed on.
+fn identify_clone(root: &Path, remote: &Path, branch: Option<&str>) -> std::path::PathBuf {
+    let type_def = TypeDef {
+        dir: "docs/rfcs".to_string(),
+        remote: Some(remote.to_string_lossy().into_owned()),
+        branch: branch.map(str::to_string),
+        ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+    };
+    let clone = root.join(".lazyspec/cache").join(git_clone_key(&type_def));
     git(&clone, &["config", "user.email", "test@test.com"]);
     git(&clone, &["config", "user.name", "Test"]);
     clone
@@ -170,7 +181,7 @@ fn create_writes_into_the_clone_and_pushes_to_the_declared_branch() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(remote.path(), "next");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
@@ -214,7 +225,7 @@ fn update_tag_provenance_and_delete_each_push_one_commit() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
     let mut expected = commit_count(remote.path(), "next");
 
@@ -288,7 +299,7 @@ fn link_and_unlink_each_push_one_commit() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
     let before = commit_count(remote.path(), "next");
 
@@ -328,7 +339,7 @@ fn ignore_and_unignore_each_push_one_commit() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
     let before = commit_count(remote.path(), "next");
 
@@ -355,7 +366,7 @@ fn pin_pushes_one_commit() {
     git(root, &["commit", "--allow-empty", "-m", "code"]);
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(remote.path(), "next");
 
     lazyspec::cli::pin::run(&store, &config, &GitCli, &RealFileSystem, "RFC-001", true).unwrap();
@@ -380,9 +391,12 @@ fn fix_pushes_one_commit_for_the_document_it_repairs() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(remote.path(), "next");
-    let paths = vec![".lazyspec/cache/rfc/docs/rfcs/RFC-003-c.md".to_string()];
+    let paths = vec![format!(
+        ".lazyspec/cache/{}/docs/rfcs/RFC-003-c.md",
+        git_clone_key(&config.documents.types[0])
+    )];
 
     let code = lazyspec::cli::fix::run(
         root,
@@ -411,7 +425,7 @@ fn renumber_pushes_one_commit_for_every_rename() {
         min_length: 3,
     });
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(remote.path(), "next");
 
     let code = lazyspec::cli::fix::run_renumber(
@@ -444,7 +458,7 @@ fn rejected_link_errors_and_leaves_the_clone_file_unchanged() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("next"));
     let doc = clone.join("docs/rfcs/RFC-001-a.md");
     let bytes = std::fs::read(&doc).unwrap();
     git(remote.path(), &["checkout", "next"]);
@@ -478,7 +492,7 @@ fn rejected_push_errors_and_rolls_the_clone_back() {
     let root = project.path();
     let config = git_config(remote.path(), Some("main"));
     let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("main"));
     let head = git_stdout(&clone, &["rev-parse", "HEAD"]);
     let docs = clone.join("docs/rfcs");
     move_remote_ahead(remote.path());
@@ -510,7 +524,7 @@ fn rejected_push_through_the_binary_exits_nonzero_with_empty_stdout() {
     let root = project.path();
     write_project_config(root, remote.path());
     assert!(ids_via_binary(root).contains("RFC-001"));
-    identify_clone(root);
+    identify_clone(root, remote.path(), None);
     move_remote_ahead(remote.path());
 
     let output = lazyspec(root, &["create", "rfc", "C", "--json"]);
@@ -548,6 +562,18 @@ name = "related-to"
         remote.display()
     );
     std::fs::write(root.join(".lazyspec.toml"), toml).unwrap();
+}
+
+/// The clone key `write_project_config`'s `rfc` type resolves to (no branch,
+/// `dir = "docs/rfcs"`).
+fn write_project_rfc_key(remote: &Path) -> String {
+    let type_def = TypeDef {
+        dir: "docs/rfcs".to_string(),
+        remote: Some(remote.to_string_lossy().into_owned()),
+        branch: None,
+        ..TypeDef::test_fixture("rfc", StoreBackend::Git)
+    };
+    git_clone_key(&type_def)
 }
 
 fn lazyspec(root: &Path, args: &[&str]) -> std::process::Output {
@@ -616,7 +642,9 @@ fn fetch_reports_a_document_removed_upstream_and_drops_it_from_the_clone() {
     assert_eq!(outcomes[0]["removed"], 1, "{outcomes}");
     assert_eq!(outcomes[0]["fetched"], 0, "{outcomes}");
     assert!(!root
-        .join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md")
+        .join(".lazyspec/cache")
+        .join(write_project_rfc_key(remote.path()))
+        .join("docs/rfcs/RFC-001-a.md")
         .exists());
 }
 
@@ -712,7 +740,7 @@ fn reserved_create_reserves_against_the_types_remote_and_pushes() {
     let root = project.path();
     let config = reserved_config(remote.path(), Some("main"));
     let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("main"));
     let before = commit_count(remote.path(), "main");
 
     let filename = create_rfc(root, &config, &store, "Second").unwrap();
@@ -731,7 +759,7 @@ fn reserved_create_continues_past_the_remotes_highest_reservation() {
     let root = project.path();
     let config = reserved_config(remote.path(), Some("main"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("main"));
 
     let filename = create_rfc(root, &config, &store, "Eighth").unwrap();
 
@@ -747,8 +775,8 @@ fn stale_reserved_project_errors_then_fetches_and_lands_a_fresh_id() {
     let project_b = TempDir::new().unwrap();
     let store_a = Store::load(project_a.path(), &config).unwrap();
     let store_b = Store::load(project_b.path(), &config).unwrap();
-    identify_clone(project_a.path());
-    let clone_b = identify_clone(project_b.path());
+    identify_clone(project_a.path(), remote.path(), Some("main"));
+    let clone_b = identify_clone(project_b.path(), remote.path(), Some("main"));
     let head_b = git_stdout(&clone_b, &["rev-parse", "HEAD"]);
 
     let a = create_rfc(project_a.path(), &config, &store_a, "From A").unwrap();
@@ -786,8 +814,8 @@ fn stale_project_fetches_then_creates_a_non_colliding_id() {
     write_project_config(project_b.path(), remote.path());
     assert!(ids_via_binary(project_a.path()).contains("RFC-001"));
     assert!(ids_via_binary(project_b.path()).contains("RFC-001"));
-    identify_clone(project_a.path());
-    identify_clone(project_b.path());
+    identify_clone(project_a.path(), remote.path(), None);
+    identify_clone(project_b.path(), remote.path(), None);
 
     let a = create_json(project_a.path(), "A2");
     assert_eq!(a["id"], "RFC-002", "{a}");
@@ -847,7 +875,7 @@ fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(remote.path(), "next");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
@@ -913,8 +941,12 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents
         Some("next"),
     );
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    identify(&root.join(".lazyspec/cache/spec"));
+    identify_clone(root, remote.path(), Some("next"));
+    identify(
+        &root
+            .join(".lazyspec/cache")
+            .join(git_clone_key(&config.documents.types[1])),
+    );
     let before = commit_count(remote.path(), "next");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
@@ -932,12 +964,19 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents
 
     assert!(outcome.is_synced());
     assert!(
-        path.starts_with(root.join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a")),
+        path.starts_with(
+            root.join(".lazyspec/cache")
+                .join(git_clone_key(&config.documents.types[0]))
+                .join("docs/rfcs/RFC-001-a")
+        ),
         "{}",
         path.display()
     );
     assert!(
-        !path.starts_with(root.join(".lazyspec/cache/spec")),
+        !path.starts_with(
+            root.join(".lazyspec/cache")
+                .join(git_clone_key(&config.documents.types[1]))
+        ),
         "the child must land in the parent's clone, not its own type's"
     );
     assert_eq!(commit_count(remote.path(), "next"), before + 1);
@@ -964,8 +1003,10 @@ fn create_with_parent_across_two_git_types_different_remotes_rejected_before_any
         Some("next"),
     );
     let store = Store::load(root, &config).unwrap();
-    let rfc_clone = identify_clone(root);
-    let spec_clone = root.join(".lazyspec/cache/spec");
+    let rfc_clone = identify_clone(root, remote_a.path(), Some("next"));
+    let spec_clone = root
+        .join(".lazyspec/cache")
+        .join(git_clone_key(&config.documents.types[1]));
     identify(&spec_clone);
     let before_a = commit_count(remote_a.path(), "next");
     let before_b = commit_count(remote_b.path(), "next");
@@ -1013,13 +1054,16 @@ fn create_with_parent_through_the_binary_writes_into_the_clone_and_syncs() {
     let root = project.path();
     write_project_config(root, remote.path());
     assert!(ids_via_binary(root).contains("RFC-001"));
-    identify_clone(root);
+    identify_clone(root, remote.path(), None);
 
     let child = create_with_parent_json(root, "Child", "RFC-001");
 
     let path = child["path"].as_str().unwrap();
     assert!(
-        path.contains(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a"),
+        path.contains(&format!(
+            ".lazyspec/cache/{}/docs/rfcs/RFC-001-a",
+            write_project_rfc_key(remote.path())
+        )),
         "{path}"
     );
     assert_eq!(child["synced"], true, "{child}");

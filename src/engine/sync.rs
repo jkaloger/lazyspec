@@ -247,7 +247,9 @@ fn sync_git_clone(
 ) -> Result<GitRefCounts> {
     use anyhow::Context as _;
 
-    let clone_root = root.join(".lazyspec/cache").join(&td.name);
+    let clone_root = root
+        .join(".lazyspec/cache")
+        .join(crate::engine::store::git_clone_key(td));
     let docs = crate::engine::store::doc_root(cfg, root, td);
     let before = md_files(&docs);
 
@@ -1928,6 +1930,10 @@ mod tests {
         config
     }
 
+    fn git_type_key() -> String {
+        crate::engine::store::git_clone_key(&git_type_config().documents.types[0])
+    }
+
     fn sync_git(root: &Path, config: &Config, ops: &MockGitRefClient) -> SyncOutcome {
         let mut ctx = SyncContext {
             gh: None,
@@ -1967,7 +1973,7 @@ mod tests {
     #[test]
     fn an_existing_clone_is_updated_on_its_branch_not_recloned() {
         let tmp = TempDir::new().unwrap();
-        let clone_root = tmp.path().join(".lazyspec/cache/rfc");
+        let clone_root = tmp.path().join(".lazyspec/cache").join(git_type_key());
         std::fs::create_dir_all(&clone_root).unwrap();
         let ops = MockGitRefClient::new();
 
@@ -1984,7 +1990,7 @@ mod tests {
     #[test]
     fn a_failed_update_names_remote_and_branch_and_fetches_nothing() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache/rfc")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache").join(git_type_key())).unwrap();
         let ops = MockGitRefClient::new()
             .with_update_clone_result(Err(anyhow::anyhow!("could not resolve host")));
 
@@ -2001,7 +2007,11 @@ mod tests {
     #[test]
     fn counts_come_from_the_doc_set_before_and_after() {
         let tmp = TempDir::new().unwrap();
-        let docs = tmp.path().join(".lazyspec/cache/rfc/docs/rfcs");
+        let docs = tmp
+            .path()
+            .join(".lazyspec/cache")
+            .join(git_type_key())
+            .join("docs/rfcs");
         std::fs::create_dir_all(docs.join("nested")).unwrap();
         std::fs::write(docs.join("RFC-001-a.md"), "").unwrap();
         std::fs::write(docs.join("RFC-002-b.md"), "").unwrap();

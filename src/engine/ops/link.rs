@@ -827,20 +827,18 @@ fn push_if_clickup_backed<C: ClickupClient>(
         return Ok(());
     }
 
-    let type_name = doc_path
+    // See push_if_git_ref_backed: a `git`-store path's second component is a
+    // clone key (git_clone_key), not a type name, so finding no type there
+    // means "not ours", not an error.
+    let Some(type_def) = doc_path
         .components()
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+        .and_then(|name| config.type_by_name(name))
+    else {
+        return Ok(());
+    };
+    let type_name = type_def.name.as_str();
 
     if type_def.store != StoreBackend::ClickupTasks {
         return Ok(());
@@ -919,21 +917,18 @@ fn push_if_github_backed<G: GhIssueReader + GhIssueWriter + GhGraphql + Send + '
         return Ok(());
     }
 
-    // Extract type name from cache path: .lazyspec/cache/<type_name>/...
-    let type_name = doc_path
+    // See push_if_git_ref_backed: a `git`-store path's second component is a
+    // clone key (git_clone_key), not a type name, so finding no type there
+    // means "not ours", not an error.
+    let Some(type_def) = doc_path
         .components()
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+        .and_then(|name| config.type_by_name(name))
+    else {
+        return Ok(());
+    };
+    let type_name = type_def.name.as_str();
 
     if type_def.store != StoreBackend::GithubIssues {
         return Ok(());
@@ -992,20 +987,20 @@ fn push_if_git_ref_backed(
         return Ok(PushOutcome::Synced);
     }
 
-    let type_name = doc_path
+    // A `git-ref` type's cache path is still keyed by its own name (only the
+    // `git` store's clone directory moved to `git_clone_key`, keyed by
+    // `(remote, branch, dir)` -- see that function's doc), so this naive
+    // extraction is correct for `git-ref` paths. A `git`-store path's second
+    // component is a clone key, not a type name, and `type_by_name` finding
+    // nothing there means exactly that: not ours, not an error.
+    let Some(type_def) = doc_path
         .components()
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot determine type from cache path: {}",
-                doc_path.display()
-            )
-        })?;
-
-    let type_def = config
-        .type_by_name(type_name)
-        .ok_or_else(|| anyhow!("unknown type '{}' from cache path", type_name))?;
+        .and_then(|name| config.type_by_name(name))
+    else {
+        return Ok(PushOutcome::Synced);
+    };
 
     if type_def.store != StoreBackend::GitRef {
         return Ok(PushOutcome::Synced);

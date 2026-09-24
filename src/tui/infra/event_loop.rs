@@ -1748,15 +1748,18 @@ mod tests {
     fn poll_updates_the_clone_of_a_git_type() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let clone_root = root.join(".lazyspec/cache/rfc");
-        std::fs::create_dir_all(&clone_root).unwrap();
-        let mut config = Config::default();
-        config.documents.types = vec![TypeDef {
+        let rfc_type = TypeDef {
             dir: "docs/rfcs".to_string(),
             remote: Some("https://example.invalid/shared.git".to_string()),
             branch: Some("main".to_string()),
             ..TypeDef::test_fixture("rfc", StoreBackend::Git)
-        }];
+        };
+        let clone_root = root
+            .join(".lazyspec/cache")
+            .join(crate::engine::store::git_clone_key(&rfc_type));
+        std::fs::create_dir_all(&clone_root).unwrap();
+        let mut config = Config::default();
+        config.documents.types = vec![rfc_type];
         let git = MockGitRefClient::new();
         let clickup = FakeClickupClient::with_tasks(vec![]);
         let reader = inert_gh();
@@ -2094,14 +2097,18 @@ mod tests {
 
     // --- STORY-282 AC3: an external edit of a `git` doc commits and pushes ---
 
-    fn git_type_config() -> Config {
-        let mut config = Config::default();
-        config.documents.types = vec![TypeDef {
+    fn git_rfc_type() -> TypeDef {
+        TypeDef {
             dir: "docs/rfcs".to_string(),
             remote: Some("https://example.com/specs.git".to_string()),
             branch: Some("next".to_string()),
             ..TypeDef::test_fixture("rfc", StoreBackend::Git)
-        }];
+        }
+    }
+
+    fn git_type_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![git_rfc_type()];
         config
     }
 
@@ -2111,10 +2118,13 @@ mod tests {
         let root = tmp.path();
         let mock = MockGitRefClient::new();
         let calls = mock.call_log();
+        let key = crate::engine::store::git_clone_key(&git_rfc_type());
 
         let result = try_push_git_edit_with(
             root,
-            Path::new(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md"),
+            &Path::new(".lazyspec/cache")
+                .join(&key)
+                .join("docs/rfcs/RFC-001-a.md"),
             &git_type_config(),
             &mock,
         );
@@ -2123,7 +2133,7 @@ mod tests {
         assert_eq!(
             *calls.borrow(),
             vec![format!(
-                "commit_and_push:{}/.lazyspec/cache/rfc:next:update RFC-001",
+                "commit_and_push:{}/.lazyspec/cache/{key}:next:update RFC-001",
                 root.display()
             )]
         );

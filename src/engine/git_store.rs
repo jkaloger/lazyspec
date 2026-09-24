@@ -1,6 +1,8 @@
 //! The `git` store (RFC-072 "The git store"): documents are files in a managed
-//! clone under `.lazyspec/cache/<type>/`, and every write is a file write, a
-//! commit, and a push to the type's declared branch.
+//! clone under `.lazyspec/cache/<remote@branch>/` (see [`git_clone_key`] --
+//! keyed by clone identity, not type name, so two types declaring the same
+//! remote and branch share one clone rather than one each), and every write
+//! is a file write, a commit, and a push to the type's declared branch.
 
 use std::path::{Path, PathBuf};
 
@@ -8,7 +10,7 @@ use anyhow::{Context, Result};
 
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::git_ref::{GitRefClient, GitRefOps};
-use crate::engine::store::doc_root;
+use crate::engine::store::{doc_root, git_clone_key};
 use crate::engine::store_dispatch::{CreatedDoc, DocumentStore, FilesystemStore, PushOutcome};
 
 /// Commit and push `type_def`'s clone. Never `LocalOnly` (STORY-282 AC5): an
@@ -20,7 +22,7 @@ fn commit_clone(root: &Path, type_def: &TypeDef, ops: &dyn GitRefOps, message: &
         .as_deref()
         .expect("Config::parse rejects a git store without a remote");
     let branch = type_def.branch.as_deref();
-    let clone = root.join(".lazyspec/cache").join(&type_def.name);
+    let clone = root.join(".lazyspec/cache").join(git_clone_key(type_def));
     ops.commit_and_push(&clone, branch, message)
         .with_context(|| {
             format!(
@@ -32,10 +34,16 @@ fn commit_clone(root: &Path, type_def: &TypeDef, ops: &dyn GitRefOps, message: &
 
 /// The commit for a writer that rewrites a document file without going through
 /// [`DocumentStore`] (`link`, `ignore`, `pin`, `fix`, the TUI's tag write).
-/// `doc_path` is root-relative; anything outside `.lazyspec/cache/<type>/`, or
-/// under a type whose store is not `git`, is not ours and is `Ok(())`. A clone
-/// with nothing staged commits nothing, so callers that touch several files may
-/// call this once per file.
+/// `doc_path` is root-relative; anything outside a `git` type's clone is not
+/// ours and is `Ok(())`. A clone with nothing staged commits nothing, so
+/// callers that touch several files may call this once per file.
+///
+/// The clone directory is keyed by `(remote, branch)`, not by type name (see
+/// [`git_clone_key`]), so which type owns a path can no longer be read off its
+/// second path component by name. Instead this matches `doc_path` against
+/// every `git` type's own clone prefix; a remote shared by several types
+/// matches all of them, but they name the same clone, so committing against
+/// the first is committing the one clone all of them describe.
 pub fn commit_if_git_backed(
     root: &Path,
     config: &Config,
@@ -46,16 +54,15 @@ pub fn commit_if_git_backed(
     if !doc_path.starts_with(".lazyspec/cache/") {
         return Ok(());
     }
-    let type_def = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .and_then(|name| config.type_by_name(name));
+    let type_def = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::Git)
+        .find(|t| doc_path.starts_with(Path::new(".lazyspec/cache").join(git_clone_key(t))));
     match type_def {
-        Some(type_def) if type_def.store == StoreBackend::Git => {
-            commit_clone(root, type_def, ops, message)
-        }
-        _ => Ok(()),
+        Some(type_def) => commit_clone(root, type_def, ops, message),
+        None => Ok(()),
     }
 }
 
@@ -91,7 +98,10 @@ impl DocumentStore for GitStore {
         author: &str,
         body: &str,
     ) -> Result<CreatedDoc> {
-        let clone_root = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let clone_root = self
+            .root
+            .join(".lazyspec/cache")
+            .join(git_clone_key(type_def));
         let target = doc_root(&self.config, &self.root, type_def);
         let dir = target
             .strip_prefix(&self.root)
@@ -173,7 +183,6 @@ mod tests {
     use tempfile::TempDir;
 
     const REMOTE: &str = "https://example.com/specs.git";
-    const DOC: &str = ".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md";
 
     fn rfc_type(branch: Option<&str>) -> TypeDef {
         TypeDef {
@@ -184,11 +193,20 @@ mod tests {
         }
     }
 
+    /// `RFC-001-a.md`'s path under `type_def`'s own clone -- keyed by
+    /// `(remote, branch)` (see [`git_clone_key`]), not by `type_def.name`, so
+    /// tests must derive it rather than hardcode a path built from the name.
+    fn doc_path(type_def: &TypeDef) -> PathBuf {
+        Path::new(".lazyspec/cache")
+            .join(git_clone_key(type_def))
+            .join("docs/rfcs/RFC-001-a.md")
+    }
+
     /// A project whose `rfc` clone already holds `RFC-001-a.md`, so `Store::load`
     /// finds the clone and never spawns git (DICTUM-004).
     fn project(type_def: &TypeDef) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>) {
         let tmp = TempDir::new().unwrap();
-        let doc = tmp.path().join(DOC);
+        let doc = tmp.path().join(doc_path(type_def));
         std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
         std::fs::write(
             &doc,
@@ -220,8 +238,9 @@ mod tests {
 
     fn commit_call(root: &Path, type_def: &TypeDef, message: &str) -> String {
         format!(
-            "commit_and_push:{}/.lazyspec/cache/rfc:{}:{message}",
+            "commit_and_push:{}/.lazyspec/cache/{}:{}:{message}",
             root.display(),
+            git_clone_key(type_def),
             type_def.branch.as_deref().unwrap_or("default")
         )
     }
@@ -236,7 +255,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome, PushOutcome::Synced);
-        let content = std::fs::read_to_string(tmp.path().join(DOC)).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join(doc_path(&td))).unwrap();
         assert!(content.contains("title: Renamed"), "{content}");
         assert_eq!(
             *calls.borrow(),
@@ -257,7 +276,9 @@ mod tests {
         assert_eq!(created.push_outcome, PushOutcome::Synced);
         assert_eq!(
             created.path,
-            Path::new(".lazyspec/cache/rfc/docs/rfcs/RFC-002-second-one.md")
+            Path::new(".lazyspec/cache")
+                .join(git_clone_key(&td))
+                .join("docs/rfcs/RFC-002-second-one.md")
         );
         let content = std::fs::read_to_string(tmp.path().join(&created.path)).unwrap();
         assert!(content.contains("Body text."), "{content}");
@@ -306,7 +327,7 @@ mod tests {
 
         store.delete(&td, "RFC-001").unwrap();
 
-        assert!(!tmp.path().join(DOC).exists());
+        assert!(!tmp.path().join(doc_path(&td)).exists());
         assert_eq!(
             *calls.borrow(),
             vec![commit_call(tmp.path(), &td, "delete RFC-001")]
@@ -323,7 +344,7 @@ mod tests {
         commit_if_git_backed(
             tmp.path(),
             &store.config,
-            Path::new(DOC),
+            &doc_path(&td),
             &*store.ops,
             "link RFC-001",
         )
@@ -378,7 +399,7 @@ mod tests {
         let Err(err) = commit_if_git_backed(
             tmp.path(),
             &store.config,
-            Path::new(DOC),
+            &doc_path(&td),
             &*store.ops,
             "link RFC-001",
         ) else {
@@ -395,13 +416,16 @@ mod tests {
     fn sync_tags_only_commits() {
         let td = rfc_type(Some("next"));
         let (tmp, mut store, calls) = project(&td);
-        let before = std::fs::read(tmp.path().join(DOC)).unwrap();
+        let before = std::fs::read(tmp.path().join(doc_path(&td))).unwrap();
 
         store
             .sync_tags(&td, "RFC-001", &["shared".to_string()], &[])
             .unwrap();
 
-        assert_eq!(std::fs::read(tmp.path().join(DOC)).unwrap(), before);
+        assert_eq!(
+            std::fs::read(tmp.path().join(doc_path(&td))).unwrap(),
+            before
+        );
         assert_eq!(
             *calls.borrow(),
             vec![commit_call(tmp.path(), &td, "tag RFC-001")]

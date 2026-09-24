@@ -1374,12 +1374,28 @@ name = "implements"
 inverse = "implemented-by"
 "#;
         let json = show(src);
+        let team_key = crate::engine::store::git_clone_key(&crate::engine::config::TypeDef {
+            dir: "docs/rfcs".to_string(),
+            remote: Some("git@github.com:org/shared-specs.git".to_string()),
+            ..crate::engine::config::TypeDef::test_fixture(
+                "team",
+                crate::engine::config::StoreBackend::Git,
+            )
+        });
         for (name, dir, resolved) in [
-            ("rfc", "docs/rfcs", "/a/b/docs/rfcs"),
-            ("spec", "/tmp/x/specs", "/tmp/x/specs"),
-            ("shared", "../shared-specs", "/a/shared-specs"),
-            ("issue", "docs/issues", "/a/b/.lazyspec/cache/issue"),
-            ("team", "docs/rfcs", "/a/b/.lazyspec/cache/team/docs/rfcs"),
+            ("rfc", "docs/rfcs", "/a/b/docs/rfcs".to_string()),
+            ("spec", "/tmp/x/specs", "/tmp/x/specs".to_string()),
+            ("shared", "../shared-specs", "/a/shared-specs".to_string()),
+            (
+                "issue",
+                "docs/issues",
+                "/a/b/.lazyspec/cache/issue".to_string(),
+            ),
+            (
+                "team",
+                "docs/rfcs",
+                format!("/a/b/.lazyspec/cache/{team_key}/docs/rfcs"),
+            ),
         ] {
             let ty = type_named(&json, name);
             assert_eq!(ty["dir"], dir, "raw dir survives for {name}");

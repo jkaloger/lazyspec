@@ -111,6 +111,40 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
         .map(|(entry, _)| entry.as_str())
 }
 
+/// The `git` store's clone directory name for `type_def`, under
+/// `.lazyspec/cache/`. Keyed by `(remote, branch, dir)` rather than the
+/// type's own name: two types declaring the same remote, branch and `dir`
+/// read and write the exact same subtree of the exact same repo, so they
+/// share one clone. `dir` is part of the key, not just `(remote, branch)`,
+/// because two types legitimately share a remote and branch while keeping
+/// separate clones when their `dir` differs -- `create --parent` across such
+/// types deliberately lands a child in the parent's own clone rather than
+/// merging the two, which a same-clone-whenever-the-remote-matches key would
+/// have broken. Keying by type name instead -- the original shape -- gave two
+/// types with the same remote, branch *and* `dir` their own full clone of
+/// identical content, and `Store::load_with_fs` would then load the same
+/// document once per clone, none of them aware the others existed. Sanitized
+/// rather than hashed so the directory stays inspectable, and stable across
+/// runs and toolchains, which a hasher without a documented stability
+/// guarantee is not.
+pub fn git_clone_key(type_def: &TypeDef) -> String {
+    fn slug(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+    let remote = slug(
+        type_def
+            .remote
+            .as_deref()
+            .unwrap_or_default()
+            .trim_end_matches(".git"),
+    );
+    let branch = type_def.branch.as_deref().unwrap_or("HEAD");
+    let dir = slug(&type_def.dir);
+    format!("{remote}@{branch}--{dir}")
+}
+
 /// Where a type's documents live, as an absolute path with no `..` (RFC-072
 /// "Resolution, not a second store"). `root` is absolute, and `Path::join`
 /// discards it for an absolute `dir`, so every `filesystem` spelling resolves
@@ -122,15 +156,19 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
 /// on the local `root` (RFC-072 Decision 4): the cache belongs to *this*
 /// repo's `.lazyspec/`, never the shared one.
 pub fn doc_root(config: &Config, root: &Path, type_def: &TypeDef) -> PathBuf {
-    let cache = root.join(".lazyspec/cache").join(&type_def.name);
     match type_def.store {
         StoreBackend::Filesystem => normalize(&config.docs_root(root).join(&type_def.dir)),
         StoreBackend::GithubIssues
         | StoreBackend::GithubMilestones
         | StoreBackend::GithubProjects
         | StoreBackend::GitRef
-        | StoreBackend::ClickupTasks => cache,
-        StoreBackend::Git => normalize(&cache.join(&type_def.dir)),
+        | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
+        StoreBackend::Git => normalize(
+            &root
+                .join(".lazyspec/cache")
+                .join(git_clone_key(type_def))
+                .join(&type_def.dir),
+        ),
     }
 }
 
@@ -219,7 +257,7 @@ impl Store {
             let full_path = doc_root(config, root, type_def);
 
             if type_def.store == StoreBackend::Git {
-                let clone_root = root.join(".lazyspec/cache").join(&type_def.name);
+                let clone_root = root.join(".lazyspec/cache").join(git_clone_key(type_def));
                 if let Some(ops) = git_ref_ops.filter(|_| !fs.exists(&clone_root)) {
                     clone_git_store(root, type_def, &clone_root, ops, fs)?;
                 }
@@ -1621,11 +1659,61 @@ mod tests {
     fn doc_root_joins_dir_against_the_clone_root_for_git_store() {
         let type_def = TypeDef {
             dir: "docs/specs".to_string(),
+            remote: Some("https://example.com/specs.git".to_string()),
             ..TypeDef::test_fixture("spec", StoreBackend::Git)
         };
         assert_eq!(
             doc_root(&Config::default(), Path::new("/a/b"), &type_def),
-            PathBuf::from("/a/b/.lazyspec/cache/spec/docs/specs")
+            Path::new("/a/b/.lazyspec/cache")
+                .join(git_clone_key(&type_def))
+                .join("docs/specs")
+        );
+    }
+
+    // The clone is keyed by (remote, branch), not by the type's own name, so
+    // two types sharing a remote and branch resolve to the same clone root --
+    // and, downstream, the same on-disk documents rather than a duplicate
+    // clone per type (RFC-072 did not anticipate this and the original
+    // per-name keying silently multiplied every such document once per type).
+    #[test]
+    fn doc_root_is_shared_by_two_types_naming_the_same_remote_and_branch() {
+        let remote = Some("https://example.com/raid.git".to_string());
+        let risk = TypeDef {
+            dir: "docs/raid".to_string(),
+            remote: remote.clone(),
+            ..TypeDef::test_fixture("risk", StoreBackend::Git)
+        };
+        let issue = TypeDef {
+            dir: "docs/raid".to_string(),
+            remote,
+            ..TypeDef::test_fixture("issue", StoreBackend::Git)
+        };
+        assert_eq!(
+            doc_root(&Config::default(), Path::new("/a/b"), &risk),
+            doc_root(&Config::default(), Path::new("/a/b"), &issue)
+        );
+    }
+
+    // A different branch of the same remote is different content and must
+    // not share the first branch's clone.
+    #[test]
+    fn doc_root_differs_for_the_same_remote_on_a_different_branch() {
+        let remote = Some("https://example.com/raid.git".to_string());
+        let main = TypeDef {
+            dir: "docs/raid".to_string(),
+            remote: remote.clone(),
+            branch: None,
+            ..TypeDef::test_fixture("risk", StoreBackend::Git)
+        };
+        let staging = TypeDef {
+            dir: "docs/raid".to_string(),
+            remote,
+            branch: Some("staging".to_string()),
+            ..TypeDef::test_fixture("risk-staging", StoreBackend::Git)
+        };
+        assert_ne!(
+            doc_root(&Config::default(), Path::new("/a/b"), &main),
+            doc_root(&Config::default(), Path::new("/a/b"), &staging)
         );
     }
 
@@ -1662,11 +1750,14 @@ mod tests {
 
         let git = TypeDef {
             dir: "docs/specs".to_string(),
+            remote: Some("https://example.com/specs.git".to_string()),
             ..TypeDef::test_fixture("spec", StoreBackend::Git)
         };
         assert_eq!(
             doc_root(&config, root, &git),
-            PathBuf::from("/local/repo/.lazyspec/cache/spec/docs/specs")
+            Path::new("/local/repo/.lazyspec/cache")
+                .join(git_clone_key(&git))
+                .join("docs/specs")
         );
     }
 
@@ -2112,6 +2203,15 @@ mod tests {
         config
     }
 
+    /// The clone key `git_config(branch)`'s type resolves to -- computed via
+    /// [`git_clone_key`] rather than hardcoded, since it is keyed by
+    /// `(remote, branch)`, not by the type's name. `git_config` pushes its
+    /// `note` type onto `Config::default()`'s starter types, so it is the
+    /// last one, not the first.
+    fn git_key(branch: Option<&str>) -> String {
+        git_clone_key(git_config(branch).documents.types.last().unwrap())
+    }
+
     fn clone_calls(mock: &crate::engine::git_ref::test_support::MockGitRefClient) -> Vec<String> {
         mock.call_log()
             .borrow()
@@ -2136,7 +2236,8 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/note"
+                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/{}",
+                git_key(Some("next"))
             )]
         );
     }
@@ -2155,7 +2256,8 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/note"
+                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/{}",
+                git_key(None)
             )]
         );
     }
@@ -2168,7 +2270,7 @@ mod tests {
 
         let fs = InMemoryFileSystem::new();
         let root = PathBuf::from("/fake/root");
-        let clone = root.join(".lazyspec/cache/note");
+        let clone = root.join(".lazyspec/cache").join(git_key(None));
         fs.add_dir(clone.clone());
         fs.add_dir(clone.join("docs/notes"));
         fs.add_file(

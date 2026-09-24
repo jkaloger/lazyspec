@@ -1,7 +1,7 @@
 use crate::common::{git, git_stdout, TestFixture};
 use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::fs::RealFileSystem;
-use lazyspec::engine::store::Store;
+use lazyspec::engine::store::{git_clone_key, Store};
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -297,11 +297,12 @@ fn git_type_clones_into_the_local_cache_not_the_extended_root() {
     let remote = remote_with_one_rfc();
     let a = TempDir::new().unwrap();
     let mut config = Config::default();
-    config.documents.types = vec![TypeDef {
+    let rfc_type = TypeDef {
         dir: "docs/rfcs".to_string(),
         remote: Some(remote.path().to_string_lossy().into_owned()),
         ..TypeDef::test_fixture("rfc", StoreBackend::Git)
-    }];
+    };
+    config.documents.types = vec![rfc_type.clone()];
     std::fs::write(a.path().join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
     let b = extend(a.path());
 
@@ -316,7 +317,11 @@ fn git_type_clones_into_the_local_cache_not_the_extended_root() {
         String::from_utf8_lossy(&list.stderr)
     );
 
-    assert!(b.path().join(".lazyspec/cache/rfc").exists());
+    assert!(b
+        .path()
+        .join(".lazyspec/cache")
+        .join(git_clone_key(&rfc_type))
+        .exists());
     assert!(!a.path().join(".lazyspec").exists());
 }
 
