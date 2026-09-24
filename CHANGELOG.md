@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/jkaloger/lazyspec/compare/v0.13.0...v0.14.0) - 2026-09-24
+
+### Fixed
+
+- put flake rustc on PATH for clippy pre-push hook ([#109](https://github.com/jkaloger/lazyspec/pull/109))
+- *(git-store)* [**breaking**] share one clone per remote+branch and commit writes l… ([#108](https://github.com/jkaloger/lazyspec/pull/108))
+
 ## [0.13.0](https://github.com/jkaloger/lazyspec/compare/v0.12.2...v0.13.0) - 2026-09-20
 
 ### Added
