@@ -92,6 +92,9 @@ impl GitRefOps for RenamingGit {
     fn unpushed(&self, _clone: &Path, _branch: Option<&str>) -> Result<usize> {
         unreachable!("fix --governs checks no unpushed commits")
     }
+    fn added_files(&self, _clone: &Path, _branch: Option<&str>) -> Result<Vec<String>> {
+        unreachable!("fix --governs lists no added files")
+    }
     fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
         unreachable!("fix --governs pushes nothing")
     }

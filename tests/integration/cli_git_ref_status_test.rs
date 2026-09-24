@@ -33,8 +33,13 @@ fn setup() -> (crate::common::TestFixture, Store, Config) {
 #[test]
 fn status_json_includes_git_ref_documents() {
     let (_fixture, store, config) = setup();
-    let output =
-        lazyspec::cli::status::run_json(&store, &config, _fixture.root(), &crate::common::NoopGh);
+    let output = lazyspec::cli::status::run_json(
+        &store,
+        &config,
+        _fixture.root(),
+        &crate::common::NoopGh,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let docs = parsed["documents"].as_array().unwrap();
@@ -47,8 +52,13 @@ fn status_json_includes_git_ref_documents() {
 
 #[test]
 fn status_human_includes_git_ref_documents() {
-    let (_fixture, store, _config) = setup();
-    let output = lazyspec::cli::status::run_human(&store);
+    let (_fixture, store, config) = setup();
+    let output = lazyspec::cli::status::run_human(
+        &store,
+        &config,
+        _fixture.root(),
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+    );
 
     assert!(
         output.contains("RFC"),

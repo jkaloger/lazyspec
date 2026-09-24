@@ -160,6 +160,10 @@ fn main() -> anyhow::Result<()> {
                 json,
             )?;
         }
+        Some(Commands::Push { json }) => {
+            let git_ref_ops = GitCli;
+            lazyspec::cli::push::run(&cwd, &config, &git_ref_ops, json)?;
+        }
         Some(Commands::Setup { command }) => match command {
             None => {
                 let gh = GhCli::new();
@@ -540,14 +544,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Status { json }) => {
             let store = load_store(&cwd, &config)?;
+            let git_ref_ops = GitCli;
             if json {
                 let gh = GhCli::new();
                 println!(
                     "{}",
-                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh)
+                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh, &git_ref_ops)
                 );
             } else {
-                let output = lazyspec::cli::status::run_human(&store);
+                let output = lazyspec::cli::status::run_human(&store, &config, &cwd, &git_ref_ops);
                 if output.is_empty() {
                     println!("No documents found.");
                 } else {

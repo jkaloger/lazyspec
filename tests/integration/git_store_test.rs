@@ -1201,3 +1201,486 @@ fn create_with_parent_through_the_binary_writes_into_the_clone_and_commits_local
     );
     assert_eq!(child["synced"], false, "{child}");
 }
+
+// --- BUG-032 batch 2: `lazyspec push` through the binary ---
+
+fn create_json(root: &Path, title: &str) -> serde_json::Value {
+    let output = lazyspec(root, &["create", "rfc", title, "--json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "create failed\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}\nstdout: {stdout}"))
+}
+
+fn push_output(root: &Path) -> std::process::Output {
+    lazyspec(root, &["push", "--json"])
+}
+
+fn push_json(output: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn status_json(root: &Path) -> serde_json::Value {
+    let output = lazyspec(root, &["status", "--json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status failed\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}\nstdout: {stdout}"))
+}
+
+/// Two `git` types, `rfc` and `spec`, declaring the same remote and branch --
+/// they share one clone (BUG-032 AC1), so one `push` publishes both.
+fn write_two_git_types_config(root: &Path, remote: &Path, branch: Option<&str>) {
+    let branch_line = branch
+        .map(|b| format!("branch = \"{b}\"\n"))
+        .unwrap_or_default();
+    let toml = format!(
+        r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+store = "git"
+remote = "{remote}"
+{branch_line}
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "docs/specs"
+prefix = "SPEC"
+store = "git"
+remote = "{remote}"
+{branch_line}
+[[relationships]]
+name = "related-to"
+"#,
+        remote = remote.display(),
+    );
+    std::fs::write(root.join(".lazyspec.toml"), toml).unwrap();
+}
+
+// (a) Two git types on one remote: `push` publishes both types' local
+// commits in one shared-clone push.
+#[test]
+fn push_lands_both_git_types_sharing_one_clone_on_the_remote() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_two_git_types_config(root, remote.path(), Some("next"));
+    assert!(ids_via_binary(root).contains("RFC-001"));
+
+    assert!(lazyspec(root, &["create", "rfc", "A2", "--json"])
+        .status
+        .success());
+    assert!(lazyspec(root, &["create", "spec", "B1", "--json"])
+        .status
+        .success());
+
+    let output = push_output(root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = push_json(&output);
+    let clones = value["clones"].as_array().unwrap();
+    assert_eq!(clones.len(), 1, "{value}");
+    assert_eq!(clones[0]["pushed"], 2, "{value}");
+    assert!(clones[0]["error"].is_null(), "{value}");
+    let mut types = clones[0]["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect::<Vec<_>>();
+    types.sort();
+    assert_eq!(types, vec!["rfc", "spec"], "{value}");
+
+    let tree = git_stdout(remote.path(), &["ls-tree", "-r", "--name-only", "next"]);
+    assert!(tree.contains("docs/rfcs/RFC-002"), "{tree}");
+    assert!(tree.contains("docs/specs/SPEC-001"), "{tree}");
+}
+
+// (e, combined with b) `branch` unset resolves to the remote's default
+// branch. Two independent clones of that remote each number their next
+// incremental id RFC-002 without ever seeing each other; the first push
+// lands cleanly, and the second is blocked with a `duplicate_ids` error
+// naming both colliding paths, the local commit kept, the remote untouched.
+#[test]
+fn push_reports_duplicate_ids_when_two_clones_land_the_same_incremental_id() {
+    let remote = shared_repo();
+    let project_a = TempDir::new().unwrap();
+    let project_b = TempDir::new().unwrap();
+    write_project_config(project_a.path(), remote.path(), None);
+    write_project_config(project_b.path(), remote.path(), None);
+    assert!(ids_via_binary(project_a.path()).contains("RFC-001"));
+    assert!(ids_via_binary(project_b.path()).contains("RFC-001"));
+
+    let a = create_json(project_a.path(), "A2");
+    assert_eq!(a["id"], "RFC-002", "{a}");
+    let b = create_json(project_b.path(), "B2");
+    assert_eq!(
+        b["id"], "RFC-002",
+        "both clones independently number their next doc: {b}"
+    );
+
+    let a_push = push_output(project_a.path());
+    assert!(
+        a_push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&a_push.stderr)
+    );
+
+    let remote_before = commit_count(remote.path(), "main");
+    let b_push = push_output(project_b.path());
+    assert!(!b_push.status.success(), "B's push must exit non-zero");
+    let value = push_json(&b_push);
+    let clone = &value["clones"][0];
+    assert_eq!(clone["error"]["kind"], "duplicate_ids", "{value}");
+    let collisions = clone["error"]["collisions"].as_array().unwrap();
+    assert_eq!(collisions.len(), 1, "{value}");
+    assert_eq!(collisions[0]["id"], "RFC-002", "{value}");
+    assert_eq!(
+        collisions[0]["paths"].as_array().unwrap().len(),
+        2,
+        "{value}"
+    );
+
+    assert_eq!(
+        commit_count(remote.path(), "main"),
+        remote_before,
+        "B's push never reached the remote"
+    );
+    let clone_b = identify_clone(project_b.path(), remote.path(), None);
+    assert!(
+        clone_b.join("docs/rfcs").read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("b2")),
+        "B's local commit is kept"
+    );
+}
+
+// (c) Two projects edit the same doc: `push` rebases cleanly onto the first
+// project's push, but the second edit conflicts on the same line. The
+// rebase aborts, the local commit is kept, and the clone path names itself
+// in the error.
+#[test]
+fn push_reports_a_rebase_conflict_naming_the_clone_when_two_projects_edit_the_same_doc() {
+    let remote = shared_repo();
+    let project_a = TempDir::new().unwrap();
+    let project_b = TempDir::new().unwrap();
+    write_project_config(project_a.path(), remote.path(), Some("next"));
+    write_project_config(project_b.path(), remote.path(), Some("next"));
+    assert!(ids_via_binary(project_a.path()).contains("RFC-001"));
+    assert!(ids_via_binary(project_b.path()).contains("RFC-001"));
+
+    let update_a = lazyspec(
+        project_a.path(),
+        &["update", "RFC-001", "--title", "Mine", "--json"],
+    );
+    assert!(
+        update_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update_a.stderr)
+    );
+    let push_a = push_output(project_a.path());
+    assert!(
+        push_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push_a.stderr)
+    );
+
+    let update_b = lazyspec(
+        project_b.path(),
+        &["update", "RFC-001", "--title", "Theirs", "--json"],
+    );
+    assert!(
+        update_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update_b.stderr)
+    );
+
+    let clone_b = identify_clone(project_b.path(), remote.path(), Some("next"));
+    let local_head = git_stdout(&clone_b, &["rev-parse", "HEAD"]);
+    let push_b = push_output(project_b.path());
+    assert!(!push_b.status.success(), "B's push must exit non-zero");
+    let value = push_json(&push_b);
+    let clone = &value["clones"][0];
+    assert_eq!(clone["error"]["kind"], "rebase_conflict", "{value}");
+    // Canonicalized: the subprocess and this test may resolve `TMPDIR`
+    // through a different symlink prefix (`/tmp` vs `/private/tmp` on
+    // macOS) for the same clone.
+    assert_eq!(
+        Path::new(clone["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        clone_b.canonicalize().unwrap(),
+        "{value}"
+    );
+    assert!(
+        clone["error"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("RFC-001-a.md")),
+        "{value}"
+    );
+    assert_eq!(
+        git_stdout(&clone_b, &["rev-parse", "HEAD"]),
+        local_head,
+        "B's local commit is kept"
+    );
+}
+
+// (d) `status --json` reports one unpushed commit after a create, and zero
+// once `push` has published it.
+#[test]
+fn status_json_reports_unpushed_then_zero_after_push() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), Some("next"));
+    assert!(ids_via_binary(root).contains("RFC-001"));
+
+    assert!(lazyspec(root, &["create", "rfc", "Mine", "--json"])
+        .status
+        .success());
+
+    let status = status_json(root);
+    let git_stores = status["git_stores"].as_array().unwrap();
+    assert_eq!(git_stores.len(), 1, "{status}");
+    assert_eq!(git_stores[0]["unpushed"], 1, "{status}");
+
+    let push_out = push_output(root);
+    assert!(
+        push_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let status_after = status_json(root);
+    assert_eq!(
+        status_after["git_stores"][0]["unpushed"], 0,
+        "{status_after}"
+    );
+}
+
+// STORY-282 AC7 equivalent, re-added for the local-commit model: a project
+// that fetches before creating sees the sibling's already-pushed doc and
+// numbers its own past it, landing a non-colliding id. Unlike the rejected
+// push this used to test, the create here never risked a collision at all --
+// it commits locally, after the fetch, into a clone that already holds
+// RFC-002.
+#[test]
+fn project_b_fetches_after_a_pushes_and_creates_a_non_colliding_id() {
+    let remote = shared_repo();
+    let project_a = TempDir::new().unwrap();
+    let project_b = TempDir::new().unwrap();
+    write_project_config(project_a.path(), remote.path(), None);
+    write_project_config(project_b.path(), remote.path(), None);
+    assert!(ids_via_binary(project_a.path()).contains("RFC-001"));
+    assert!(ids_via_binary(project_b.path()).contains("RFC-001"));
+
+    let a = create_json(project_a.path(), "A2");
+    assert_eq!(a["id"], "RFC-002", "{a}");
+    let push_a = push_output(project_a.path());
+    assert!(
+        push_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push_a.stderr)
+    );
+
+    fetch_json(project_b.path(), &["fetch", "--json"]);
+    let b = create_json(project_b.path(), "B2");
+
+    assert_eq!(b["id"], "RFC-003", "{b}");
+    let tree = git_stdout(
+        remote.path(),
+        &["ls-tree", "--name-only", "main", "docs/rfcs/"],
+    );
+    assert!(tree.contains("RFC-002"), "{tree}");
+    assert!(
+        !tree.contains("RFC-003"),
+        "B's create is local-only until push: {tree}"
+    );
+}
+
+// --- Batch 2 fix pass: `added_files` must not read a delete+similar-create
+// pair as a rename, and a rebase already in progress must never be aborted ---
+
+// A doc deleted and a similarly-worded new doc created in the same unpushed
+// commit are, by git's own default rename heuristic, one `R` row, not an `A`
+// and a `D` -- so without `--no-renames`, `added_files` (the duplicate-id
+// guard's input) would report nothing added at all.
+#[test]
+fn added_files_reports_the_new_path_when_a_delete_and_a_similar_create_look_like_a_rename() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), None);
+    Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), None);
+
+    std::fs::remove_file(clone.join("docs/rfcs/RFC-001-a.md")).unwrap();
+    write_rfc(&clone, "RFC-003-a.md", "A");
+    git(&clone, &["add", "-A"]);
+    git(
+        &clone,
+        &[
+            "commit",
+            "-m",
+            "delete RFC-001, add a similarly-worded RFC-003",
+        ],
+    );
+
+    let added = GitCli.added_files(&clone, None).unwrap();
+    assert_eq!(
+        added,
+        vec!["docs/rfcs/RFC-003-a.md".to_string()],
+        "the new path is reported as added, not hidden inside a rename pair"
+    );
+}
+
+// The same rename-shaped pair, but the new doc's id collides with a sibling
+// already in the clone -- end to end through `lazyspec push`, proving the
+// duplicate-id guard actually sees the added path rather than missing it
+// behind a rename.
+#[test]
+fn push_catches_a_duplicate_id_hidden_behind_a_delete_and_similar_create_rename() {
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "-b", "main"]);
+    git(remote.path(), &["config", "user.email", "test@test.com"]);
+    git(remote.path(), &["config", "user.name", "Test"]);
+    write_rfc(remote.path(), "RFC-002-a.md", "A");
+    write_rfc(remote.path(), "RFC-005-b.md", "Shared wording");
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "-m", "one"]);
+
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), None);
+    assert!(ids_via_binary(root).contains("RFC-005"));
+    let clone = identify_clone(root, remote.path(), None);
+
+    std::fs::remove_file(clone.join("docs/rfcs/RFC-005-b.md")).unwrap();
+    write_rfc(&clone, "RFC-002-c.md", "Shared wording");
+    git(&clone, &["add", "-A"]);
+    git(
+        &clone,
+        &[
+            "commit",
+            "-m",
+            "delete RFC-005, add a similarly-worded RFC-002",
+        ],
+    );
+
+    let output = push_output(root);
+    assert!(
+        !output.status.success(),
+        "the collision must block the push"
+    );
+    let value = push_json(&output);
+    let clone_result = &value["clones"][0];
+    assert_eq!(clone_result["error"]["kind"], "duplicate_ids", "{value}");
+    let collisions = clone_result["error"]["collisions"].as_array().unwrap();
+    assert_eq!(collisions.len(), 1, "{value}");
+    assert_eq!(collisions[0]["id"], "RFC-002", "{value}");
+}
+
+// A conflicted rebase the user is mid-resolving must never be silently
+// aborted by a later `push`/`fetch`: it errors, names the clone, and leaves
+// both the in-progress rebase and the resolved-but-not-yet-committed content
+// exactly as the user left them.
+#[test]
+fn rebase_onto_remote_does_not_abort_a_rebase_already_in_progress() {
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "-b", "main"]);
+    git(remote.path(), &["config", "user.email", "test@test.com"]);
+    git(remote.path(), &["config", "user.name", "Test"]);
+    write_rfc(remote.path(), "RFC-001-a.md", "A");
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "-m", "one"]);
+
+    let clone_parent = TempDir::new().unwrap();
+    let clone = clone_parent.path().join("clone");
+    git(
+        clone_parent.path(),
+        &["clone", &remote.path().to_string_lossy(), "clone"],
+    );
+    git(&clone, &["config", "user.email", "test@test.com"]);
+    git(&clone, &["config", "user.name", "Test"]);
+
+    // A local, unpushed edit...
+    write_rfc(&clone, "RFC-001-a.md", "Local");
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-m", "local edit"]);
+
+    // ...conflicting with an edit that landed on the remote in the meantime.
+    write_rfc(remote.path(), "RFC-001-a.md", "Remote");
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "-m", "remote edit"]);
+
+    git(&clone, &["fetch", "origin", "main"]);
+    // Started directly, not through `rebase_onto`, standing in for a rebase
+    // the user began themselves; asserting success here would fail, since a
+    // conflict is the point.
+    let _ = Command::new("git")
+        .args(["rebase", "origin/main"])
+        .current_dir(&clone)
+        .output()
+        .expect("git runs");
+    assert!(
+        clone.join(".git/rebase-merge").exists(),
+        "the rebase started"
+    );
+
+    // The user resolves the conflict and stages it, but has not yet run
+    // `rebase --continue`.
+    write_rfc(&clone, "RFC-001-a.md", "Resolved");
+    git(&clone, &["add", "-A"]);
+    let staged_before = git_stdout(&clone, &["diff", "--cached"]);
+
+    let result = GitCli.rebase_onto_remote(&clone, Some("main"));
+
+    assert!(
+        result.is_err(),
+        "an in-progress rebase must not be silently continued or aborted"
+    );
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("rebase"), "{message}");
+    assert!(
+        message.contains(&clone.canonicalize().unwrap().to_string_lossy().into_owned())
+            || message.contains(&clone.to_string_lossy().into_owned()),
+        "{message}"
+    );
+    assert!(
+        clone.join(".git/rebase-merge").exists(),
+        "the rebase is still in progress -- nothing aborted it"
+    );
+    assert_eq!(
+        git_stdout(&clone, &["diff", "--cached"]),
+        staged_before,
+        "the resolved, staged content is untouched"
+    );
+    assert!(
+        std::fs::read_to_string(clone.join("docs/rfcs/RFC-001-a.md"))
+            .unwrap()
+            .contains("Resolved"),
+        "the working tree still holds the user's resolution"
+    );
+}

@@ -34,6 +34,28 @@ impl std::fmt::Display for RebaseConflict {
 
 impl std::error::Error for RebaseConflict {}
 
+/// A rebase was already in progress in `clone` (started by an earlier, unrelated
+/// `git rebase` -- possibly one the user is mid-resolving) when `rebase_onto`
+/// went to start its own. Nothing here touches it: aborting would destroy
+/// work the user may have already resolved and `git add`ed.
+#[derive(Debug)]
+pub struct RebaseInProgress {
+    pub clone: PathBuf,
+}
+
+impl std::fmt::Display for RebaseInProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a rebase is already in progress in {} -- finish it with `git -C {} rebase --continue` (or `--abort`), then re-run this command",
+            self.clone.display(),
+            self.clone.display()
+        )
+    }
+}
+
+impl std::error::Error for RebaseInProgress {}
+
 pub trait GitRefOps {
     fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
     fn list_refs(&self, root: &Path, pattern: &str) -> Result<Vec<(String, String)>>;
@@ -62,6 +84,8 @@ pub trait GitRefOps {
     /// head (BUG-032 AC5) -- never `reset --hard`, which would discard commits
     /// a write made locally and never pushed. A conflicted rebase is aborted
     /// and returned as [`RebaseConflict`]; local commits are intact either way.
+    /// A rebase already in progress is left alone and returned as
+    /// [`RebaseInProgress`] rather than aborted.
     /// Built on [`rebase_onto_remote`](GitRefOps::rebase_onto_remote).
     fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
     /// Stage everything in `clone` and commit it as `message`. Never pushes
@@ -75,8 +99,11 @@ pub trait GitRefOps {
     /// updating the remote-tracking ref) and rebase local commits onto it
     /// (BUG-032 AC3/AC5) -- shared by `update_clone` and, ahead of `push`, a
     /// caller that needs the rebase and a check (e.g. a duplicate-id guard)
-    /// to run before anything is pushed. A rebase conflict is aborted and
-    /// returned as [`RebaseConflict`]; local commits are intact either way.
+    /// to run before anything is pushed. A rebase conflict this call caused
+    /// is aborted and returned as [`RebaseConflict`]; local commits are
+    /// intact either way. A rebase already in progress before this call --
+    /// started elsewhere, maybe mid-resolution -- is never touched and is
+    /// returned as [`RebaseInProgress`] instead.
     fn rebase_onto_remote(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
     /// Push `HEAD` to `branch` on `origin` (or the branch `HEAD` tracks when
     /// `None`) and report how many commits went -- 0 when nothing was ahead of
@@ -88,6 +115,13 @@ pub trait GitRefOps {
     /// ref (or the branch `HEAD` tracks when `None`) -- what `push` would push,
     /// without fetching or pushing anything itself.
     fn unpushed(&self, clone: &Path, branch: Option<&str>) -> Result<usize>;
+    /// The paths git considers added (`--diff-filter=A`) between `branch`'s
+    /// remote-tracking ref (or the branch `HEAD` tracks when `None`) and
+    /// `HEAD`, relative to `clone` -- what `push`'s duplicate-id check
+    /// (BUG-032 AC6) scans for a doc whose id now collides with a sibling.
+    /// Never fetches; call after `rebase_onto_remote` so the range reads the
+    /// rebased tree.
+    fn added_files(&self, clone: &Path, branch: Option<&str>) -> Result<Vec<String>>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
@@ -202,8 +236,17 @@ impl GitCli {
     /// Rebase the clone's current branch onto `onto` (`FETCH_HEAD` or an
     /// `origin/<branch>` tracking ref). A clean rebase replays local commits on
     /// top; a conflicted one aborts -- local commits stay exactly as they were
-    /// -- and reports [`RebaseConflict`] with the files that collided.
+    /// -- and reports [`RebaseConflict`] with the files that collided. A rebase
+    /// already in progress (started outside this call, maybe mid-resolution)
+    /// is left untouched and reported as [`RebaseInProgress`]; this never
+    /// aborts a rebase it did not itself start.
     fn rebase_onto(&self, clone: &Path, onto: &str) -> Result<()> {
+        if self.rebase_in_progress(clone)?.is_some() {
+            return Err(RebaseInProgress {
+                clone: clone.to_path_buf(),
+            }
+            .into());
+        }
         let output = self.run_git(clone, &["rebase", onto])?;
         if output.status.success() {
             return Ok(());
@@ -219,6 +262,28 @@ impl GitCli {
             files,
         }
         .into())
+    }
+
+    /// The path of `rebase-merge` or `rebase-apply` under `clone`'s git dir,
+    /// when either exists -- git's own marker for a rebase already in
+    /// progress there, checked before `rebase_onto` starts one of its own.
+    fn rebase_in_progress(&self, clone: &Path) -> Result<Option<PathBuf>> {
+        for git_path in ["rebase-merge", "rebase-apply"] {
+            let output = self.run_git(clone, &["rev-parse", "--git-path", git_path])?;
+            if !output.status.success() {
+                continue;
+            }
+            let reported = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let resolved = if Path::new(&reported).is_absolute() {
+                PathBuf::from(reported)
+            } else {
+                clone.join(&reported)
+            };
+            if resolved.exists() {
+                return Ok(Some(resolved));
+            }
+        }
+        Ok(None)
     }
 
     fn conflicted_files(&self, clone: &Path) -> Result<Vec<String>> {
@@ -470,6 +535,32 @@ impl GitRefOps for GitCli {
         self.count_ahead(clone, &format!("origin/{branch}"))
     }
 
+    fn added_files(&self, clone: &Path, branch: Option<&str>) -> Result<Vec<String>> {
+        let branch = self.resolve_branch(clone, branch)?;
+        let range = format!("origin/{branch}..HEAD");
+        // `--no-renames`: without it, deleting an already-pushed doc and adding a
+        // similar new one in the same range reads as a rename (`R`), not an add,
+        // and the new path never reaches `--diff-filter=A`.
+        let output = self.run_git(
+            clone,
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=A",
+                "--no-renames",
+                &range,
+            ],
+        )?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git diff --diff-filter=A failed: {}", stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
         let output = self.run_git(root, &["push", remote, refname])?;
         if !output.status.success() {
@@ -688,6 +779,7 @@ pub mod test_support {
         pub rebase_onto_remote_results: RefCell<Vec<Result<()>>>,
         pub push_commits_results: RefCell<Vec<Result<usize>>>,
         pub unpushed_results: RefCell<Vec<Result<usize>>>,
+        pub added_files_results: RefCell<Vec<Result<Vec<String>>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
@@ -740,6 +832,7 @@ pub mod test_support {
                 rebase_onto_remote_results: RefCell::new(vec![]),
                 push_commits_results: RefCell::new(vec![]),
                 unpushed_results: RefCell::new(vec![]),
+                added_files_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
@@ -827,6 +920,11 @@ pub mod test_support {
 
         pub fn with_unpushed_result(self, result: Result<usize>) -> Self {
             self.unpushed_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_added_files_result(self, result: Result<Vec<String>>) -> Self {
+            self.added_files_results.borrow_mut().push(result);
             self
         }
 
@@ -1021,6 +1119,15 @@ pub mod test_support {
                 branch.unwrap_or("default")
             ));
             Self::pop_or_default(&self.unpushed_results)
+        }
+
+        fn added_files(&self, clone: &Path, branch: Option<&str>) -> Result<Vec<String>> {
+            self.calls.borrow_mut().push(format!(
+                "added_files:{}:{}",
+                clone.display(),
+                branch.unwrap_or("default")
+            ));
+            Self::pop_or_default(&self.added_files_results)
         }
 
         fn push_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {

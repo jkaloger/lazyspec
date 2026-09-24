@@ -415,12 +415,14 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
         &config,
         flat_root,
         &flat_gh,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     ));
     let nested_status = json_array(&lazyspec::cli::status::run_json(
         &nested_store,
         &config,
         nested_root,
         &nested_gh,
+        &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
     ));
     let flat_status_keys = doc_keys(&flat_status, "STORY-50");
     let child_status_keys = doc_keys(&nested_status, "STORY-11");
