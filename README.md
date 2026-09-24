@@ -1004,9 +1004,12 @@ lazyspec fix --governs            # apply them
       "written": true,
       "error": null
     }
-  ]
+  ],
+  "synced": true
 }
 ```
+
+Like every mutation, the object also carries the push outcome (`"synced"`, and `"warnings"` when `false`): a rewrite that landed in a `git`-store document's shared clone is a local commit, not a push, so it reports `"synced": false` there too.
 
 `written` is `false` under `--dry-run`, and for a document whose frontmatter could not be rewritten; `error` tells the two apart, carrying the reason for a failed write and `null` otherwise. Human output says `Would repin` for a dry run, `Repinned` for a write that landed, and `error: could not repin <path>: <reason>` for one that did not.
 

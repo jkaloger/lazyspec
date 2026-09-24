@@ -1969,7 +1969,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let clone_root = tmp
             .path()
-            .join(".lazyspec/cache/git/example-invalid-shared-git--next");
+            .join(".lazyspec/git/example-invalid-shared-git--next-9ed165ba");
         std::fs::create_dir_all(&clone_root).unwrap();
         let ops = MockGitRefClient::new();
 
@@ -1988,7 +1988,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(
             tmp.path()
-                .join(".lazyspec/cache/git/example-invalid-shared-git--next"),
+                .join(".lazyspec/git/example-invalid-shared-git--next-9ed165ba"),
         )
         .unwrap();
         let ops = MockGitRefClient::new()
@@ -2009,7 +2009,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let docs = tmp
             .path()
-            .join(".lazyspec/cache/git/example-invalid-shared-git--next/docs/rfcs");
+            .join(".lazyspec/git/example-invalid-shared-git--next-9ed165ba/docs/rfcs");
         std::fs::create_dir_all(docs.join("nested")).unwrap();
         std::fs::write(docs.join("RFC-001-a.md"), "").unwrap();
         std::fs::write(docs.join("RFC-002-b.md"), "").unwrap();

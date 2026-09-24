@@ -19,6 +19,29 @@ pub fn merge_push_outcome(value: &mut Value, outcome: &PushOutcome) {
     }
 }
 
+/// [`merge_push_outcome`] for a writer (`fix`, `renumber`, `governs`) that
+/// commits across several documents: `synced` is true only when every outcome
+/// synced, and `warnings` collects each distinct local-only warning once, in
+/// first-seen order, omitted when empty.
+pub fn merge_push_outcomes(value: &mut Value, outcomes: &[PushOutcome]) {
+    let synced = outcomes.iter().all(PushOutcome::is_synced);
+    let mut warnings = Vec::new();
+    for warning in outcomes.iter().filter_map(PushOutcome::warning) {
+        if !warnings.iter().any(|w: &String| w == warning) {
+            warnings.push(warning.to_string());
+        }
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("synced".to_string(), Value::Bool(synced));
+        if !warnings.is_empty() {
+            obj.insert(
+                "warnings".to_string(),
+                Value::Array(warnings.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+}
+
 /// Read a milestone's `open_issues`/`closed_issues` count attributes (set when a
 /// milestone document is materialized) and compute progress. `None` for any doc
 /// without both counts -- i.e. every non-milestone document.
@@ -240,5 +263,42 @@ mod tests {
             value.get("warnings").is_none(),
             "warnings must be omitted on a synced push, got: {value}"
         );
+    }
+
+    // BUG-032: a writer (`fix`) that commits across several documents in the
+    // same clone reports `synced: false` once, with the repeated warning
+    // collapsed to a single entry rather than one per document.
+    #[test]
+    fn merge_push_outcomes_dedups_the_same_warning_across_several_commits() {
+        let mut value = serde_json::json!({});
+        let warning = "committed locally to /clone; run `lazyspec push` to publish".to_string();
+        let outcomes = vec![
+            PushOutcome::LocalOnly {
+                warning: warning.clone(),
+            },
+            PushOutcome::LocalOnly {
+                warning: warning.clone(),
+            },
+        ];
+
+        merge_push_outcomes(&mut value, &outcomes);
+
+        assert_eq!(value["synced"], serde_json::json!(false));
+        assert_eq!(value["warnings"], serde_json::json!([warning]));
+    }
+
+    // Every outcome synced (or nothing was written) is `synced: true` with no
+    // `warnings` key, matching the single-outcome behaviour.
+    #[test]
+    fn merge_push_outcomes_all_synced_sets_synced_true_and_omits_warnings() {
+        let mut value = serde_json::json!({});
+        merge_push_outcomes(&mut value, &[]);
+        assert_eq!(value["synced"], serde_json::json!(true));
+        assert!(value.get("warnings").is_none());
+
+        let mut value = serde_json::json!({});
+        merge_push_outcomes(&mut value, &[PushOutcome::Synced, PushOutcome::Synced]);
+        assert_eq!(value["synced"], serde_json::json!(true));
+        assert!(value.get("warnings").is_none());
     }
 }

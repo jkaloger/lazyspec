@@ -44,7 +44,7 @@ fn add_writes_globs_to_a_document_without_any() {
     let store = fixture.store();
     let config = fixture.config();
 
-    let result = run_add(
+    let (result, outcome) = run_add(
         &store,
         &config,
         &MockGitRefClient::new(),
@@ -56,6 +56,7 @@ fn add_writes_globs_to_a_document_without_any() {
 
     assert_eq!(result, globs(&["src/engine/**", "src/cli/*.rs"]));
     assert_eq!(governs_on_disk(&fixture), result);
+    assert!(outcome.is_synced(), "a filesystem doc syncs synchronously");
 }
 
 #[test]
@@ -65,7 +66,7 @@ fn add_is_idempotent_and_keeps_existing_globs() {
     let store = fixture.store();
     let config = fixture.config();
 
-    let result = run_add(
+    let (result, _) = run_add(
         &store,
         &config,
         &MockGitRefClient::new(),
@@ -106,7 +107,7 @@ fn remove_drops_the_named_glob_and_keeps_the_rest() {
     let store = fixture.store();
     let config = fixture.config();
 
-    let result = run_remove(
+    let (result, _) = run_remove(
         &store,
         &config,
         &MockGitRefClient::new(),

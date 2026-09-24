@@ -135,13 +135,9 @@ pub fn doc_root(config: &Config, root: &Path, type_def: &TypeDef) -> PathBuf {
     }
 }
 
-/// The configured type whose cache path is a prefix of a root-relative
-/// `doc_path` under `.lazyspec/cache/` -- every cache-backed backend's own
-/// `.lazyspec/cache/<name>/`, or a `git` type's shared, remote-keyed clone
-/// (`.lazyspec/cache/git/<slug>/`, BUG-032 AC1). Decoding the type name out of
-/// a fixed path component (`components().nth(2)`) stopped working once a
-/// `git` type's clone shared the literal `git/` segment across every type on
-/// that remote; this instead checks each configured type's own cache prefix.
+/// The configured type whose cache (`.lazyspec/cache/<name>/`) or, for a
+/// `git` type, shared clone (`.lazyspec/git/<slug>/`, BUG-032 AC1) prefixes a
+/// root-relative `doc_path`.
 pub fn type_for_cache_path<'a>(config: &'a Config, doc_path: &Path) -> Option<&'a TypeDef> {
     config.documents.types.iter().find(|t| match t.store {
         StoreBackend::Filesystem => false,
@@ -178,18 +174,29 @@ fn path_root_for_relativizing<'a>(config: &Config, root: &'a Path, type_def: &Ty
 }
 
 /// Keeps `.lazyspec/cache/` out of the project's history. Every backend that
-/// materializes a managed cache -- git-ref writes, git clones -- calls this
-/// before its first write under the cache root.
+/// materializes a managed cache -- git-ref writes, an `extends` URL clone --
+/// calls this before its first write under the cache root.
 pub(crate) fn ensure_cache_gitignored(root: &Path, fs: &dyn FileSystem) -> Result<()> {
+    ensure_gitignore_line(root, fs, "cache/")
+}
+
+/// Keeps `.lazyspec/git/` -- the shared clone root a `git` type writes into,
+/// alongside but not under `.lazyspec/cache/` -- out of the project's history.
+pub(crate) fn ensure_git_gitignored(root: &Path, fs: &dyn FileSystem) -> Result<()> {
+    ensure_gitignore_line(root, fs, "git/")
+}
+
+fn ensure_gitignore_line(root: &Path, fs: &dyn FileSystem, line: &str) -> Result<()> {
     let path = root.join(".lazyspec/.gitignore");
     let mut contents = fs.read_to_string(&path).unwrap_or_default();
-    if contents.lines().any(|line| line.trim() == "cache/") {
+    if contents.lines().any(|l| l.trim() == line) {
         return Ok(());
     }
     if !contents.is_empty() && !contents.ends_with('\n') {
         contents.push('\n');
     }
-    contents.push_str("cache/\n");
+    contents.push_str(line);
+    contents.push('\n');
     fs.create_dir_all(&root.join(".lazyspec"))?;
     fs.write(&path, &contents)
 }
@@ -209,7 +216,7 @@ pub(crate) fn clone_git_store(
         .as_deref()
         .expect("Config::parse rejects a git store without a remote");
     let branch = type_def.branch.as_deref();
-    ensure_cache_gitignored(root, fs)?;
+    ensure_git_gitignored(root, fs)?;
     ops.clone_repo(remote, branch, clone_root).with_context(|| {
         format!(
             "cloning {remote} ({}) for type {}",
@@ -1648,7 +1655,7 @@ mod tests {
         };
         assert_eq!(
             doc_root(&Config::default(), Path::new("/a/b"), &type_def),
-            PathBuf::from("/a/b/.lazyspec/cache/git/example-com-spec-git/docs/specs")
+            PathBuf::from("/a/b/.lazyspec/git/example-com-spec-git-81b534bb/docs/specs")
         );
     }
 
@@ -1690,7 +1697,7 @@ mod tests {
         };
         assert_eq!(
             doc_root(&config, root, &git),
-            PathBuf::from("/local/repo/.lazyspec/cache/git/example-com-spec-git/docs/specs")
+            PathBuf::from("/local/repo/.lazyspec/git/example-com-spec-git-81b534bb/docs/specs")
         );
     }
 
@@ -2160,7 +2167,7 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/git/example-invalid-docs-git--next"
+                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/git/example-invalid-docs-git--next-679aec30"
             )]
         );
     }
@@ -2179,7 +2186,7 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/git/example-invalid-docs-git"
+                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/git/example-invalid-docs-git-f48fa70d"
             )]
         );
     }
@@ -2192,7 +2199,7 @@ mod tests {
 
         let fs = InMemoryFileSystem::new();
         let root = PathBuf::from("/fake/root");
-        let clone = root.join(".lazyspec/cache/git/example-invalid-docs-git");
+        let clone = root.join(".lazyspec/git/example-invalid-docs-git-f48fa70d");
         fs.add_dir(clone.clone());
         fs.add_dir(clone.join("docs/notes"));
         fs.add_file(
@@ -2240,9 +2247,9 @@ mod tests {
         assert!(msg.contains("could not read from remote"), "{msg}");
     }
 
-    // STORY-281 AC4: the clone path gitignores the cache.
+    // STORY-281 AC4 / BUG-032 AC1: the clone path gitignores `.lazyspec/git/`.
     #[test]
-    fn test_git_store_first_read_gitignores_cache() {
+    fn test_git_store_first_read_gitignores_git() {
         use crate::engine::git_ref::test_support::MockGitRefClient;
 
         let fs = InMemoryFileSystem::new();
@@ -2254,7 +2261,7 @@ mod tests {
         let gitignore = fs
             .read_to_string(&root.join(".lazyspec/.gitignore"))
             .expect(".lazyspec/.gitignore is written");
-        assert!(gitignore.lines().any(|l| l == "cache/"), "{gitignore:?}");
+        assert!(gitignore.lines().any(|l| l == "git/"), "{gitignore:?}");
     }
 
     #[test]

@@ -503,7 +503,7 @@ mod tests {
         let child_type_def = config.documents.types[1].clone();
         let (tmp, store) = project(
             &[(
-                ".lazyspec/cache/git/a-git/docs/a/A-001-parent.md",
+                ".lazyspec/git/a-git-af7cc265/docs/a/A-001-parent.md",
                 &doc_md("Parent", "a", "[]"),
             )],
             &["b"],
@@ -526,11 +526,13 @@ mod tests {
         assert!(msg.contains("/a.git"), "{msg}");
         assert!(msg.contains("/b.git"), "{msg}");
         assert!(
-            !tmp.path().join(".lazyspec/cache/git/b-git/docs/b").exists(),
+            !tmp.path()
+                .join(".lazyspec/git/b-git-5690daa2/docs/b")
+                .exists(),
             "no file written under the child's own cache dir"
         );
         assert_eq!(
-            fs::read_dir(tmp.path().join(".lazyspec/cache/git/a-git/docs/a"))
+            fs::read_dir(tmp.path().join(".lazyspec/git/a-git-af7cc265/docs/a"))
                 .unwrap()
                 .count(),
             1,

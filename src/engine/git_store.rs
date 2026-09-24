@@ -13,9 +13,11 @@ use crate::engine::store::doc_root;
 use crate::engine::store_dispatch::{CreatedDoc, DocumentStore, FilesystemStore, PushOutcome};
 
 /// Where every git type sharing `remote` + `branch` clones to:
-/// `.lazyspec/cache/git/<slug>` (BUG-032 AC1). Keyed on the repo, not the type
-/// name, so two types declaring the same remote and branch resolve to one
-/// clone regardless of how many `[[types]]` entries name it.
+/// `.lazyspec/git/<slug>` (BUG-032 AC1). Keyed on the repo, not the type name,
+/// so two types declaring the same remote and branch resolve to one clone
+/// regardless of how many `[[types]]` entries name it. `branch: None` (the
+/// remote's default branch) and that same default branch named explicitly are
+/// different slugs, so they clone separately.
 pub fn clone_root(root: &Path, remote: &str, branch: Option<&str>) -> PathBuf {
     root.join(clone_relative(remote, branch))
 }
@@ -29,7 +31,7 @@ pub(crate) fn type_clone_root(root: &Path, type_def: &TypeDef) -> PathBuf {
 /// [`clone_root`], root-relative -- what a root-relative doc path is checked
 /// against to find its clone.
 fn clone_relative(remote: &str, branch: Option<&str>) -> PathBuf {
-    Path::new(".lazyspec/cache/git").join(slug(remote, branch))
+    Path::new(".lazyspec/git").join(slug(remote, branch))
 }
 
 pub(crate) fn type_clone_relative(type_def: &TypeDef) -> PathBuf {
@@ -44,13 +46,39 @@ pub(crate) fn type_clone_relative(type_def: &TypeDef) -> PathBuf {
 /// `git@` is stripped, every other run of non-alphanumerics folds to one `-`,
 /// and the branch (when pinned) is appended -- so the same repo spelled with a
 /// different scheme, host case, or trailing `.git` still slugs identically.
+///
+/// The readable part alone collides: `feature/x` and `feature-x`, differing
+/// case, and `org/a.b` vs `org/a-b` all fold to the same text. A trailing
+/// `-<hash>` of the raw, unfolded `remote` + `branch` (BUG-032) keeps those
+/// apart while leaving the slug readable.
 fn slug(remote: &str, branch: Option<&str>) -> String {
     let mut slug = slugify(strip_remote_scheme(remote));
     if let Some(branch) = branch {
         slug.push_str("--");
         slug.push_str(&slugify(branch));
     }
+    slug.push('-');
+    slug.push_str(&fnv1a_hex(remote, branch));
     slug
+}
+
+/// FNV-1a (32-bit) of `remote` + a NUL separator + `branch` (empty for the
+/// default branch), rendered as 8 lowercase hex digits. Hand-written rather
+/// than `DefaultHasher` (unstable across Rust versions) or a hashing crate
+/// (no dependency already carries one).
+fn fnv1a_hex(remote: &str, branch: Option<&str>) -> String {
+    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut hash = OFFSET_BASIS;
+    for byte in remote
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(branch.unwrap_or("").bytes())
+    {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:08x}")
 }
 
 fn strip_remote_scheme(remote: &str) -> &str {
@@ -80,10 +108,6 @@ fn commit_clone(root: &Path, type_def: &TypeDef, ops: &dyn GitRefOps, message: &
     ops.commit(&type_clone_root(root, type_def), message)
 }
 
-/// What [`GitStore::commit`] and [`commit_if_git_backed_outcome`] report for a
-/// local-only commit (BUG-032 AC2): never `Synced`, so every git write's
-/// `--json` carries `synced: false` and the exact clone to run `lazyspec push`
-/// against.
 fn local_only_warning(clone: &Path) -> String {
     format!(
         "committed locally to {}; run `lazyspec push` to publish",
@@ -515,6 +539,28 @@ mod tests {
         assert_ne!(
             clone_root(root, REMOTE, Some("next")),
             clone_root(root, "https://example.com/other.git", Some("next")),
+        );
+    }
+
+    // BUG-032: the readable slug alone folds `feature/x` and `feature-x` (and
+    // case/`.`-vs-`-` spellings of a remote) to the same text; the trailing
+    // hash of the raw remote + branch keeps them apart. Stable and literal, so
+    // a future change to the algorithm shows up as a diff here.
+    #[test]
+    fn slug_hash_separates_folded_collisions_and_is_stable() {
+        let root = Path::new("/proj");
+
+        assert_ne!(
+            clone_root(root, REMOTE, Some("feature/x")),
+            clone_root(root, REMOTE, Some("feature-x")),
+        );
+        assert_ne!(
+            clone_root(root, "https://Example.com/org/a.b.git", None),
+            clone_root(root, "https://example.com/org/a-b.git", None),
+        );
+        assert_eq!(
+            clone_root(root, REMOTE, Some("next")),
+            Path::new("/proj/.lazyspec/git/example-com-specs-git--next-b14d63f7"),
         );
     }
 }

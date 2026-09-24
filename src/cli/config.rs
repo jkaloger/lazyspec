@@ -1382,7 +1382,7 @@ inverse = "implemented-by"
             (
                 "team",
                 "docs/rfcs",
-                "/a/b/.lazyspec/cache/git/github-com-org-shared-specs-git/docs/rfcs",
+                "/a/b/.lazyspec/git/github-com-org-shared-specs-git-0f507c58/docs/rfcs",
             ),
         ] {
             let ty = type_named(&json, name);

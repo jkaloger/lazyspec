@@ -121,14 +121,14 @@ fn existing_clone_is_read_when_the_remote_is_gone() {
 }
 
 #[test]
-fn first_read_gitignores_the_cache() {
+fn first_read_gitignores_the_shared_clone_root() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
 
     Store::load(project.path(), &git_config(remote.path(), None)).unwrap();
 
     let gitignore = std::fs::read_to_string(project.path().join(".lazyspec/.gitignore")).unwrap();
-    assert!(gitignore.lines().any(|l| l == "cache/"), "{gitignore:?}");
+    assert!(gitignore.lines().any(|l| l == "git/"), "{gitignore:?}");
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn link_and_unlink_each_commit_locally_once() {
     let remote_before = commit_count(remote.path(), "next");
     let before = commit_count(&clone, "HEAD");
 
-    lazyspec::engine::ops::link::link_with_config(
+    let link_outcome = lazyspec::engine::ops::link::link_with_config(
         root,
         &store,
         "RFC-001",
@@ -304,8 +304,12 @@ fn link_and_unlink_each_commit_locally_once() {
 
     assert_eq!(commit_count(&clone, "HEAD"), before + 1, "link");
     assert!(clone_file(&clone, "RFC-001-a.md").contains("related-to: RFC-002"));
+    assert!(
+        !link_outcome.push_outcome.is_synced(),
+        "a git write is local-only now"
+    );
 
-    lazyspec::engine::ops::link::unlink_with_config(
+    let unlink_outcome = lazyspec::engine::ops::link::unlink_with_config(
         root,
         &store,
         "RFC-001",
@@ -318,6 +322,10 @@ fn link_and_unlink_each_commit_locally_once() {
 
     assert_eq!(commit_count(&clone, "HEAD"), before + 2, "unlink");
     assert!(!clone_file(&clone, "RFC-001-a.md").contains("RFC-002"));
+    assert!(
+        !unlink_outcome.push_outcome.is_synced(),
+        "a git write is local-only now"
+    );
     assert_eq!(
         commit_count(remote.path(), "next"),
         remote_before,
@@ -336,15 +344,65 @@ fn ignore_and_unignore_each_commit_locally_once() {
     let fs = RealFileSystem;
     let before = commit_count(&clone, "HEAD");
 
-    lazyspec::cli::ignore::ignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
+    let ignore_outcome =
+        lazyspec::cli::ignore::ignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
 
     assert_eq!(commit_count(&clone, "HEAD"), before + 1, "ignore");
     assert!(clone_file(&clone, "RFC-001-a.md").contains("validate-ignore: true"));
+    assert!(!ignore_outcome.is_synced(), "a git write is local-only now");
 
-    lazyspec::cli::ignore::unignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
+    let unignore_outcome =
+        lazyspec::cli::ignore::unignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
 
     assert_eq!(commit_count(&clone, "HEAD"), before + 2, "unignore");
     assert!(!clone_file(&clone, "RFC-001-a.md").contains("validate-ignore"));
+    assert!(
+        !unignore_outcome.is_synced(),
+        "a git write is local-only now"
+    );
+}
+
+#[test]
+fn govern_add_and_remove_each_commit_locally_once() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let fs = RealFileSystem;
+    let before = commit_count(&clone, "HEAD");
+
+    let (governs, add_outcome) = lazyspec::cli::govern::run_add(
+        &store,
+        &config,
+        &GitCli,
+        &fs,
+        "RFC-001",
+        &["src/engine/**".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(governs, vec!["src/engine/**".to_string()]);
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1, "govern add");
+    assert!(clone_file(&clone, "RFC-001-a.md").contains("src/engine/**"));
+    assert!(!add_outcome.is_synced(), "a git write is local-only now");
+
+    let store = Store::load(root, &config).unwrap();
+    let (governs, remove_outcome) = lazyspec::cli::govern::run_remove(
+        &store,
+        &config,
+        &GitCli,
+        &fs,
+        "RFC-001",
+        &["src/engine/**".to_string()],
+    )
+    .unwrap();
+
+    assert!(governs.is_empty());
+    assert_eq!(commit_count(&clone, "HEAD"), before + 2, "govern remove");
+    assert!(!clone_file(&clone, "RFC-001-a.md").contains("governs"));
+    assert!(!remove_outcome.is_synced(), "a git write is local-only now");
 }
 
 #[test]
@@ -362,12 +420,18 @@ fn pin_commits_locally_once() {
     let clone = identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(&clone, "HEAD");
 
-    lazyspec::cli::pin::run(&store, &config, &GitCli, &RealFileSystem, "RFC-001", true).unwrap();
+    let pin_outcome =
+        lazyspec::cli::pin::run(&store, &config, &GitCli, &RealFileSystem, "RFC-001", true)
+            .unwrap();
 
     assert_eq!(commit_count(&clone, "HEAD"), before + 1);
     assert!(clone_file(&clone, "RFC-001-a.md").contains("reviewed:"));
+    assert!(!pin_outcome.is_synced(), "a git write is local-only now");
 }
 
+// This test runs the compiled binary rather than calling `fix::run` in
+// process, so the `--json` output it prints (including `synced`) can be
+// asserted rather than discarded.
 #[test]
 fn fix_commits_locally_once_for_the_document_it_repairs() {
     let remote = shared_repo();
@@ -382,28 +446,20 @@ fn fix_commits_locally_once_for_the_document_it_repairs() {
     git(remote.path(), &["checkout", "main"]);
     let project = TempDir::new().unwrap();
     let root = project.path();
-    let config = git_config(remote.path(), Some("next"));
-    let store = Store::load(root, &config).unwrap();
+    write_project_config(root, remote.path(), Some("next"));
+    // RFC-003 has no `author` and fails to parse, so it never appears in
+    // `list`; this just forces the first-read clone into existence.
+    assert!(lazyspec(root, &["list", "--json"]).status.success());
     let clone = identify_clone(root, remote.path(), Some("next"));
     let before = commit_count(&clone, "HEAD");
     let relative = clone
         .strip_prefix(root)
         .unwrap()
         .join("docs/rfcs/RFC-003-c.md");
-    let paths = vec![relative.to_string_lossy().into_owned()];
 
-    let code = lazyspec::cli::fix::run(
-        root,
-        &store,
-        &config,
-        &paths,
-        false,
-        true,
-        &GitCli,
-        &RealFileSystem,
-    );
+    let json = fetch_json(root, &["fix", &relative.to_string_lossy(), "--json"]);
 
-    assert_eq!(code, 0);
+    assert_eq!(json["synced"], serde_json::json!(false), "{json}");
     assert_eq!(commit_count(&clone, "HEAD"), before + 1);
     assert!(clone_file(&clone, "RFC-003-c.md").contains("author:"));
 }
@@ -679,8 +735,12 @@ fn update_clone_rebases_and_keeps_the_unpushed_local_commit() {
 // --- STORY-281 AC5: `fetch` brings the clone current ---
 
 /// A project whose only remote type is `git`, written as the binary reads it so
-/// `fetch --json` is exercised end to end, stdout included.
-fn write_project_config(root: &Path, remote: &Path) {
+/// `fetch --json` is exercised end to end, stdout included. `branch` pins the
+/// clone to a non-default branch, matching [`git_config`].
+fn write_project_config(root: &Path, remote: &Path, branch: Option<&str>) {
+    let branch_line = branch
+        .map(|b| format!("branch = \"{b}\"\n"))
+        .unwrap_or_default();
     let toml = format!(
         r#"
 [[types]]
@@ -690,7 +750,7 @@ dir = "docs/rfcs"
 prefix = "RFC"
 store = "git"
 remote = "{}"
-
+{branch_line}
 [[types]]
 name = "note"
 plural = "notes"
@@ -739,7 +799,7 @@ fn fetch_brings_the_clone_current_and_reports_the_git_type() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
-    write_project_config(root, remote.path());
+    write_project_config(root, remote.path(), None);
     assert!(!ids_via_binary(root).contains("RFC-002"));
 
     write_rfc(remote.path(), "RFC-002-b.md", "B on main");
@@ -760,7 +820,7 @@ fn fetch_reports_a_document_removed_upstream_and_drops_it_from_the_clone() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
-    write_project_config(root, remote.path());
+    write_project_config(root, remote.path(), None);
     assert!(ids_via_binary(root).contains("RFC-001"));
 
     git(remote.path(), &["rm", "-q", "docs/rfcs/RFC-001-a.md"]);
@@ -780,7 +840,7 @@ fn fetch_type_filter_accepts_a_git_type_and_names_git_when_refusing_another() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
-    write_project_config(root, remote.path());
+    write_project_config(root, remote.path(), None);
 
     let outcomes = fetch_json(root, &["fetch", "--type", "rfc", "--json"]);
     assert_eq!(outcomes[0]["type"], "rfc", "{outcomes}");
@@ -1123,7 +1183,7 @@ fn create_with_parent_through_the_binary_writes_into_the_clone_and_commits_local
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
-    write_project_config(root, remote.path());
+    write_project_config(root, remote.path(), None);
     assert!(ids_via_binary(root).contains("RFC-001"));
     let clone = identify_clone(root, remote.path(), None);
 

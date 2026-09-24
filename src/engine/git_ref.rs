@@ -233,8 +233,6 @@ impl GitCli {
             .collect())
     }
 
-    /// Local commits on `HEAD` not reachable from `upstream` -- what
-    /// `push` would push and `unpushed` reports.
     fn count_ahead(&self, clone: &Path, upstream: &str) -> Result<usize> {
         let range = format!("{upstream}..HEAD");
         let output = self.run_git(clone, &["rev-list", "--count", &range])?;

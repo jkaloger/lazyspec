@@ -3,8 +3,9 @@ use crate::engine::config::Config;
 use crate::engine::document::rewrite_frontmatter;
 use crate::engine::fs::FileSystem;
 use crate::engine::git_ref::GitRefOps;
-use crate::engine::git_store::commit_if_git_backed;
+use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::store::{compile_governs, Store};
+use crate::engine::store_dispatch::PushOutcome;
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCompleter;
@@ -47,7 +48,7 @@ pub fn run_add(
     fs: &dyn FileSystem,
     id: &str,
     globs: &[String],
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, PushOutcome)> {
     let doc = resolve_shorthand_or_path(store, id)?;
     let mut next = doc.clone();
     for glob in globs {
@@ -66,7 +67,7 @@ pub fn run_remove(
     fs: &dyn FileSystem,
     id: &str,
     globs: &[String],
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, PushOutcome)> {
     let doc = resolve_shorthand_or_path(store, id)?;
     let mut next = doc.clone();
     next.governs.retain(|g| !globs.contains(g));
@@ -83,7 +84,7 @@ fn write_governs(
     git: &dyn GitRefOps,
     fs: &dyn FileSystem,
     next: &crate::engine::document::DocMeta,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, PushOutcome)> {
     let full_path = store.root().join(&next.path);
     rewrite_frontmatter(&full_path, fs, |value| {
         let map = value
@@ -102,24 +103,28 @@ fn write_governs(
         }
         Ok(())
     })?;
-    commit_if_git_backed(
+    let push_outcome = commit_if_git_backed_outcome(
         store.root(),
         config,
         &next.path,
         git,
         &format!("govern {}", next.id),
     )?;
-    Ok(next.governs.clone())
+    Ok((next.governs.clone(), push_outcome))
 }
 
-pub fn print(id: &str, governs: &[String], json: bool) -> Result<()> {
+pub fn print(id: &str, governs: &[String], push_outcome: &PushOutcome, json: bool) -> Result<()> {
     if json {
-        let out = serde_json::json!({ "doc": id, "governs": governs });
+        let mut out = serde_json::json!({ "doc": id, "governs": governs });
+        crate::cli::json::merge_push_outcome(&mut out, push_outcome);
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
     for glob in governs {
         println!("{glob}");
+    }
+    if let Some(warning) = push_outcome.warning() {
+        eprintln!("{}", warning);
     }
     Ok(())
 }

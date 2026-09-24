@@ -17,7 +17,7 @@ Two `git`-store types on the same remote + branch. Create on one, then create on
 
 ## Reproduction
 
-Observed in a client repo (`risk`, `assumption`, `issue`, `dependency` all `store = "git"`, one shared remote, default branch). Reflog timeline:
+Observed in `make-a-wish-replatform` (`risk`, `assumption`, `issue`, `dependency` all `store = "git"`, remote `inlight-media/account-make-a-wish`, default branch). Reflog timeline:
 
 | time | clone | event |
 |---|---|---|
