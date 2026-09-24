@@ -224,7 +224,12 @@ pub fn run_with_body(
         fs_ops::replace_body(&path, body_text)?;
     }
 
-    Ok((path, PushOutcome::Synced))
+    let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+    let id = crate::engine::store::extract_id(&relative);
+    let push_outcome =
+        commit_if_git_backed_outcome(root, config, &relative, &GitCli, &format!("create {id}"))?;
+
+    Ok((path, push_outcome))
 }
 
 /// Author a child of `parent_id`, branching on the child type's store.

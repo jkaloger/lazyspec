@@ -346,8 +346,13 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Delete { path, json }) => {
             let store = load_store(&cwd, &config)?;
             let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            let push_outcome =
-                lazyspec::cli::delete::run_with_config(&cwd, &store, &path, Some(&config))?;
+            let push_outcome = lazyspec::cli::delete::run_with_config(
+                &cwd,
+                &store,
+                &path,
+                Some(&config),
+                &GitCli,
+            )?;
             if json {
                 let id = lazyspec::cli::resolve::resolve_to_id(&store, &path)?;
                 let mut out = serde_json::json!({

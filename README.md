@@ -697,6 +697,8 @@ In the TUI, a project with any `git`-store type shows the total unpushed commit 
 
 `fetch` prints every warning to stderr as `warning: <message>` in both modes. `fetch --json` also prints one entry per type on stdout: `{ "type", "fetched", "new", "removed" }`, plus a `"warnings"` array repeating that type's warnings (a subtree the composed read could not refresh, so the prior cache stands; a connection truncated at its cap on one document; a document whose `Status` the authority board does not set) when it produced any, and an `"error"` string when its fetch failed.
 
+Before the shared-clone model, each `git` type cloned into its own `.lazyspec/cache/<type>/`. `fetch` migrates away from that: for every configured `git` type, a leftover clone there with nothing unpushed and no uncommitted changes is deleted and reported both as a human line (`removed legacy clone for type \`<name>\`: <path>`) and, in every mode, as `note: removed legacy clone for type \`<name>\`: <path>` on stderr. One that is not clean -- or whose cleanliness could not even be checked -- is left alone and named in a `warning:` on stderr instead, for you to push or copy the changes out (or investigate) and delete it by hand. A cache-backed type's own `.lazyspec/cache/<name>` (`github-issues` and the rest) is never touched, and neither is a `git` type literally named `config`, whose legacy path would collide with the URL-`extends` clone.
+
 GitHub native fields (issue types, Projects v2 boards, milestone associations) need the `project` scope on your token:
 
 ```sh
@@ -721,6 +723,8 @@ A `.lazyspec.toml` containing only `extends = "<dir-or-url>"` adopts the configu
 Only `[[types]].dir` and `[templates].dir` follow the extended root. `[governs] root`, `reviewed`/staleness anchors, `@ref` expansion, and `.lazyspec/cache/` for remote-backed types resolve against the local repository, not the extended one.
 
 The config's mutating commands (`config add-type`, `config set-edge`, and the rest), the TUI settings screen, and `fix --config` refuse to run under `extends`. `config --json` reports the resolved extended root as `.extends`.
+
+A URL `extends` clone is a commit target like a `git` type's clone: a mutation on a `filesystem` type writes into it and commits locally, reporting `"synced": false`, and never pushes. `lazyspec fetch` rebases that clone onto the fetched head rather than resetting it away, so the local write survives a refresh. `lazyspec push` covers it alongside every `git` type's clone, and `status --json`'s `git_stores` (and the TUI's unpushed count) count its unpushed commits the same way.
 
 ### Custom types
 

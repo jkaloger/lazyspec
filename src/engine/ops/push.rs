@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::engine::config::{Config, StoreBackend};
 use crate::engine::git_ref::{GitRefOps, RebaseConflict, RebaseInProgress};
 use crate::engine::git_store::type_clone_root;
-use crate::engine::store::extract_id;
+use crate::engine::store::{doc_root, extract_id};
 
 /// A git type sharing a clone, reduced to what the duplicate-id check and the
 /// CLI surface need from it: its name and its `dir` relative to the clone
@@ -41,7 +41,11 @@ impl CloneGroup {
 
 /// Every distinct clone the configured `git` types resolve to, deduped by
 /// clone root so two types sharing a remote + branch appear once (BUG-032
-/// AC1). Order follows first appearance in `[[types]]`.
+/// AC1), plus the URL-`extends` clone when one is configured (BUG-032 AC10):
+/// every `filesystem` type's writes land there too, so `push`, `status
+/// --json`'s `git_stores` and the TUI's unpushed count all cover it the same
+/// way they cover a `git` type's clone. Order follows first appearance in
+/// `[[types]]`, with the `extends` clone (if any) last.
 pub fn distinct_clones(root: &Path, config: &Config) -> Vec<CloneGroup> {
     let mut groups: Vec<CloneGroup> = Vec::new();
     for type_def in config
@@ -67,6 +71,37 @@ pub fn distinct_clones(root: &Path, config: &Config) -> Vec<CloneGroup> {
                 types: vec![info],
             }),
         }
+    }
+    if let Some(extends) = config.extends.as_ref().filter(|e| e.remote.is_some()) {
+        // Every `filesystem` type actually resolving under the extends clone
+        // (BUG-032 AC6/AC10): `dir` is clone-relative, matching the `git`
+        // types built above, so `duplicate_ids` scans it the same way.
+        let types: Vec<ClonedTypeInfo> = config
+            .documents
+            .types
+            .iter()
+            .filter(|t| t.store == StoreBackend::Filesystem)
+            .filter_map(|t| {
+                let dir = doc_root(config, root, t)
+                    .strip_prefix(&extends.root)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned();
+                Some(ClonedTypeInfo {
+                    name: t.name.clone(),
+                    dir,
+                })
+            })
+            .collect();
+        groups.push(CloneGroup {
+            remote: extends
+                .remote
+                .clone()
+                .expect("filtered to a URL extends above"),
+            branch: extends.branch.clone(),
+            path: extends.root.clone(),
+            types,
+        });
     }
     groups
 }
@@ -326,6 +361,85 @@ mod tests {
         let clones = distinct_clones(tmp.path(), &config);
 
         assert_eq!(clones.len(), 2);
+    }
+
+    fn url_extends_config(root: &Path) -> Config {
+        Config {
+            extends: Some(crate::engine::config::Extends {
+                root: root.join(".lazyspec/cache/config"),
+                remote: Some("https://example.com/shared.git".to_string()),
+                branch: Some("next".to_string()),
+            }),
+            ..Config::default()
+        }
+    }
+
+    // BUG-032 AC10: a URL `extends` clone is a push target too, alongside any
+    // `git` type's clone.
+    #[test]
+    fn distinct_clones_includes_a_url_extends_clone() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends_config(tmp.path());
+
+        let clones = distinct_clones(tmp.path(), &config);
+
+        assert_eq!(clones.len(), 1);
+        assert_eq!(clones[0].path, tmp.path().join(".lazyspec/cache/config"));
+        assert_eq!(clones[0].remote, "https://example.com/shared.git");
+        assert_eq!(clones[0].branch.as_deref(), Some("next"));
+    }
+
+    // BUG-032 AC6: the `filesystem` types actually resolving under the
+    // extends clone populate `types`, so `duplicate_ids` has a directory to
+    // scan there -- without this the extends clone's push never caught a
+    // collision at all.
+    #[test]
+    fn distinct_clones_populates_the_extends_clones_filesystem_types() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = url_extends_config(tmp.path());
+        config.documents.types = vec![TypeDef {
+            dir: "docs/rfcs".to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        }];
+
+        let clones = distinct_clones(tmp.path(), &config);
+
+        assert_eq!(clones.len(), 1);
+        assert_eq!(clones[0].type_names(), vec!["rfc"]);
+        assert_eq!(clones[0].types[0].dir, "docs/rfcs");
+    }
+
+    #[test]
+    fn distinct_clones_ignores_a_directory_extends() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config {
+            extends: Some(crate::engine::config::Extends {
+                root: tmp.path().join("shared"),
+                remote: None,
+                branch: None,
+            }),
+            ..Config::default()
+        };
+
+        assert!(distinct_clones(tmp.path(), &config).is_empty());
+    }
+
+    #[test]
+    fn run_pushes_an_existing_url_extends_clone() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends_config(tmp.path());
+        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache/config")).unwrap();
+
+        let ops = MockGitRefClient::new()
+            .with_rebase_onto_remote_result(Ok(()))
+            .with_added_files_result(Ok(vec![]))
+            .with_push_commits_result(Ok(1));
+
+        let results = run(tmp.path(), &config, &ops);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].error.is_none());
+        assert_eq!(results[0].pushed, 1);
     }
 
     #[test]

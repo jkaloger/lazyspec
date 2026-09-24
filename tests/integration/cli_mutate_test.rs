@@ -212,6 +212,7 @@ fn delete_github_milestones_type_routes_to_milestone_branch() {
         &store,
         "MILESTONE-1",
         Some(&config),
+        &MockGitRefClient::new(),
     )
     .unwrap_err()
     .to_string();

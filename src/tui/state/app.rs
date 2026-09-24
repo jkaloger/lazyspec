@@ -3060,6 +3060,7 @@ impl App {
             &self.store,
             &doc_path_str,
             Some(config),
+            &*self.git,
         )?;
         self.store.remove_file(&doc_path);
         self.filtered_docs_cache = None;

@@ -95,6 +95,9 @@ impl GitRefOps for RenamingGit {
     fn added_files(&self, _clone: &Path, _branch: Option<&str>) -> Result<Vec<String>> {
         unreachable!("fix --governs lists no added files")
     }
+    fn has_uncommitted_changes(&self, _clone: &Path) -> Result<bool> {
+        unreachable!("fix --governs checks no working tree state")
+    }
     fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
         unreachable!("fix --governs pushes nothing")
     }

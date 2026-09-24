@@ -7,6 +7,7 @@ date: 2026-09-08
 tags: []
 related:
 - related-to: RFC-071
+- related-to: BUG-032
 reviewed: bb17f1630effa6c943b9fb308098d4cb3ba77469
 ---
 
@@ -137,3 +138,10 @@ The earlier two-story split folded story 1 into story 2. That was wrong: the res
 - **Push on every write is slow.** A `create` becomes a network round trip. Accepted over batching, which would mean local commits nothing pushes and a divergence to explain.
 - **Two git backends will be confused.** `git` and `git-ref` differ in a way the names only hint at. Mitigated by documenting the split in `--help` and the README rather than by a longer name.
 - **`extends` makes a repo's docs invisible in the repo.** Someone reading the code sees a one-line config and no `docs/`. That is the point, and it is still a surprise; the one-liner is self-describing enough to follow.
+
+
+## Amendment (BUG-032)
+
+Decision 5 and the "push on every write is slow" risk: superseded.
+
+Git-store types sharing one remote + branch now share one clone at `.lazyspec/git/<slug>`, not one clone per type. Writes commit locally; nothing pushes on write. `lazyspec push` fetches, rebases onto the remote, then pushes. A rebase conflict or a duplicate ID (two clones independently numbering the same `incremental` id) blocks that clone's push and leaves it to the human, named by clone path. `fetch` rebases a clone onto the fetched head instead of resetting it, so unpushed local commits survive. The URL-`extends` clone follows the same model: a `filesystem` write there commits locally, `fetch` rebases it, and `push` covers it alongside every `git` type's clone.

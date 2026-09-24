@@ -127,11 +127,46 @@ fn git_type_for_doc_path<'a>(config: &'a Config, doc_path: &Path) -> Option<&'a 
         .find(|t| doc_path.starts_with(type_clone_relative(t)))
 }
 
+/// The URL-`extends` clone (BUG-032 AC10): a commit target parallel to a
+/// `git` type's, but one clone shared by every `filesystem` type instead of
+/// one keyed by remote + branch (RFC-072 Decision 4: only `filesystem`
+/// resolution moves under `extends`). `None` for a local-directory `extends`
+/// (nothing lazyspec clones there) or no `extends` at all.
+fn extends_clone_root(config: &Config) -> Option<&Path> {
+    config
+        .extends
+        .as_ref()
+        .filter(|e| e.remote.is_some())
+        .map(|e| e.root.as_path())
+}
+
+/// The clone `doc_path` should commit to: a `git` type's by prefix match, or
+/// the URL-`extends` clone when no `git` type claims it and `doc_path` falls
+/// under it. `doc_path` is root-relative for every backend except a
+/// `filesystem` type under `extends`, which is already absolute
+/// (`path_root_for_relativizing`); resolving against `root` before the prefix
+/// check handles both shapes alike. `None` when `doc_path` belongs to
+/// neither.
+fn clone_for_doc_path(root: &Path, config: &Config, doc_path: &Path) -> Option<PathBuf> {
+    if let Some(type_def) = git_type_for_doc_path(config, doc_path) {
+        return Some(type_clone_root(root, type_def));
+    }
+    let extends_root = extends_clone_root(config)?;
+    let absolute = if doc_path.is_absolute() {
+        doc_path.to_path_buf()
+    } else {
+        root.join(doc_path)
+    };
+    absolute
+        .starts_with(extends_root)
+        .then(|| extends_root.to_path_buf())
+}
+
 /// The commit for a writer that rewrites a document file without going through
 /// [`DocumentStore`] (`link`, `ignore`, `pin`, `fix`, the TUI's tag write).
-/// A path under no git type's clone is not ours and is `Ok(())`. A clone with
-/// nothing staged commits nothing, so callers that touch several files may
-/// call this once per file.
+/// A path under no git type's clone and no `extends` clone is not ours and is
+/// `Ok(())`. A clone with nothing staged commits nothing, so callers that
+/// touch several files may call this once per file.
 pub fn commit_if_git_backed(
     root: &Path,
     config: &Config,
@@ -139,16 +174,16 @@ pub fn commit_if_git_backed(
     ops: &dyn GitRefOps,
     message: &str,
 ) -> Result<()> {
-    match git_type_for_doc_path(config, doc_path) {
-        Some(type_def) => commit_clone(root, type_def, ops, message),
+    match clone_for_doc_path(root, config, doc_path) {
+        Some(clone) => ops.commit(&clone, message),
         None => Ok(()),
     }
 }
 
 /// [`commit_if_git_backed`], reporting the push outcome: `LocalOnly` naming
-/// the clone when `doc_path` is git-backed, `Synced` (a no-op) otherwise --
-/// for a caller (`create --parent`) that hands the outcome on to `--json`
-/// rather than discarding it.
+/// the clone when `doc_path` is git- or `extends`-backed, `Synced` (a no-op)
+/// otherwise -- for a caller (`create --parent`) that hands the outcome on to
+/// `--json` rather than discarding it.
 pub fn commit_if_git_backed_outcome(
     root: &Path,
     config: &Config,
@@ -156,16 +191,148 @@ pub fn commit_if_git_backed_outcome(
     ops: &dyn GitRefOps,
     message: &str,
 ) -> Result<PushOutcome> {
-    match git_type_for_doc_path(config, doc_path) {
-        Some(type_def) => {
-            let clone = type_clone_root(root, type_def);
-            commit_clone(root, type_def, ops, message)?;
+    match clone_for_doc_path(root, config, doc_path) {
+        Some(clone) => {
+            ops.commit(&clone, message)?;
             Ok(PushOutcome::LocalOnly {
                 warning: local_only_warning(&clone),
             })
         }
         None => Ok(PushOutcome::Synced),
     }
+}
+
+/// [`commit_if_git_backed_outcome`], keyed by `type_def` rather than a doc
+/// path already on disk: every `filesystem` type's documents share the one
+/// `extends` clone (RFC-072 Decision 4), so a caller that has not yet
+/// resolved a specific document -- `create`, or a backend dispatch (like
+/// [`FilesystemStore`]) driven by a doc id, not a path -- can commit there
+/// directly. Called by every writer that rewrites a document without a path
+/// in hand (`create`, `update`, `delete`, `set_provenance`, `sync_tags`), so
+/// none of them repeats this reasoning at its own call site.
+///
+/// `Synced` for every backend but a `filesystem` type whose resolved
+/// [`doc_root`] actually falls under the `extends` clone -- a `git` type
+/// commits through [`GitStore`] instead, and a `filesystem` type is `Synced`
+/// with no `extends` clone at all, or with one that its own `dir` does not
+/// resolve into (BUG-032 AC6). `Synced`, with no warning, also when the
+/// clone had nothing to stage: only a real commit means "publish this with
+/// `lazyspec push`".
+pub fn commit_if_extends_backed(
+    root: &Path,
+    config: &Config,
+    type_def: &TypeDef,
+    ops: &dyn GitRefOps,
+    message: &str,
+) -> Result<PushOutcome> {
+    if type_def.store != StoreBackend::Filesystem {
+        return Ok(PushOutcome::Synced);
+    }
+    let Some(clone) = extends_clone_root(config) else {
+        return Ok(PushOutcome::Synced);
+    };
+    if !doc_root(config, root, type_def).starts_with(clone) {
+        return Ok(PushOutcome::Synced);
+    }
+    if !ops.has_uncommitted_changes(clone)? {
+        return Ok(PushOutcome::Synced);
+    }
+    ops.commit(clone, message)?;
+    Ok(PushOutcome::LocalOnly {
+        warning: local_only_warning(clone),
+    })
+}
+
+/// One old per-type git clone (`.lazyspec/cache/<type>/`, pre-BUG-032)
+/// [`migrate_legacy_clones`] found clean and deleted -- superseded by the
+/// shared clone `Store::load` now clones at `.lazyspec/git/<slug>` (AC1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedLegacyClone {
+    pub type_name: String,
+    pub path: PathBuf,
+}
+
+/// Delete every configured `git` type's old per-type clone that has nothing
+/// unpushed and no uncommitted changes (BUG-032 AC8) -- `fetch` runs this so a
+/// project upgrading past the per-type-clone era cleans up after itself. A
+/// clone that is not clean is left alone and named in a returned warning
+/// instead, for the human to push or copy the work out of and delete by hand.
+/// A clone whose cleanliness cannot even be checked (a git error) is treated
+/// the same way -- kept, warned about -- rather than failing `fetch` outright.
+///
+/// Only `.lazyspec/cache/<name>` for a type that is *itself* `git` is ever a
+/// candidate: a cache-backed type (`github-issues` et al.) legitimately owns
+/// `.lazyspec/cache/<name>` as its materialized cache. A `git` type literally
+/// named `config` is skipped too, since its legacy path would collide with
+/// `.lazyspec/cache/config`, the URL-`extends` clone (BUG-032 AC10) -- that
+/// one is never a migration candidate, named or not.
+pub fn migrate_legacy_clones(
+    root: &Path,
+    config: &Config,
+    ops: &dyn GitRefOps,
+) -> Result<(Vec<RemovedLegacyClone>, Vec<String>)> {
+    let mut removed = Vec::new();
+    let mut warnings = Vec::new();
+    let extends_clone = extends_clone_root(config);
+    for type_def in config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::Git)
+    {
+        let legacy = root.join(".lazyspec/cache").join(&type_def.name);
+        if !legacy.join(".git").exists() {
+            continue;
+        }
+        if extends_clone == Some(legacy.as_path()) {
+            continue;
+        }
+        let dirty = match ops.has_uncommitted_changes(&legacy) {
+            Ok(dirty) => dirty,
+            Err(err) => {
+                warnings.push(format!(
+                    "legacy clone for type `{}` at {}: could not verify it is clean ({err:#}); delete it by hand if unneeded",
+                    type_def.name,
+                    legacy.display(),
+                ));
+                continue;
+            }
+        };
+        let unpushed = match ops.unpushed(&legacy, type_def.branch.as_deref()) {
+            Ok(unpushed) => unpushed,
+            Err(err) => {
+                warnings.push(format!(
+                    "legacy clone for type `{}` at {}: could not verify it is clean ({err:#}); delete it by hand if unneeded",
+                    type_def.name,
+                    legacy.display(),
+                ));
+                continue;
+            }
+        };
+        if !dirty && unpushed == 0 {
+            std::fs::remove_dir_all(&legacy)
+                .with_context(|| format!("removing legacy clone {}", legacy.display()))?;
+            removed.push(RemovedLegacyClone {
+                type_name: type_def.name.clone(),
+                path: legacy,
+            });
+            continue;
+        }
+        let reason = match (dirty, unpushed) {
+            (true, 0) => "uncommitted changes".to_string(),
+            (false, n) => format!("{n} unpushed commit{}", if n == 1 { "" } else { "s" }),
+            (true, n) => format!(
+                "uncommitted changes and {n} unpushed commit{}",
+                if n == 1 { "" } else { "s" }
+            ),
+        };
+        warnings.push(format!(
+            "legacy clone for type `{}` at {} has {reason}; push it or copy the changes out, then delete it by hand",
+            type_def.name,
+            legacy.display(),
+        ));
+    }
+    Ok((removed, warnings))
 }
 
 /// [`FilesystemStore`] plus a commit: STORY-283 already points every git doc's
@@ -562,5 +729,326 @@ mod tests {
             clone_root(root, REMOTE, Some("next")),
             Path::new("/proj/.lazyspec/git/example-com-specs-git--next-b14d63f7"),
         );
+    }
+
+    // --- migrate_legacy_clones (BUG-032 AC8) ---
+
+    fn write_legacy_clone(root: &Path, type_name: &str) -> PathBuf {
+        let legacy = root.join(".lazyspec/cache").join(type_name);
+        std::fs::create_dir_all(legacy.join(".git")).unwrap();
+        legacy
+    }
+
+    #[test]
+    fn a_clean_legacy_clone_is_removed_and_reported() {
+        let tmp = TempDir::new().unwrap();
+        let td = rfc_type(Some("next"));
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        let legacy = write_legacy_clone(tmp.path(), "rfc");
+
+        let ops = MockGitRefClient::new()
+            .with_has_uncommitted_changes_result(Ok(false))
+            .with_unpushed_result(Ok(0));
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert_eq!(
+            removed,
+            vec![RemovedLegacyClone {
+                type_name: "rfc".to_string(),
+                path: legacy.clone(),
+            }]
+        );
+        assert!(warnings.is_empty());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn a_legacy_clone_with_an_unpushed_commit_is_kept_and_warned() {
+        let tmp = TempDir::new().unwrap();
+        let td = rfc_type(Some("next"));
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        let legacy = write_legacy_clone(tmp.path(), "rfc");
+
+        let ops = MockGitRefClient::new()
+            .with_has_uncommitted_changes_result(Ok(false))
+            .with_unpushed_result(Ok(2));
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains(&legacy.display().to_string()),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("2 unpushed commits"), "{warnings:?}");
+        assert!(legacy.exists());
+    }
+
+    #[test]
+    fn a_legacy_clone_with_uncommitted_changes_is_kept_and_warned() {
+        let tmp = TempDir::new().unwrap();
+        let td = rfc_type(Some("next"));
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        let legacy = write_legacy_clone(tmp.path(), "rfc");
+
+        let ops = MockGitRefClient::new()
+            .with_has_uncommitted_changes_result(Ok(true))
+            .with_unpushed_result(Ok(0));
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("uncommitted changes"), "{warnings:?}");
+        assert!(legacy.exists());
+    }
+
+    // A legacy clone whose cleanliness cannot even be checked (a git error --
+    // a corrupt repo, an unreadable remote-tracking ref) is kept and warned
+    // about, exactly like one confirmed dirty: `fetch` never fails outright
+    // over an old clone `Store::load` has already stopped using.
+    #[test]
+    fn a_legacy_clone_whose_cleanliness_check_errors_is_kept_and_warned() {
+        let tmp = TempDir::new().unwrap();
+        let td = rfc_type(Some("next"));
+        let mut config = Config::default();
+        config.documents.types = vec![td];
+        let legacy = write_legacy_clone(tmp.path(), "rfc");
+
+        let ops = MockGitRefClient::new()
+            .with_has_uncommitted_changes_result(Ok(false))
+            .with_unpushed_result(Err(anyhow::anyhow!("git rev-list failed: bad revision")));
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("could not verify it is clean"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("git rev-list failed: bad revision"),
+            "{warnings:?}"
+        );
+        assert!(legacy.exists());
+    }
+
+    // BUG-032 AC10: a `git` type literally named `config` would otherwise
+    // legacy-migrate at the same path as the URL-`extends` clone; skipped
+    // entirely rather than risking that live clone.
+    #[test]
+    fn a_legacy_clone_path_matching_the_extends_clone_root_is_never_touched() {
+        let tmp = TempDir::new().unwrap();
+        let td = TypeDef {
+            name: "config".to_string(),
+            ..rfc_type(Some("next"))
+        };
+        let mut config = Config {
+            extends: Some(crate::engine::config::Extends {
+                root: tmp.path().join(".lazyspec/cache/config"),
+                remote: Some("https://example.com/shared.git".to_string()),
+                branch: None,
+            }),
+            ..Config::default()
+        };
+        config.documents.types = vec![td];
+        let legacy = write_legacy_clone(tmp.path(), "config");
+
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert!(removed.is_empty());
+        assert!(warnings.is_empty());
+        assert!(legacy.exists());
+        assert!(calls.borrow().is_empty());
+    }
+
+    // A cache-backed (non-`git`) type legitimately owns `.lazyspec/cache/<name>`
+    // as its materialized cache -- migration must never look at it, even when
+    // it happens to hold a `.git` marker.
+    #[test]
+    fn a_non_git_types_cache_dir_is_left_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let story = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
+        let mut config = Config::default();
+        config.documents.types = vec![story];
+        let cache_dir = write_legacy_clone(tmp.path(), "story");
+
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+
+        let (removed, warnings) = migrate_legacy_clones(tmp.path(), &config, &ops).unwrap();
+
+        assert!(removed.is_empty());
+        assert!(warnings.is_empty());
+        assert!(cache_dir.exists());
+        assert!(calls.borrow().is_empty());
+    }
+
+    // --- extends writes as a commit target (BUG-032 AC10) ---
+
+    fn url_extends(root: &Path) -> Config {
+        Config {
+            extends: Some(crate::engine::config::Extends {
+                root: root.join(".lazyspec/cache/config"),
+                remote: Some("https://example.com/shared.git".to_string()),
+                branch: Some("next".to_string()),
+            }),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn commit_if_git_backed_outcome_commits_a_filesystem_doc_under_a_url_extends() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends(tmp.path());
+        let doc_path = Path::new(".lazyspec/cache/config/docs/rfcs/RFC-001-a.md");
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_git_backed_outcome(tmp.path(), &config, doc_path, &mock, "link RFC-001")
+                .unwrap();
+
+        let clone = tmp.path().join(".lazyspec/cache/config");
+        assert_eq!(
+            outcome,
+            PushOutcome::LocalOnly {
+                warning: local_only_warning(&clone),
+            }
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![format!("commit:{}:link RFC-001", clone.display())]
+        );
+    }
+
+    #[test]
+    fn commit_if_git_backed_outcome_ignores_a_directory_extends() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config {
+            extends: Some(crate::engine::config::Extends {
+                root: tmp.path().join("shared"),
+                remote: None,
+                branch: None,
+            }),
+            ..Config::default()
+        };
+        let doc_path = Path::new("shared/docs/rfcs/RFC-001-a.md");
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_git_backed_outcome(tmp.path(), &config, doc_path, &mock, "link RFC-001")
+                .unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn commit_if_extends_backed_commits_a_filesystem_type_under_a_url_extends() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends(tmp.path());
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_extends_backed(tmp.path(), &config, &td, &mock, "tag RFC-001").unwrap();
+
+        let clone = tmp.path().join(".lazyspec/cache/config");
+        assert_eq!(
+            outcome,
+            PushOutcome::LocalOnly {
+                warning: local_only_warning(&clone),
+            }
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![
+                format!("has_uncommitted_changes:{}", clone.display()),
+                format!("commit:{}:tag RFC-001", clone.display()),
+            ]
+        );
+    }
+
+    // BUG-032 AC6: nothing to publish is not "committed locally" -- a clean
+    // clone (the caller's write left nothing staged, or didn't change
+    // anything) reports `Synced` and never runs `commit` at all.
+    #[test]
+    fn commit_if_extends_backed_is_synced_when_the_clone_has_nothing_staged() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends(tmp.path());
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(false));
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_extends_backed(tmp.path(), &config, &td, &mock, "tag RFC-001").unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
+        assert!(
+            !calls.borrow().iter().any(|c| c.starts_with("commit:")),
+            "{:?}",
+            calls.borrow()
+        );
+    }
+
+    // BUG-032 AC6: a `filesystem` type whose own `dir` resolves outside the
+    // `extends` clone (escaping it with `..`) has nothing to commit there --
+    // gated on `doc_root`, not just "an `extends` clone exists".
+    #[test]
+    fn commit_if_extends_backed_is_synced_for_a_type_whose_dir_escapes_the_extends_clone() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends(tmp.path());
+        let td = TypeDef {
+            dir: "../elsewhere".to_string(),
+            ..TypeDef::test_fixture("rfc", StoreBackend::Filesystem)
+        };
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_extends_backed(tmp.path(), &config, &td, &mock, "tag RFC-001").unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn commit_if_extends_backed_is_synced_for_a_git_type() {
+        let tmp = TempDir::new().unwrap();
+        let config = url_extends(tmp.path());
+        let td = rfc_type(Some("next"));
+        let mock = MockGitRefClient::new();
+        let calls = mock.call_log();
+
+        let outcome =
+            commit_if_extends_backed(tmp.path(), &config, &td, &mock, "tag RFC-001").unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn commit_if_extends_backed_is_synced_with_no_extends() {
+        let tmp = TempDir::new().unwrap();
+        let td = TypeDef::test_fixture("rfc", StoreBackend::Filesystem);
+        let mock = MockGitRefClient::new();
+
+        let outcome =
+            commit_if_extends_backed(tmp.path(), &Config::default(), &td, &mock, "tag RFC-001")
+                .unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
     }
 }

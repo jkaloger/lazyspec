@@ -122,6 +122,11 @@ pub trait GitRefOps {
     /// Never fetches; call after `rebase_onto_remote` so the range reads the
     /// rebased tree.
     fn added_files(&self, clone: &Path, branch: Option<&str>) -> Result<Vec<String>>;
+    /// Whether `clone`'s working tree has anything uncommitted -- staged,
+    /// unstaged, or untracked (`git status --porcelain`). What the BUG-032
+    /// AC8 legacy-clone migration checks alongside [`unpushed`](GitRefOps::unpushed)
+    /// before deleting an old per-type clone: either one is a reason to keep it.
+    fn has_uncommitted_changes(&self, clone: &Path) -> Result<bool>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
@@ -561,6 +566,15 @@ impl GitRefOps for GitCli {
             .collect())
     }
 
+    fn has_uncommitted_changes(&self, clone: &Path) -> Result<bool> {
+        let output = self.run_git(clone, &["status", "--porcelain"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git status failed: {}", stderr.trim());
+        }
+        Ok(!output.stdout.is_empty())
+    }
+
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
         let output = self.run_git(root, &["push", remote, refname])?;
         if !output.status.success() {
@@ -780,6 +794,7 @@ pub mod test_support {
         pub push_commits_results: RefCell<Vec<Result<usize>>>,
         pub unpushed_results: RefCell<Vec<Result<usize>>>,
         pub added_files_results: RefCell<Vec<Result<Vec<String>>>>,
+        pub has_uncommitted_changes_results: RefCell<Vec<Result<bool>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
@@ -833,6 +848,7 @@ pub mod test_support {
                 push_commits_results: RefCell::new(vec![]),
                 unpushed_results: RefCell::new(vec![]),
                 added_files_results: RefCell::new(vec![]),
+                has_uncommitted_changes_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
@@ -925,6 +941,13 @@ pub mod test_support {
 
         pub fn with_added_files_result(self, result: Result<Vec<String>>) -> Self {
             self.added_files_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_has_uncommitted_changes_result(self, result: Result<bool>) -> Self {
+            self.has_uncommitted_changes_results
+                .borrow_mut()
+                .push(result);
             self
         }
 
@@ -1128,6 +1151,13 @@ pub mod test_support {
                 branch.unwrap_or("default")
             ));
             Self::pop_or_default(&self.added_files_results)
+        }
+
+        fn has_uncommitted_changes(&self, clone: &Path) -> Result<bool> {
+            self.calls
+                .borrow_mut()
+                .push(format!("has_uncommitted_changes:{}", clone.display()));
+            Self::pop_or_default(&self.has_uncommitted_changes_results)
         }
 
         fn push_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {

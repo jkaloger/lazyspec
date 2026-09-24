@@ -425,6 +425,13 @@ fn shared_config_repo() -> TestFixture {
     git(a.root(), &["init", "-b", "main"]);
     git(a.root(), &["config", "user.email", "test@test.com"]);
     git(a.root(), &["config", "user.name", "Test"]);
+    // Lets `lazyspec push` (BUG-032 AC10) land a fast-forward straight onto
+    // A's checked-out `main` -- otherwise a plain (non-bare) repo refuses a
+    // push to the branch it has checked out.
+    git(
+        a.root(),
+        &["config", "receive.denyCurrentBranch", "updateInstead"],
+    );
     git(a.root(), &["add", "-A"]);
     git(a.root(), &["commit", "-m", "one"]);
     git(a.root(), &["checkout", "-b", "next"]);
@@ -731,5 +738,227 @@ fn fetch_fails_naming_the_remote_when_the_extends_remote_is_gone() {
     assert!(
         stderr.contains(&expected_url),
         "stderr should name {expected_url}, got: {stderr}"
+    );
+}
+
+// BUG-032 AC10: a `filesystem` write into a URL `extends` clone commits
+// locally instead of being lost the way an unlogged write there used to be;
+// `fetch` keeps that commit (rebase, not reset); `push` publishes it; `status
+// --json` counts it as unpushed until it does.
+#[test]
+fn filesystem_write_under_a_url_extends_commits_locally_fetch_keeps_it_and_push_lands_it() {
+    let a = shared_config_repo();
+    let b = TempDir::new().unwrap();
+    std::fs::write(
+        b.path().join(".lazyspec.toml"),
+        format!("extends = \"file://{}\"\n", a.root().display()),
+    )
+    .unwrap();
+
+    // First read materializes the clone.
+    let list = Command::new(binary())
+        .args(["list", "rfc", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run list in B");
+    assert!(list.status.success());
+
+    let clone = b.path().join(".lazyspec/cache/config");
+    let commits_before: u32 = git_stdout(&clone, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+
+    let create = Command::new(binary())
+        .args(["create", "rfc", "New idea", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run create in B");
+    assert!(
+        create.status.success(),
+        "create in B should succeed, stderr: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let created: serde_json::Value = serde_json::from_slice(&create.stdout).unwrap();
+    assert_eq!(created["synced"], false, "got: {created}");
+    assert!(
+        created["warnings"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("lazyspec push"),
+        "got: {created}"
+    );
+
+    let commits_after_create: u32 = git_stdout(&clone, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        commits_after_create,
+        commits_before + 1,
+        "create should land one local commit in the extends clone"
+    );
+
+    // `fetch` rebases the clone onto A rather than resetting it away.
+    let fetch = Command::new(binary())
+        .args(["fetch", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run fetch in B");
+    assert!(
+        fetch.status.success(),
+        "fetch in B should succeed, stderr: {}",
+        String::from_utf8_lossy(&fetch.stderr)
+    );
+    let commits_after_fetch: u32 = git_stdout(&clone, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        commits_after_fetch, commits_after_create,
+        "fetch must keep the local commit, not discard it"
+    );
+
+    // `status --json` lists the extends clone with one unpushed commit.
+    let status = Command::new(binary())
+        .args(["status", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run status in B");
+    assert!(status.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let git_stores = status_json["git_stores"].as_array().unwrap();
+    assert_eq!(git_stores.len(), 1, "got: {status_json}");
+    assert_eq!(git_stores[0]["unpushed"], 1, "got: {status_json}");
+    assert_eq!(
+        Path::new(git_stores[0]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        clone.canonicalize().unwrap(),
+        "the extends clone should be the one reported"
+    );
+
+    // `push` lands the commit on A's remote.
+    let push = Command::new(binary())
+        .args(["push", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run push in B");
+    assert!(
+        push.status.success(),
+        "push in B should succeed, stderr: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let push_json: serde_json::Value = serde_json::from_slice(&push.stdout).unwrap();
+    assert_eq!(push_json["clones"][0]["pushed"], 1, "got: {push_json}");
+
+    let a_head = git_stdout(a.root(), &["rev-parse", "main"]);
+    let clone_head = git_stdout(&clone, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        a_head, clone_head,
+        "the local commit should have landed on A's main"
+    );
+
+    // `status --json` now reports zero unpushed.
+    let status_after_push = Command::new(binary())
+        .args(["status", "--json"])
+        .current_dir(b.path())
+        .output()
+        .expect("failed to run status in B a second time");
+    assert!(status_after_push.status.success());
+    let status_after_push_json: serde_json::Value =
+        serde_json::from_slice(&status_after_push.stdout).unwrap();
+    assert_eq!(
+        status_after_push_json["git_stores"][0]["unpushed"], 0,
+        "got: {status_after_push_json}"
+    );
+}
+
+// BUG-032 AC6: two projects independently extending the same URL number the
+// same `incremental` id in their own copy of the extends clone, exactly as
+// two `git` types sharing a remote can (`push_reports_duplicate_ids_when_two_
+// clones_land_the_same_incremental_id` in git_store_test.rs); the second
+// `push` must catch that collision here too, naming the extends clone path.
+#[test]
+fn push_reports_duplicate_ids_when_two_projects_extend_the_same_url_and_collide() {
+    let a = shared_config_repo();
+    let b1 = TempDir::new().unwrap();
+    let b2 = TempDir::new().unwrap();
+    for b in [&b1, &b2] {
+        std::fs::write(
+            b.path().join(".lazyspec.toml"),
+            format!("extends = \"file://{}\"\n", a.root().display()),
+        )
+        .unwrap();
+    }
+
+    // First read in each materializes its own copy of the extends clone.
+    for b in [&b1, &b2] {
+        let list = Command::new(binary())
+            .args(["list", "rfc", "--json"])
+            .current_dir(b.path())
+            .output()
+            .expect("failed to run list");
+        assert!(list.status.success());
+    }
+
+    let create_b1 = Command::new(binary())
+        .args(["create", "rfc", "B1 idea", "--json"])
+        .current_dir(b1.path())
+        .output()
+        .expect("failed to run create in B1");
+    assert!(create_b1.status.success());
+    let created_b1: serde_json::Value = serde_json::from_slice(&create_b1.stdout).unwrap();
+    assert_eq!(created_b1["id"], "RFC-002", "got: {created_b1}");
+
+    let create_b2 = Command::new(binary())
+        .args(["create", "rfc", "B2 idea", "--json"])
+        .current_dir(b2.path())
+        .output()
+        .expect("failed to run create in B2");
+    assert!(create_b2.status.success());
+    let created_b2: serde_json::Value = serde_json::from_slice(&create_b2.stdout).unwrap();
+    assert_eq!(
+        created_b2["id"], "RFC-002",
+        "both extends clones independently number their next doc: {created_b2}"
+    );
+
+    let push_b1 = Command::new(binary())
+        .args(["push", "--json"])
+        .current_dir(b1.path())
+        .output()
+        .expect("failed to run push in B1");
+    assert!(
+        push_b1.status.success(),
+        "B1's push should land, stderr: {}",
+        String::from_utf8_lossy(&push_b1.stderr)
+    );
+
+    let push_b2 = Command::new(binary())
+        .args(["push", "--json"])
+        .current_dir(b2.path())
+        .output()
+        .expect("failed to run push in B2");
+    assert!(
+        !push_b2.status.success(),
+        "B2's push must exit non-zero on the collision"
+    );
+    let push_b2_json: serde_json::Value = serde_json::from_slice(&push_b2.stdout).unwrap();
+    let clone = &push_b2_json["clones"][0];
+    assert_eq!(
+        clone["error"]["kind"], "duplicate_ids",
+        "got: {push_b2_json}"
+    );
+    let collisions = clone["error"]["collisions"].as_array().unwrap();
+    assert_eq!(collisions.len(), 1, "got: {push_b2_json}");
+    assert_eq!(collisions[0]["id"], "RFC-002", "got: {push_b2_json}");
+
+    let b2_clone = b2.path().join(".lazyspec/cache/config");
+    assert_eq!(
+        Path::new(clone["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        b2_clone.canonicalize().unwrap(),
+        "the error names B2's own extends clone, not A"
     );
 }

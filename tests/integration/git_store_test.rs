@@ -262,7 +262,8 @@ fn update_tag_provenance_and_delete_each_commit_locally_once() {
     expected += 1;
     assert_eq!(commit_count(&clone, "HEAD"), expected, "provenance");
 
-    lazyspec::engine::ops::delete::run_with_config(root, &store, "RFC-001", Some(&config)).unwrap();
+    lazyspec::engine::ops::delete::run_with_config(root, &store, "RFC-001", Some(&config), &GitCli)
+        .unwrap();
     expected += 1;
     assert_eq!(commit_count(&clone, "HEAD"), expected, "delete");
     assert!(!clone.join("docs/rfcs/RFC-001-a.md").exists());
@@ -830,9 +831,8 @@ fn fetch_reports_a_document_removed_upstream_and_drops_it_from_the_clone() {
 
     assert_eq!(outcomes[0]["removed"], 1, "{outcomes}");
     assert_eq!(outcomes[0]["fetched"], 0, "{outcomes}");
-    assert!(!root
-        .join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md")
-        .exists());
+    let clone = clone_root(root, &remote.path().to_string_lossy(), None);
+    assert!(!clone.join("docs/rfcs/RFC-001-a.md").exists());
 }
 
 #[test]
@@ -851,6 +851,111 @@ fn fetch_type_filter_accepts_a_git_type_and_names_git_when_refusing_another() {
     assert!(
         stderr.contains("git-ref, git, or clickup-tasks"),
         "the refusal lists git among the fetchable backends: {stderr}"
+    );
+}
+
+// --- BUG-032 AC8: `fetch` migrates old per-type clones ---
+
+/// A pre-BUG-032 per-type clone at `.lazyspec/cache/<type>/` -- what `fetch`
+/// looks for and, when clean, deletes in favour of the shared clone at
+/// `.lazyspec/git/<slug>`.
+fn write_legacy_clone(root: &Path, remote: &Path, type_name: &str) {
+    let legacy = root.join(".lazyspec/cache").join(type_name);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    Command::new("git")
+        .args([
+            "clone",
+            &remote.to_string_lossy(),
+            &legacy.to_string_lossy(),
+        ])
+        .output()
+        .expect("git clone");
+}
+
+#[test]
+fn fetch_removes_a_clean_legacy_clone_and_reports_it() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), None);
+    let legacy = root.join(".lazyspec/cache/rfc");
+    write_legacy_clone(root, remote.path(), "rfc");
+    assert!(legacy.join(".git").exists());
+    // The subprocess reports its own (canonicalized) view of the path; `root`
+    // here may still be a symlinked tmp dir (e.g. macOS's `/tmp` ->
+    // `/private/tmp`).
+    let legacy = legacy.canonicalize().unwrap();
+
+    let output = lazyspec(root, &["fetch", "--json"]);
+    assert!(output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(&format!(
+            "note: removed legacy clone for type `rfc`: {}",
+            legacy.display()
+        )),
+        "{stderr}"
+    );
+    assert!(!legacy.exists());
+}
+
+#[test]
+fn fetch_keeps_a_legacy_clone_with_an_unpushed_commit_and_warns() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), None);
+    let legacy = root.join(".lazyspec/cache/rfc");
+    write_legacy_clone(root, remote.path(), "rfc");
+    git(&legacy, &["config", "user.email", "test@test.com"]);
+    git(&legacy, &["config", "user.name", "Test"]);
+    write_rfc(&legacy, "RFC-099-unpushed.md", "Unpushed");
+    git(&legacy, &["add", "-A"]);
+    git(&legacy, &["commit", "-m", "not pushed yet"]);
+    let legacy = legacy.canonicalize().unwrap();
+
+    let output = lazyspec(root, &["fetch", "--json"]);
+    assert!(output.status.success(), "{:?}", output);
+
+    assert!(legacy.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning:"), "{stderr}");
+    assert!(stderr.contains(&legacy.display().to_string()), "{stderr}");
+    assert!(stderr.contains("unpushed commit"), "{stderr}");
+    assert!(
+        !stderr.contains("note: removed legacy clone"),
+        "nothing was removed: {stderr}"
+    );
+}
+
+// A non-`git` type's `.lazyspec/cache/<name>` is its own legitimate cache
+// (`github-issues` et al. materialize there), never a candidate for
+// legacy-clone migration -- even when it happens to be a git repo itself, and
+// even though it shares the same parent directory a `git` type's old clone
+// would. `write_project_config`'s `note` type declares no `store`, so it is
+// `filesystem`, not `git`.
+#[test]
+fn fetch_leaves_a_non_git_types_cache_dir_untouched() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), None);
+    let notes_cache = root.join(".lazyspec/cache/note");
+    write_legacy_clone(root, remote.path(), "note");
+    assert!(notes_cache.join(".git").exists());
+
+    let output = lazyspec(root, &["fetch", "--json"]);
+    assert!(output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("note: removed legacy clone"),
+        "a non-git type's cache dir is never a migration candidate: {stderr}"
+    );
+    assert!(
+        notes_cache.exists(),
+        "a non-git type's cache dir must survive fetch"
     );
 }
 

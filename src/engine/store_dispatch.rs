@@ -545,7 +545,7 @@ impl DocumentStore for FilesystemStore {
 
     fn set_provenance(
         &mut self,
-        _type_def: &TypeDef,
+        type_def: &TypeDef,
         doc_id: &str,
         provenance: &[String],
     ) -> Result<PushOutcome> {
@@ -574,20 +574,35 @@ impl DocumentStore for FilesystemStore {
                 );
                 Ok(())
             },
+        )?;
+        crate::engine::git_store::commit_if_extends_backed(
+            &self.root,
+            &self.config,
+            type_def,
+            &crate::engine::git_ref::GitCli,
+            &format!("provenance {doc_id}"),
         )
-        .map(|()| PushOutcome::Synced)
     }
 
-    /// No-op: the on-disk document is the source of truth and the CLI already
-    /// rewrote its frontmatter `tags`. There is no remote to propagate to.
+    /// The on-disk document is the source of truth and the CLI already
+    /// rewrote its frontmatter `tags`; there is no remote to propagate to.
+    /// The only remaining write is the commit
+    /// [`commit_if_extends_backed`](crate::engine::git_store::commit_if_extends_backed)
+    /// itself decides is owed.
     fn sync_tags(
         &mut self,
-        _: &TypeDef,
-        _: &str,
+        type_def: &TypeDef,
+        doc_id: &str,
         _: &[String],
         _: &[String],
     ) -> Result<PushOutcome> {
-        Ok(PushOutcome::Synced)
+        crate::engine::git_store::commit_if_extends_backed(
+            &self.root,
+            &self.config,
+            type_def,
+            &crate::engine::git_ref::GitCli,
+            &format!("tag {doc_id}"),
+        )
     }
 }
 
