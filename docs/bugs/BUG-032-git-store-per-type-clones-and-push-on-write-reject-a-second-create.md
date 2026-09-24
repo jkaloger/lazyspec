@@ -17,7 +17,7 @@ Two `git`-store types on the same remote + branch. Create on one, then create on
 
 ## Reproduction
 
-Observed in `make-a-wish-replatform` (`risk`, `assumption`, `issue`, `dependency` all `store = "git"`, remote `inlight-media/account-make-a-wish`, default branch). Reflog timeline:
+Observed in a client repo (`risk`, `assumption`, `issue`, `dependency` all `store = "git"`, one shared remote, default branch). Reflog timeline:
 
 | time | clone | event |
 |---|---|---|
@@ -48,7 +48,7 @@ Change the write model: one clone per repo, writes commit locally, explicit `pus
 
 ### Acceptance criteria
 
-1. **Shared clone.** Given two git types with the same `remote` + `branch`, when either is read or written, then both resolve into one clone at `.lazyspec/cache/git/<slug>/` (slug derived from remote + branch) and each type's `dir` resolves inside it. `commit_if_git_backed` (`src/engine/git_store.rs:39`) maps a doc path to its clone by prefix, not by `components().nth(2)`.
+1. **Shared clone.** Given two git types with the same `remote` + `branch`, when either is read or written, then both resolve into one clone at `.lazyspec/git/<slug>/` (readable remote + branch slug plus a stable hash of the raw pair) and each type's `dir` resolves inside it. `commit_if_git_backed` (`src/engine/git_store.rs:39`) maps a doc path to its clone by prefix, not by `components().nth(2)`.
 2. **Local commit, no push.** Given a git type, when any mutating command runs (CLI or TUI, every writer listed in STORY-282), then the change is committed in the shared clone and not pushed. Output reports `synced: false` (`PushOutcome::LocalOnly`) at exit 0. Rejection rollback in `commit_and_push` is removed.
 3. **`lazyspec push`.** Given shared clones with unpushed commits, when I run `lazyspec push [--json]`, then each is fetched, rebased onto `origin/<branch>`, and pushed. Output lists per clone: path, remote, branch, commits pushed. Nothing to push -> exit 0, reports zero.
 4. **Conflicts left to the human.** Given a rebase conflict during `push`, then the rebase is aborted, local commits are kept, the command exits non-zero, and the error (and `--json` error) names the clone path, the conflicted files, and the commands to resolve there (`git -C <path> pull --rebase`, then `lazyspec push`). Other clones in the same run still push.
