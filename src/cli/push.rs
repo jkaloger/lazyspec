@@ -31,9 +31,10 @@ fn print_human(results: &[CloneResult]) {
     }
 
     for r in results {
-        let branch = r.branch.as_deref().unwrap_or("default branch");
-        match &r.error {
+        match push::describe_error(r) {
+            Some(message) => eprintln!("error: {message}"),
             None => {
+                let branch = r.branch.as_deref().unwrap_or("default branch");
                 let status = if r.pushed == 0 {
                     "up to date".to_string()
                 } else {
@@ -49,28 +50,6 @@ fn print_human(results: &[CloneResult]) {
                     r.remote,
                     branch,
                     status
-                );
-            }
-            Some(CloneError::RebaseConflict(conflict)) => {
-                eprintln!("error: {}", conflict);
-            }
-            Some(CloneError::RebaseInProgress(in_progress)) => {
-                eprintln!("error: {}", in_progress);
-            }
-            Some(CloneError::DuplicateIds { clone, collisions }) => {
-                eprintln!("error: duplicate ids in {}:", clone.display());
-                for c in collisions {
-                    eprintln!("  {} -> {}", c.id, c.paths.join(", "));
-                }
-                eprintln!("rename one of each pair, then `lazyspec push`");
-            }
-            Some(CloneError::Other(message)) => {
-                eprintln!(
-                    "error: {} ({}, {}): {}",
-                    r.path.display(),
-                    r.remote,
-                    branch,
-                    message
                 );
             }
         }
@@ -91,35 +70,40 @@ fn clone_json(r: &CloneResult) -> serde_json::Value {
         "pushed": r.pushed,
         "error": serde_json::Value::Null,
     });
-    if let Some(err) = &r.error {
-        entry["error"] = error_json(err);
+    if r.error.is_some() {
+        entry["error"] = error_json(r);
     }
     entry
 }
 
-fn error_json(err: &CloneError) -> serde_json::Value {
-    match err {
+// The `message` field is `describe_error`'s wording (the human line uses the
+// same), so the two surfaces never drift; `files`/`collisions` stay
+// structured here for a caller that wants to act on them programmatically.
+fn error_json(result: &CloneResult) -> serde_json::Value {
+    let message = push::describe_error(result).unwrap_or_default();
+    match result
+        .error
+        .as_ref()
+        .expect("error_json called without an error")
+    {
         CloneError::RebaseConflict(conflict) => serde_json::json!({
             "kind": "rebase_conflict",
-            "message": conflict.to_string(),
+            "message": message,
             "files": conflict.files,
         }),
-        CloneError::RebaseInProgress(in_progress) => serde_json::json!({
+        CloneError::RebaseInProgress(_) => serde_json::json!({
             "kind": "rebase_in_progress",
-            "message": in_progress.to_string(),
+            "message": message,
         }),
-        CloneError::DuplicateIds { clone, collisions } => serde_json::json!({
+        CloneError::DuplicateIds { collisions, .. } => serde_json::json!({
             "kind": "duplicate_ids",
-            "message": format!(
-                "duplicate ids in {}; rename one of each pair, then `lazyspec push`",
-                clone.display()
-            ),
+            "message": message,
             "collisions": collisions
                 .iter()
                 .map(|c| serde_json::json!({ "id": c.id, "paths": c.paths }))
                 .collect::<Vec<_>>(),
         }),
-        CloneError::Other(message) => serde_json::json!({
+        CloneError::Other(_) => serde_json::json!({
             "kind": "other",
             "message": message,
         }),
@@ -196,16 +180,26 @@ mod tests {
 
     #[test]
     fn error_json_names_the_clone_and_collisions_for_duplicate_ids() {
-        let value = error_json(&CloneError::DuplicateIds {
-            clone: std::path::PathBuf::from("/proj/.lazyspec/git/x"),
-            collisions: vec![push::DuplicateId {
-                id: "RFC-002".to_string(),
-                paths: vec![
-                    "docs/rfcs/RFC-002-a.md".to_string(),
-                    "docs/rfcs/RFC-002-b.md".to_string(),
-                ],
-            }],
-        });
+        let clone = std::path::PathBuf::from("/proj/.lazyspec/git/x");
+        let result = CloneResult {
+            path: clone.clone(),
+            remote: REMOTE.to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 0,
+            error: Some(CloneError::DuplicateIds {
+                clone: clone.clone(),
+                collisions: vec![push::DuplicateId {
+                    id: "RFC-002".to_string(),
+                    paths: vec![
+                        "docs/rfcs/RFC-002-a.md".to_string(),
+                        "docs/rfcs/RFC-002-b.md".to_string(),
+                    ],
+                }],
+            }),
+        };
+
+        let value = error_json(&result);
 
         assert_eq!(value["kind"], "duplicate_ids");
         assert!(value["message"]

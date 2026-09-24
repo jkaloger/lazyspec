@@ -103,6 +103,40 @@ pub struct CloneResult {
     pub error: Option<CloneError>,
 }
 
+/// A `CloneResult`'s error, in the wording `lazyspec push`'s human/`--json`
+/// surfaces use (`src/cli/push.rs`): the clone path always named, plus --
+/// for `RebaseConflict`/`RebaseInProgress`/`DuplicateIds` -- the commands to
+/// resolve it there. Lives here, not in `cli`, so a caller that must not
+/// depend on the CLI (the TUI, BUG-032 AC7) still surfaces the same content.
+pub fn describe_error(result: &CloneResult) -> Option<String> {
+    let err = result.error.as_ref()?;
+    Some(match err {
+        CloneError::RebaseConflict(conflict) => conflict.to_string(),
+        CloneError::RebaseInProgress(in_progress) => in_progress.to_string(),
+        CloneError::DuplicateIds { clone, collisions } => {
+            let pairs: Vec<String> = collisions
+                .iter()
+                .map(|c| format!("{} -> {}", c.id, c.paths.join(", ")))
+                .collect();
+            format!(
+                "duplicate ids in {}: {}; rename one of each pair, then `lazyspec push`",
+                clone.display(),
+                pairs.join(", ")
+            )
+        }
+        CloneError::Other(message) => {
+            let branch = result.branch.as_deref().unwrap_or("default branch");
+            format!(
+                "{} ({}, {}): {}",
+                result.path.display(),
+                result.remote,
+                branch,
+                message
+            )
+        }
+    })
+}
+
 /// Pushes every existing shared clone among the configured `git` types
 /// (BUG-032 AC3/AC4/AC6); one clone failing does not stop the rest.
 pub fn run(root: &Path, config: &Config, ops: &dyn GitRefOps) -> Vec<CloneResult> {
@@ -404,6 +438,69 @@ mod tests {
             other => panic!("expected duplicate ids, got {other:?}"),
         }
         assert_eq!(results[0].pushed, 0);
+    }
+
+    #[test]
+    fn describe_error_names_the_clone_path_for_a_rebase_conflict() {
+        let clone = PathBuf::from("/proj/.lazyspec/git/x");
+        let result = CloneResult {
+            path: clone.clone(),
+            remote: REMOTE.to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 0,
+            error: Some(CloneError::RebaseConflict(RebaseConflict {
+                clone: clone.clone(),
+                files: vec!["docs/rfcs/RFC-001-a.md".to_string()],
+            })),
+        };
+
+        let message = describe_error(&result).unwrap();
+
+        assert!(message.contains(&clone.display().to_string()), "{message}");
+        assert!(message.contains("pull --rebase"), "{message}");
+    }
+
+    #[test]
+    fn describe_error_names_the_clone_path_for_duplicate_ids() {
+        let clone = PathBuf::from("/proj/.lazyspec/git/x");
+        let result = CloneResult {
+            path: clone.clone(),
+            remote: REMOTE.to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 0,
+            error: Some(CloneError::DuplicateIds {
+                clone: clone.clone(),
+                collisions: vec![DuplicateId {
+                    id: "RFC-002".to_string(),
+                    paths: vec![
+                        "docs/rfcs/RFC-002-a.md".to_string(),
+                        "docs/rfcs/RFC-002-b.md".to_string(),
+                    ],
+                }],
+            }),
+        };
+
+        let message = describe_error(&result).unwrap();
+
+        assert!(message.contains(&clone.display().to_string()), "{message}");
+        assert!(message.contains("RFC-002"), "{message}");
+        assert!(message.contains("lazyspec push"), "{message}");
+    }
+
+    #[test]
+    fn describe_error_is_none_when_the_clone_pushed_cleanly() {
+        let result = CloneResult {
+            path: PathBuf::from("/proj/.lazyspec/git/x"),
+            remote: REMOTE.to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 2,
+            error: None,
+        };
+
+        assert_eq!(describe_error(&result), None);
     }
 
     #[test]

@@ -105,6 +105,49 @@ fn try_refresh_issue_map(shared_store: &Arc<Mutex<GithubIssuesStore>>, root: &Pa
     true
 }
 
+/// What the `push_request` handler in `run` does this iteration (BUG-032): a
+/// poll's `rebase_onto_remote`/`update_clone` touches the same clone a push
+/// commits/pushes to, so the two never spawn concurrently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushSpawnDecision {
+    /// A poll is in flight; leave `push_request` set and retry next iteration.
+    DeferToRefresh,
+    /// A push is already in flight; drop this request, its result covers it.
+    AlreadyRunning,
+    /// Neither is in flight; clear `push_request` and spawn.
+    Spawn,
+}
+
+fn push_spawn_decision(refresh_in_flight: bool, push_in_flight: bool) -> PushSpawnDecision {
+    if refresh_in_flight {
+        PushSpawnDecision::DeferToRefresh
+    } else if push_in_flight {
+        PushSpawnDecision::AlreadyRunning
+    } else {
+        PushSpawnDecision::Spawn
+    }
+}
+
+/// Whether the background poll may spawn this iteration (BUG-032): a push's
+/// rebase touches the same clone the poll's `update_clone`/`rebase_onto_remote`
+/// would, so the poll waits out an in-flight push rather than racing it. The
+/// deadline is left unadvanced when this is `false`, so the check re-fires
+/// next iteration and spawns as soon as the push clears.
+fn poll_spawn_ready(refresh_in_flight: bool, push_in_flight: bool) -> bool {
+    !refresh_in_flight && !push_in_flight
+}
+
+/// Clears an in-flight flag when dropped, including on an unwind out of a
+/// spawned thread -- so a panicked push (BUG-032) clears `push_in_flight`
+/// rather than wedging the `P` keybind forever.
+struct ClearOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 fn try_push_gh_edit(
     root: &Path,
     relative: &Path,
@@ -172,26 +215,43 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
 
 // The `git` store's external-edit arm (STORY-282 AC3): the editor already wrote
 // the clone file, so only the commit-and-push remains. Any non-git doc is a
-// no-op, so the caller spawns it unconditionally.
-fn try_push_git_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
+// no-op, reported as `Ok(false)` so the caller can skip sending an event for it.
+fn try_push_git_edit(root: &Path, relative: &Path, config: &Config) -> Result<bool, String> {
     try_push_git_edit_with(root, relative, config, &GitCli)
 }
 
+// `Ok(true)` iff `relative` is `git`-backed and its commit landed -- the
+// caller (BUG-032 AC2) only needs to recompute the unpushed count then, never
+// for the `Ok(false)` non-git no-op.
 fn try_push_git_edit_with(
     root: &Path,
     relative: &Path,
     config: &Config,
     ops: &dyn GitRefOps,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let id = crate::engine::store::extract_id(relative);
-    crate::engine::git_store::commit_if_git_backed(
+    crate::engine::git_store::commit_if_git_backed_outcome(
         root,
         config,
         relative,
         ops,
         &format!("update {id}"),
     )
+    .map(|outcome| !outcome.is_synced())
     .map_err(|e| format!("{e:#}"))
+}
+
+/// What the `git` edit spawn tells the UI thread once `try_push_git_edit`
+/// finishes (BUG-032 AC2): `None` for its `Ok(false)` no-op, so a non-git
+/// doc's save (filesystem, `github-issues`, `git-ref`, `clickup-tasks`) sends
+/// nothing on this thread -- distinct from `GhPushResult(Ok(()))`'s heavier
+/// store reload, which a local-only commit does not need.
+fn git_edit_event(result: Result<bool, String>) -> Option<AppEvent> {
+    match result {
+        Ok(true) => Some(AppEvent::GitCommitted),
+        Ok(false) => None,
+        Err(msg) => Some(AppEvent::GhPushResult(Err(msg))),
+    }
 }
 
 // Push a clickup-tasks doc's edited body back to ClickUp after an external-editor
@@ -606,9 +666,16 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
             app.gh_fetch_warnings = warnings;
             app.filtered_docs_cache = None;
             app.refresh_validation(config);
+            // The poll rebases every `git`/`git-ref` clone it fetches (BUG-032
+            // AC5), which changes how far ahead of the remote each is.
+            app.recompute_unpushed_count(config);
         }
         AppEvent::GhPushResult(result) => {
-            app.gh_push_in_flight.store(false, Ordering::Relaxed);
+            // Owned and cleared by the `github-issues` spawn itself before it
+            // sends this event -- never cleared here, so a `git`/`git-ref`/
+            // `clickup` thread's error (the other three senders) cannot flip
+            // a still-running `github-issues` push's flag false out from
+            // under it.
             match result {
                 Ok(()) => {
                     let root = app.store.root().to_path_buf();
@@ -622,6 +689,28 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                 Err(msg) => {
                     app.gh_conflict_message = Some(msg);
                 }
+            }
+        }
+        AppEvent::GitCommitted => {
+            // A `git`-store external-edit commit landed (BUG-032 AC2): only
+            // the clone's unpushed count changed.
+            app.recompute_unpushed_count(config);
+        }
+        AppEvent::PushResult(results) => {
+            app.push_in_flight.store(false, Ordering::Relaxed);
+            let root = app.store.root().to_path_buf();
+            if let Ok(refreshed) = Store::load(&root, config) {
+                app.store = refreshed;
+            }
+            app.filtered_docs_cache = None;
+            app.refresh_validation(config);
+            app.recompute_unpushed_count(config);
+            let errors: Vec<String> = results
+                .iter()
+                .filter_map(crate::engine::ops::push::describe_error)
+                .collect();
+            if !errors.is_empty() {
+                app.gh_conflict_message = Some(errors.join("\n\n"));
             }
         }
         AppEvent::SearchResults {
@@ -672,6 +761,9 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                     app.refresh_validation(config);
                     app.git_status_cache.invalidate();
                     app.gh_issue_map_stale = true;
+                    // The reserved-numbering create path commits into a shared
+                    // git clone in the background thread above (BUG-032 AC2).
+                    app.recompute_unpushed_count(config);
                     // Hold the success face over the updated list for a beat so a
                     // create that finishes instantly still renders it before the
                     // overlay is torn down; the run loop dismisses on this deadline.
@@ -731,6 +823,13 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     app.terminal_image_protocol = protocol;
     app.tool_availability = tool_availability;
     app.refresh_validation(&config);
+    // Seeds the header's unpushed count from whatever shared clones already
+    // exist on disk (BUG-032 AC7), without a poll: `unpushed` never fetches,
+    // so this is safe before the watcher/poll thread below is even spawned --
+    // and it is the only way a `git`-only project (which `has_pollable_types`
+    // excludes from the header's poll countdown) gets a correct count without
+    // polling.
+    app.recompute_unpushed_count(&config);
 
     let (tx, rx) = crossbeam_channel::unbounded();
     app.event_tx = tx.clone();
@@ -997,7 +1096,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
 
         if let Some(deadline) = next_poll {
-            if Instant::now() >= deadline && !refresh_in_flight.load(Ordering::Relaxed) {
+            if Instant::now() >= deadline
+                && poll_spawn_ready(
+                    refresh_in_flight.load(Ordering::Relaxed),
+                    app.push_in_flight.load(Ordering::Relaxed),
+                )
+            {
                 // Always advance the deadline, even when there is no work this
                 // poll, so the trigger keeps firing for later refreshes.
                 next_poll = Some(Instant::now() + Duration::from_secs(cache_ttl));
@@ -1109,8 +1213,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                     let push_tx = tx.clone();
                     std::thread::spawn(move || {
                         let result = try_push_git_edit(&push_root, &push_relative, &push_config);
-                        if let Err(msg) = result {
-                            let _ = push_tx.send(AppEvent::GhPushResult(Err(msg)));
+                        if let Some(event) = git_edit_event(result) {
+                            let _ = push_tx.send(event);
                         }
                     });
                 }
@@ -1186,12 +1290,49 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             };
             app.store = Store::load(&root, &config)?;
             app.refresh_validation(&config);
+            app.recompute_unpushed_count(&config);
             app.fix_result = if output.is_empty() {
                 None
             } else {
                 Some(output)
             };
             app.warnings_selected = 0;
+        }
+
+        if app.push_request {
+            match push_spawn_decision(
+                refresh_in_flight.load(Ordering::Relaxed),
+                app.push_in_flight.load(Ordering::Relaxed),
+            ) {
+                // A poll's `rebase_onto_remote` (BUG-032) touches the same
+                // clone a push commits/pushes to; leave `push_request` set
+                // rather than racing it -- this same check runs again next
+                // iteration, and fires once the poll clears.
+                PushSpawnDecision::DeferToRefresh => {}
+                // Already running (double-press): the in-flight push will
+                // refresh the count when it lands, so a second run is
+                // redundant, not just wasted work -- two concurrent rebases
+                // in the same clone race.
+                PushSpawnDecision::AlreadyRunning => {
+                    app.push_request = false;
+                }
+                PushSpawnDecision::Spawn => {
+                    app.push_request = false;
+                    app.push_in_flight.store(true, Ordering::Relaxed);
+                    let push_root = root.clone();
+                    let push_config = config.clone();
+                    let push_tx = tx.clone();
+                    let push_flag = app.push_in_flight.clone();
+                    std::thread::spawn(move || {
+                        // Cleared here even on an unwind out of `push::run`,
+                        // so a panicked push cannot wedge `P` forever.
+                        let _clear = ClearOnDrop(push_flag);
+                        let ops = GitCli;
+                        let results = crate::engine::ops::push::run(&push_root, &push_config, &ops);
+                        let _ = push_tx.send(AppEvent::PushResult(results));
+                    });
+                }
+            }
         }
 
         if app.config_reload_request {
@@ -2119,7 +2260,7 @@ mod tests {
             &mock,
         );
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(true), "a git-backed commit reports true");
         assert_eq!(
             *calls.borrow(),
             vec![format!(
@@ -2142,7 +2283,160 @@ mod tests {
             &mock,
         );
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(
+            result,
+            Ok(false),
+            "a non-git doc reports false, not an error"
+        );
         assert!(calls.borrow().is_empty());
+    }
+
+    // A non-git editor save (`try_push_git_edit`'s `Ok(false)` no-op) must
+    // send nothing on this thread -- neither the old `GhPushResult(Ok(()))`
+    // nor the new `GitCommitted` -- so a filesystem/github-issues/git-ref/
+    // clickup-tasks doc's save never triggers an extra store reload or an
+    // unpushed-count recompute it doesn't need.
+    #[test]
+    fn git_edit_event_sends_nothing_for_a_non_git_doc() {
+        assert!(git_edit_event(Ok(false)).is_none());
+    }
+
+    #[test]
+    fn git_edit_event_sends_git_committed_for_a_landed_commit() {
+        assert!(matches!(
+            git_edit_event(Ok(true)),
+            Some(AppEvent::GitCommitted)
+        ));
+    }
+
+    #[test]
+    fn git_edit_event_sends_gh_push_result_err_on_failure() {
+        match git_edit_event(Err("boom".to_string())) {
+            Some(AppEvent::GhPushResult(Err(msg))) => assert_eq!(msg, "boom"),
+            _ => panic!("expected Some(GhPushResult(Err(_)))"),
+        }
+    }
+
+    // --- BUG-032: push vs. poll never race the same clone ---
+
+    // Push_request set while a poll is in flight: no push spawned yet, and
+    // the caller (`run`) must leave `push_request` set so this fires again.
+    #[test]
+    fn push_defers_to_an_in_flight_refresh() {
+        assert_eq!(
+            push_spawn_decision(true, false),
+            PushSpawnDecision::DeferToRefresh
+        );
+    }
+
+    #[test]
+    fn push_drops_a_duplicate_request_while_already_running() {
+        assert_eq!(
+            push_spawn_decision(false, true),
+            PushSpawnDecision::AlreadyRunning
+        );
+    }
+
+    #[test]
+    fn push_spawns_when_neither_is_in_flight() {
+        assert_eq!(push_spawn_decision(false, false), PushSpawnDecision::Spawn);
+    }
+
+    // Poll due while a push is in flight: the poll must not spawn.
+    #[test]
+    fn poll_not_ready_while_a_push_is_in_flight() {
+        assert!(!poll_spawn_ready(false, true));
+    }
+
+    #[test]
+    fn poll_not_ready_while_a_refresh_is_already_in_flight() {
+        assert!(!poll_spawn_ready(true, false));
+    }
+
+    #[test]
+    fn poll_ready_when_neither_is_in_flight() {
+        assert!(poll_spawn_ready(false, false));
+    }
+
+    // --- BUG-032 AC7: the manual `push` keybind's result handling ---
+
+    #[test]
+    fn push_result_ok_refreshes_the_unpushed_count_and_reloads_docs() {
+        use crate::engine::ops::push::{distinct_clones, CloneResult};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = git_type_config();
+        // Already cloned, so `Store::load` below (via `make_app`) never
+        // reaches for the network.
+        let clone_path = distinct_clones(root, &config)[0].path.clone();
+        std::fs::create_dir_all(&clone_path).unwrap();
+
+        let mut app = make_app(root, &config);
+        app.push_in_flight.store(true, Ordering::Relaxed);
+        // A stale reading from before the push landed -- `PushResult` must
+        // overwrite it via a fresh `unpushed` read, not just leave it.
+        app.unpushed_count = 5;
+        app.git = Box::new(MockGitRefClient::new().with_unpushed_result(Ok(0)));
+
+        let results = vec![CloneResult {
+            path: clone_path,
+            remote: "https://example.com/specs.git".to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 2,
+            error: None,
+        }];
+
+        let _ = handle_app_event(&mut app, AppEvent::PushResult(results), root, &config);
+
+        assert!(!app.push_in_flight.load(Ordering::Relaxed));
+        assert_eq!(
+            app.unpushed_count, 0,
+            "must re-read `unpushed`, not just clear it"
+        );
+        assert!(app.gh_conflict_message.is_none());
+    }
+
+    // AC4/AC6: a clone's push error is a message the human can act on --
+    // naming the clone path (and, for a conflict, the resolve command) --
+    // through the TUI's existing conflict-overlay mechanism, without the TUI
+    // reaching into `cli::push`'s formatting.
+    #[test]
+    fn push_result_error_surfaces_a_message_naming_the_clone_path() {
+        use crate::engine::git_ref::RebaseConflict;
+        use crate::engine::ops::push::{CloneError, CloneResult};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let config = git_type_config();
+        let clone_path = root.join(".lazyspec/git/example-com-specs-git--next-b14d63f7");
+        std::fs::create_dir_all(&clone_path).unwrap();
+
+        let mut app = make_app(root, &config);
+        app.git = Box::new(MockGitRefClient::new().with_unpushed_result(Ok(1)));
+
+        let results = vec![CloneResult {
+            path: clone_path.clone(),
+            remote: "https://example.com/specs.git".to_string(),
+            branch: Some("next".to_string()),
+            types: vec!["rfc".to_string()],
+            pushed: 0,
+            error: Some(CloneError::RebaseConflict(RebaseConflict {
+                clone: clone_path.clone(),
+                files: vec!["docs/rfcs/RFC-001-a.md".to_string()],
+            })),
+        }];
+
+        let _ = handle_app_event(&mut app, AppEvent::PushResult(results), root, &config);
+
+        let message = app
+            .gh_conflict_message
+            .expect("a push error must surface a user-visible message");
+        assert!(
+            message.contains(&clone_path.display().to_string()),
+            "got: {message}"
+        );
+        assert!(message.contains("pull --rebase"), "got: {message}");
     }
 }
