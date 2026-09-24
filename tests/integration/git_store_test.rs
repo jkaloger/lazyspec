@@ -8,8 +8,9 @@ use lazyspec::engine::config::{
 };
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::git_ref::{GitCli, GitRefOps};
+use lazyspec::engine::git_store::clone_root;
 use lazyspec::engine::store::{doc_root, Filter, Store};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -82,9 +83,8 @@ fn first_read_clones_remote_and_lists_docs_under_doc_root() {
 
     let store = Store::load(root, &config).unwrap();
 
-    assert!(root
-        .join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md")
-        .exists());
+    let clone = clone_root(root, &remote.path().to_string_lossy(), None);
+    assert!(clone.join("docs/rfcs/RFC-001-a.md").exists());
     assert_eq!(ids(&store), vec!["RFC-001"]);
     let type_def = &config.documents.types.last().unwrap();
     let doc = &store.list(&Filter::default())[0];
@@ -145,7 +145,7 @@ fn unclonable_remote_error_names_remote_and_default_branch() {
     assert!(msg.contains("default branch"), "{msg}");
 }
 
-// --- STORY-282: every registry-routed write commits in the clone and pushes ---
+// --- BUG-032: every registry-routed write commits in the shared clone, locally ---
 
 fn commit_count(repo: &Path, branch: &str) -> usize {
     git_stdout(repo, &["rev-list", "--count", branch])
@@ -156,22 +156,23 @@ fn commit_count(repo: &Path, branch: &str) -> usize {
 
 /// The clone has no `user.*` of its own, and the tests must not lean on the
 /// host's global config (DICTUM-004).
-fn identify_clone(root: &Path) -> std::path::PathBuf {
-    let clone = root.join(".lazyspec/cache/rfc");
+fn identify_clone(root: &Path, remote: &Path, branch: Option<&str>) -> PathBuf {
+    let clone = clone_root(root, &remote.to_string_lossy(), branch);
     git(&clone, &["config", "user.email", "test@test.com"]);
     git(&clone, &["config", "user.name", "Test"]);
     clone
 }
 
 #[test]
-fn create_writes_into_the_clone_and_pushes_to_the_declared_branch() {
+fn create_writes_into_the_clone_and_commits_locally_without_pushing() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    let before = commit_count(remote.path(), "next");
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let remote_before = commit_count(remote.path(), "next");
+    let clone_before = commit_count(&clone, "HEAD");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
         root,
@@ -186,7 +187,7 @@ fn create_writes_into_the_clone_and_pushes_to_the_declared_branch() {
     )
     .unwrap();
 
-    assert!(outcome.is_synced());
+    assert!(!outcome.is_synced(), "a git write is local-only now");
     let type_def = &config.documents.types[0];
     assert!(
         path.starts_with(doc_root(&config, root, type_def)),
@@ -195,28 +196,26 @@ fn create_writes_into_the_clone_and_pushes_to_the_declared_branch() {
     );
     assert!(path.exists());
     assert!(!root.join("docs/rfcs").exists());
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
-    assert!(
-        git_stdout(remote.path(), &["log", "-1", "--format=%s", "next"]).contains("create RFC-003")
+    assert_eq!(
+        commit_count(remote.path(), "next"),
+        remote_before,
+        "the remote is untouched until `push`"
     );
-    let filename = path.file_name().unwrap().to_string_lossy();
-    let pushed = git_stdout(
-        remote.path(),
-        &["show", &format!("next:docs/rfcs/{filename}")],
-    );
-    assert_eq!(pushed, std::fs::read_to_string(&path).unwrap());
+    assert_eq!(commit_count(&clone, "HEAD"), clone_before + 1);
+    assert!(git_stdout(&clone, &["log", "-1", "--format=%s", "HEAD"]).contains("create RFC-003"));
 }
 
 #[test]
-fn update_tag_provenance_and_delete_each_push_one_commit() {
+fn update_tag_provenance_and_delete_each_commit_locally_once() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
-    let mut expected = commit_count(remote.path(), "next");
+    let remote_before = commit_count(remote.path(), "next");
+    let mut expected = commit_count(&clone, "HEAD");
 
     lazyspec::engine::ops::update::run_with_config(
         root,
@@ -228,9 +227,11 @@ fn update_tag_provenance_and_delete_each_push_one_commit() {
     )
     .unwrap();
     expected += 1;
-    assert_eq!(commit_count(remote.path(), "next"), expected, "update");
+    assert_eq!(commit_count(&clone, "HEAD"), expected, "update");
     assert!(
-        git_stdout(remote.path(), &["show", "next:docs/rfcs/RFC-001-a.md"]).contains("Renamed")
+        std::fs::read_to_string(clone.join("docs/rfcs/RFC-001-a.md"))
+            .unwrap()
+            .contains("Renamed")
     );
 
     lazyspec::cli::tag::tag_add_with_config(
@@ -243,8 +244,12 @@ fn update_tag_provenance_and_delete_each_push_one_commit() {
     )
     .unwrap();
     expected += 1;
-    assert_eq!(commit_count(remote.path(), "next"), expected, "tag");
-    assert!(git_stdout(remote.path(), &["show", "next:docs/rfcs/RFC-001-a.md"]).contains("shared"));
+    assert_eq!(commit_count(&clone, "HEAD"), expected, "tag");
+    assert!(
+        std::fs::read_to_string(clone.join("docs/rfcs/RFC-001-a.md"))
+            .unwrap()
+            .contains("shared")
+    );
 
     lazyspec::engine::provenance::set_provenance(
         root,
@@ -255,42 +260,36 @@ fn update_tag_provenance_and_delete_each_push_one_commit() {
     )
     .unwrap();
     expected += 1;
-    assert_eq!(commit_count(remote.path(), "next"), expected, "provenance");
+    assert_eq!(commit_count(&clone, "HEAD"), expected, "provenance");
 
     lazyspec::engine::ops::delete::run_with_config(root, &store, "RFC-001", Some(&config)).unwrap();
     expected += 1;
-    assert_eq!(commit_count(remote.path(), "next"), expected, "delete");
-    assert!(!git_stdout(
-        remote.path(),
-        &["ls-tree", "--name-only", "next", "docs/rfcs/"]
-    )
-    .contains("RFC-001-a.md"));
+    assert_eq!(commit_count(&clone, "HEAD"), expected, "delete");
+    assert!(!clone.join("docs/rfcs/RFC-001-a.md").exists());
+    assert_eq!(
+        commit_count(remote.path(), "next"),
+        remote_before,
+        "none of this reached the remote"
+    );
 }
 
-/// The remote gains `RFC-002-b.md` on `main` after the clone, so the clone's
-/// `main` is behind it and any push is rejected as a non-fast-forward.
-fn move_remote_ahead(remote: &Path) {
-    write_rfc(remote, "RFC-002-b.md", "B on main");
-    git(remote, &["add", "-A"]);
-    git(remote, &["commit", "-m", "three"]);
-}
+// --- BUG-032 AC2: the writers that bypass the registry commit locally too ---
 
-// --- STORY-282 AC2: the writers that bypass the registry commit too ---
-
-fn remote_file(remote: &Path, name: &str) -> String {
-    git_stdout(remote, &["show", &format!("next:docs/rfcs/{name}")])
+fn clone_file(clone: &Path, name: &str) -> String {
+    std::fs::read_to_string(clone.join("docs/rfcs").join(name)).unwrap()
 }
 
 #[test]
-fn link_and_unlink_each_push_one_commit() {
+fn link_and_unlink_each_commit_locally_once() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
-    let before = commit_count(remote.path(), "next");
+    let remote_before = commit_count(remote.path(), "next");
+    let before = commit_count(&clone, "HEAD");
 
     lazyspec::engine::ops::link::link_with_config(
         root,
@@ -303,8 +302,8 @@ fn link_and_unlink_each_push_one_commit() {
     )
     .unwrap();
 
-    assert_eq!(commit_count(remote.path(), "next"), before + 1, "link");
-    assert!(remote_file(remote.path(), "RFC-001-a.md").contains("related-to: RFC-002"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1, "link");
+    assert!(clone_file(&clone, "RFC-001-a.md").contains("related-to: RFC-002"));
 
     lazyspec::engine::ops::link::unlink_with_config(
         root,
@@ -317,34 +316,39 @@ fn link_and_unlink_each_push_one_commit() {
     )
     .unwrap();
 
-    assert_eq!(commit_count(remote.path(), "next"), before + 2, "unlink");
-    assert!(!remote_file(remote.path(), "RFC-001-a.md").contains("RFC-002"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 2, "unlink");
+    assert!(!clone_file(&clone, "RFC-001-a.md").contains("RFC-002"));
+    assert_eq!(
+        commit_count(remote.path(), "next"),
+        remote_before,
+        "neither write reached the remote"
+    );
 }
 
 #[test]
-fn ignore_and_unignore_each_push_one_commit() {
+fn ignore_and_unignore_each_commit_locally_once() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    let clone = identify_clone(root, remote.path(), Some("next"));
     let fs = RealFileSystem;
-    let before = commit_count(remote.path(), "next");
+    let before = commit_count(&clone, "HEAD");
 
     lazyspec::cli::ignore::ignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
 
-    assert_eq!(commit_count(remote.path(), "next"), before + 1, "ignore");
-    assert!(remote_file(remote.path(), "RFC-001-a.md").contains("validate-ignore: true"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1, "ignore");
+    assert!(clone_file(&clone, "RFC-001-a.md").contains("validate-ignore: true"));
 
     lazyspec::cli::ignore::unignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
 
-    assert_eq!(commit_count(remote.path(), "next"), before + 2, "unignore");
-    assert!(!remote_file(remote.path(), "RFC-001-a.md").contains("validate-ignore"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 2, "unignore");
+    assert!(!clone_file(&clone, "RFC-001-a.md").contains("validate-ignore"));
 }
 
 #[test]
-fn pin_pushes_one_commit() {
+fn pin_commits_locally_once() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
@@ -355,17 +359,17 @@ fn pin_pushes_one_commit() {
     git(root, &["commit", "--allow-empty", "-m", "code"]);
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    let before = commit_count(remote.path(), "next");
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
 
     lazyspec::cli::pin::run(&store, &config, &GitCli, &RealFileSystem, "RFC-001", true).unwrap();
 
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
-    assert!(remote_file(remote.path(), "RFC-001-a.md").contains("reviewed:"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
+    assert!(clone_file(&clone, "RFC-001-a.md").contains("reviewed:"));
 }
 
 #[test]
-fn fix_pushes_one_commit_for_the_document_it_repairs() {
+fn fix_commits_locally_once_for_the_document_it_repairs() {
     let remote = shared_repo();
     git(remote.path(), &["checkout", "next"]);
     std::fs::write(
@@ -380,9 +384,13 @@ fn fix_pushes_one_commit_for_the_document_it_repairs() {
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    let before = commit_count(remote.path(), "next");
-    let paths = vec![".lazyspec/cache/rfc/docs/rfcs/RFC-003-c.md".to_string()];
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
+    let relative = clone
+        .strip_prefix(root)
+        .unwrap()
+        .join("docs/rfcs/RFC-003-c.md");
+    let paths = vec![relative.to_string_lossy().into_owned()];
 
     let code = lazyspec::cli::fix::run(
         root,
@@ -396,12 +404,12 @@ fn fix_pushes_one_commit_for_the_document_it_repairs() {
     );
 
     assert_eq!(code, 0);
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
-    assert!(remote_file(remote.path(), "RFC-003-c.md").contains("author:"));
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
+    assert!(clone_file(&clone, "RFC-003-c.md").contains("author:"));
 }
 
 #[test]
-fn renumber_pushes_one_commit_for_every_rename() {
+fn renumber_commits_locally_once_for_every_rename() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
@@ -411,8 +419,8 @@ fn renumber_pushes_one_commit_for_every_rename() {
         min_length: 3,
     });
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    let before = commit_count(remote.path(), "next");
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
 
     let code = lazyspec::cli::fix::run_renumber(
         root,
@@ -427,98 +435,245 @@ fn renumber_pushes_one_commit_for_every_rename() {
     );
 
     assert_eq!(code, 0);
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
-    let tree = git_stdout(
-        remote.path(),
-        &["ls-tree", "--name-only", "next", "docs/rfcs/"],
-    );
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
+    let tree = git_stdout(&clone, &["ls-tree", "--name-only", "HEAD", "docs/rfcs/"]);
     assert!(!tree.contains("RFC-001-a.md"), "{tree}");
     assert!(!tree.contains("RFC-002-b.md"), "{tree}");
     assert_eq!(tree.lines().count(), 2, "{tree}");
 }
 
+/// `teammate` (checking out `branch`, writing `filename`, committing, and
+/// returning to whatever branch was checked out) simulates a push that landed
+/// on the remote independently of the clone under test -- a sibling type's
+/// write, or another writer entirely.
+fn teammate_commits_on(remote: &Path, branch: &str, filename: &str, title: &str) {
+    let previous = git_stdout(remote, &["symbolic-ref", "--short", "HEAD"])
+        .trim()
+        .to_string();
+    git(remote, &["checkout", branch]);
+    write_rfc(remote, filename, title);
+    git(remote, &["add", "-A"]);
+    git(remote, &["commit", "-m", "teammate"]);
+    git(remote, &["checkout", &previous]);
+}
+
+// BUG-032: the original bug -- two git types sharing one remote landed in
+// separate clones, so the second type's push always non-fast-forwarded once
+// the first had pushed. A write is local-only now, so there is nothing left
+// to reject: both creates land in the one shared clone, and the remote is
+// untouched until `push`.
 #[test]
-fn rejected_link_errors_and_leaves_the_clone_file_unchanged() {
+fn two_git_types_on_one_remote_can_both_create_without_colliding() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = add_spec_type(
+        git_config(remote.path(), Some("next")),
+        remote.path(),
+        Some("next"),
+    );
+    let store = Store::load(root, &config).unwrap();
+    let clone = clone_root(root, &remote.path().to_string_lossy(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
+
+    let (rfc_path, rfc_outcome) = lazyspec::cli::create::run_with_body(
+        root,
+        &config,
+        &store,
+        "rfc",
+        "A2",
+        "tester",
+        None,
+        None,
+        |_| {},
+    )
+    .unwrap();
+    let (spec_path, spec_outcome) = lazyspec::cli::create::run_with_body(
+        root,
+        &config,
+        &store,
+        "spec",
+        "B1",
+        "tester",
+        None,
+        None,
+        |_| {},
+    )
+    .unwrap();
+
+    assert!(!rfc_outcome.is_synced());
+    assert!(!spec_outcome.is_synced());
+    assert!(rfc_path.exists());
+    assert!(spec_path.exists());
+    assert!(rfc_path.starts_with(&clone));
+    assert!(spec_path.starts_with(&clone));
+    assert_eq!(
+        commit_count(&clone, "HEAD"),
+        before + 2,
+        "both creates landed as local commits in the one shared clone"
+    );
+}
+
+// BUG-032: a write commits locally regardless of what the remote has done
+// meanwhile -- there is no push to reject.
+#[test]
+fn create_succeeds_locally_even_while_the_remote_has_moved_ahead() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
-    let doc = clone.join("docs/rfcs/RFC-001-a.md");
-    let bytes = std::fs::read(&doc).unwrap();
-    git(remote.path(), &["checkout", "next"]);
-    write_rfc(remote.path(), "RFC-003-c.md", "C");
-    git(remote.path(), &["add", "-A"]);
-    git(remote.path(), &["commit", "-m", "three"]);
-    git(remote.path(), &["checkout", "main"]);
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
 
-    let Err(err) = lazyspec::engine::ops::link::link_with_config(
+    teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
+
+    let path = lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {})
+        .expect("a local commit never needs the remote to agree");
+
+    assert!(path.exists());
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
+}
+
+// BUG-032 AC3/AC4: `rebase_onto_remote` fetches and rebases the local commit
+// onto the teammate's, then `push` lands both on the remote branch.
+#[test]
+fn rebase_onto_remote_then_push_rebases_over_a_teammate_commit() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
+
+    lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {}).unwrap();
+    teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
+
+    GitCli.rebase_onto_remote(&clone, Some("next")).unwrap();
+    let pushed = GitCli.push(&clone, Some("next")).unwrap();
+
+    assert_eq!(pushed, 1);
+    let tree = git_stdout(
+        remote.path(),
+        &["ls-tree", "--name-only", "next", "docs/rfcs/"],
+    );
+    assert!(tree.contains("RFC-003-teammate.md"), "{tree}");
+    assert!(tree.lines().any(|l| l.contains("mine")), "{tree}");
+    assert_eq!(
+        commit_count(remote.path(), "next"),
+        commit_count(&clone, "HEAD"),
+        "the clone and the remote agree once pushed"
+    );
+}
+
+// BUG-032: nothing ahead of the remote-tracking branch -- `push` pushes
+// nothing and reports zero.
+#[test]
+fn push_reports_zero_when_nothing_is_ahead() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let _ = &store;
+
+    let pushed = GitCli.push(&clone, Some("next")).unwrap();
+
+    assert_eq!(pushed, 0);
+}
+
+// BUG-032 AC4: a rebase conflict is left for the human -- the rebase is
+// aborted, the local commit is intact, and the error names the clone and the
+// conflicted file.
+#[test]
+fn rebase_onto_remote_conflict_aborts_and_keeps_the_local_commit() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
+
+    lazyspec::engine::ops::update::run_with_config(
         root,
         &store,
         "RFC-001",
-        "related-to",
-        "RFC-002",
-        &RealFileSystem,
+        &[("title", "Mine")],
         Some(&config),
-    ) else {
-        panic!("a push the remote rejects is an error");
-    };
+        &GitCli,
+    )
+    .unwrap();
+    let local_head = git_stdout(&clone, &["rev-parse", "HEAD"]);
 
-    assert!(format!("{err:#}").contains("lazyspec fetch"), "{err:#}");
-    assert_eq!(std::fs::read(&doc).unwrap(), bytes);
-}
-
-// STORY-282 AC4, AC6: a rejected push is an error naming remote, branch and
-// `lazyspec fetch`, and the clone is byte-identical to before the command.
-#[test]
-fn rejected_push_errors_and_rolls_the_clone_back() {
-    let remote = shared_repo();
-    let project = TempDir::new().unwrap();
-    let root = project.path();
-    let config = git_config(remote.path(), Some("main"));
-    let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
-    let head = git_stdout(&clone, &["rev-parse", "HEAD"]);
-    let docs = clone.join("docs/rfcs");
-    move_remote_ahead(remote.path());
-
-    let Err(err) = lazyspec::cli::create::run(root, &config, &store, "rfc", "C", "tester", |_| {})
-    else {
-        panic!("a push the remote rejects is an error");
-    };
-
-    let msg = format!("{err:#}");
-    assert!(msg.contains(&*remote.path().to_string_lossy()), "{msg}");
-    assert!(msg.contains("(main)"), "{msg}");
-    assert!(msg.contains("lazyspec fetch"), "{msg}");
-    assert_eq!(git_stdout(&clone, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git_stdout(&clone, &["status", "--porcelain"]), "");
-    let mut names: Vec<_> = std::fs::read_dir(&docs)
+    let previous = git_stdout(remote.path(), &["symbolic-ref", "--short", "HEAD"])
+        .trim()
+        .to_string();
+    git(remote.path(), &["checkout", "next"]);
+    let remote_doc = remote.path().join("docs/rfcs/RFC-001-a.md");
+    let content = std::fs::read_to_string(&remote_doc)
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["RFC-001-a.md"]);
-    assert_eq!(lazyspec::engine::template::next_number(&docs, "RFC"), 2);
+        .replace("title: \"A\"", "title: \"Theirs\"");
+    std::fs::write(&remote_doc, content).unwrap();
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "-m", "theirs"]);
+    git(remote.path(), &["checkout", &previous]);
+
+    let err = GitCli.rebase_onto_remote(&clone, Some("next")).unwrap_err();
+
+    let conflict = err
+        .downcast_ref::<lazyspec::engine::git_ref::RebaseConflict>()
+        .unwrap_or_else(|| panic!("a content conflict is a RebaseConflict: {err:#}"));
+    assert_eq!(conflict.clone, clone);
+    assert!(
+        conflict.files.iter().any(|f| f.contains("RFC-001-a.md")),
+        "{:?}",
+        conflict.files
+    );
+    assert_eq!(
+        git_stdout(&clone, &["rev-parse", "HEAD"]),
+        local_head,
+        "the local commit is kept"
+    );
+    assert_eq!(git_stdout(&clone, &["status", "--porcelain"]), "");
 }
 
+// BUG-032 AC5: `update_clone` rebases onto the fetched head instead of
+// `reset --hard`, so a local, unpushed commit survives a refresh.
 #[test]
-fn rejected_push_through_the_binary_exits_nonzero_with_empty_stdout() {
+fn update_clone_rebases_and_keeps_the_unpushed_local_commit() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
-    write_project_config(root, remote.path());
-    assert!(ids_via_binary(root).contains("RFC-001"));
-    identify_clone(root);
-    move_remote_ahead(remote.path());
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
 
-    let output = lazyspec(root, &["create", "rfc", "C", "--json"]);
+    lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {}).unwrap();
+    let local_subject = git_stdout(&clone, &["log", "-1", "--format=%s"]);
+    teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
 
-    assert!(!output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("lazyspec fetch"), "{stderr}");
+    GitCli.update_clone(&clone, Some("next")).unwrap();
+
+    assert!(clone.join("docs/rfcs/RFC-003-teammate.md").exists());
+    assert!(
+        clone.join("docs/rfcs").read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("mine")),
+        "the local file is kept"
+    );
+    assert_eq!(
+        git_stdout(&clone, &["log", "-1", "--format=%s"]),
+        local_subject,
+        "the local commit is still HEAD, rebased on top"
+    );
+    assert_eq!(
+        GitCli.unpushed(&clone, Some("next")).unwrap(),
+        1,
+        "the local commit is still unpushed"
+    );
 }
 
 // --- STORY-281 AC5: `fetch` brings the clone current ---
@@ -706,21 +861,27 @@ fn create_rfc(root: &Path, config: &Config, store: &Store, title: &str) -> anyho
 }
 
 #[test]
-fn reserved_create_reserves_against_the_types_remote_and_pushes() {
+fn reserved_create_reserves_against_the_types_remote_and_commits_locally() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = reserved_config(remote.path(), Some("main"));
     let store = Store::load(root, &config).unwrap();
-    let clone = identify_clone(root);
-    let before = commit_count(remote.path(), "main");
+    let clone = identify_clone(root, remote.path(), Some("main"));
+    let remote_before = commit_count(remote.path(), "main");
+    let clone_before = commit_count(&clone, "HEAD");
 
     let filename = create_rfc(root, &config, &store, "Second").unwrap();
 
     assert!(filename.starts_with("RFC-002-"), "{filename}");
     assert!(clone.join("docs/rfcs").join(&filename).exists());
     assert_eq!(reservations(remote.path()), vec![2]);
-    assert_eq!(commit_count(remote.path(), "main"), before + 1);
+    assert_eq!(commit_count(&clone, "HEAD"), clone_before + 1);
+    assert_eq!(
+        commit_count(remote.path(), "main"),
+        remote_before,
+        "the doc commit is local only; only the reservation ref reached the remote"
+    );
 }
 
 #[test]
@@ -731,7 +892,7 @@ fn reserved_create_continues_past_the_remotes_highest_reservation() {
     let root = project.path();
     let config = reserved_config(remote.path(), Some("main"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
+    identify_clone(root, remote.path(), Some("main"));
 
     let filename = create_rfc(root, &config, &store, "Eighth").unwrap();
 
@@ -739,92 +900,45 @@ fn reserved_create_continues_past_the_remotes_highest_reservation() {
     assert_eq!(reservations(remote.path()), vec![7, 8]);
 }
 
+// BUG-032: a clone that never saw a sibling project's write is no longer a
+// reason to reject -- the doc commits locally regardless, and reserved
+// numbering (queried straight against the live remote, not the clone) still
+// lands the second project on a fresh, non-colliding number.
 #[test]
-fn stale_reserved_project_errors_then_fetches_and_lands_a_fresh_id() {
+fn stale_project_still_creates_locally_and_reserves_a_fresh_id() {
     let remote = shared_repo();
     let config = reserved_config(remote.path(), Some("main"));
     let project_a = TempDir::new().unwrap();
     let project_b = TempDir::new().unwrap();
     let store_a = Store::load(project_a.path(), &config).unwrap();
     let store_b = Store::load(project_b.path(), &config).unwrap();
-    identify_clone(project_a.path());
-    let clone_b = identify_clone(project_b.path());
-    let head_b = git_stdout(&clone_b, &["rev-parse", "HEAD"]);
+    identify_clone(project_a.path(), remote.path(), Some("main"));
+    let clone_b = identify_clone(project_b.path(), remote.path(), Some("main"));
+    let clone_b_before = commit_count(&clone_b, "HEAD");
+    let remote_before = commit_count(remote.path(), "main");
 
     let a = create_rfc(project_a.path(), &config, &store_a, "From A").unwrap();
     assert!(a.starts_with("RFC-002-"), "{a}");
 
-    let Err(err) = create_rfc(project_b.path(), &config, &store_b, "From B") else {
-        panic!("B's clone is behind the remote, so its push is rejected");
-    };
-    assert!(format!("{err:#}").contains("lazyspec fetch"), "{err:#}");
-    assert_eq!(git_stdout(&clone_b, &["rev-parse", "HEAD"]), head_b);
-    assert_eq!(git_stdout(&clone_b, &["status", "--porcelain"]), "");
-    let held = reservations(remote.path());
-
-    GitCli.update_clone(&clone_b, Some("main")).unwrap();
     let b = create_rfc(project_b.path(), &config, &store_b, "From B").unwrap();
 
     let num: u32 = b["RFC-".len().."RFC-".len() + 3].parse().unwrap();
     assert_ne!(num, 2, "{b}");
-    assert!(!held.contains(&num), "{b} collides with {held:?}");
     assert!(reservations(remote.path()).contains(&num));
-    assert!(git_stdout(
-        remote.path(),
-        &["ls-tree", "--name-only", "main", "docs/rfcs/"]
-    )
-    .contains(&b));
-}
-
-// STORY-282 AC7 through the binary: fetch, then the re-run lands on the next free id.
-#[test]
-fn stale_project_fetches_then_creates_a_non_colliding_id() {
-    let remote = shared_repo();
-    let project_a = TempDir::new().unwrap();
-    let project_b = TempDir::new().unwrap();
-    write_project_config(project_a.path(), remote.path());
-    write_project_config(project_b.path(), remote.path());
-    assert!(ids_via_binary(project_a.path()).contains("RFC-001"));
-    assert!(ids_via_binary(project_b.path()).contains("RFC-001"));
-    identify_clone(project_a.path());
-    identify_clone(project_b.path());
-
-    let a = create_json(project_a.path(), "A2");
-    assert_eq!(a["id"], "RFC-002", "{a}");
-
-    let rejected = lazyspec(project_b.path(), &["create", "rfc", "B2", "--json"]);
-    assert!(!rejected.status.success());
-    assert_eq!(String::from_utf8_lossy(&rejected.stdout), "");
-
-    fetch_json(project_b.path(), &["fetch", "--json"]);
-    let b = create_json(project_b.path(), "B2");
-
-    assert_eq!(b["id"], "RFC-003", "{b}");
-    assert_eq!(b["synced"], true, "{b}");
-    let tree = git_stdout(
-        remote.path(),
-        &["ls-tree", "--name-only", "main", "docs/rfcs/"],
+    assert!(clone_b.join("docs/rfcs").join(&b).exists());
+    assert_eq!(commit_count(&clone_b, "HEAD"), clone_b_before + 1);
+    assert_eq!(
+        commit_count(remote.path(), "main"),
+        remote_before,
+        "neither project's doc commit reached the remote"
     );
-    let mut ids: Vec<&str> = tree.lines().filter_map(|l| l.get(10..17)).collect();
-    ids.sort_unstable();
-    assert_eq!(ids, vec!["RFC-001", "RFC-002", "RFC-003"], "{tree}");
-}
-
-fn create_json(root: &Path, title: &str) -> serde_json::Value {
-    let output = lazyspec(root, &["create", "rfc", title, "--json"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "create failed\nstdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}\nstdout: {stdout}"))
 }
 
 // --- ITERATION-440 (STORY-282 AC9, AC10): create --parent on a git type ---
 
-/// A second `git` type, `spec`, sharing `rfc`'s remote and branch, with its own
-/// clone directory (`.lazyspec/cache/spec`).
+/// A second `git` type, `spec`. When `remote`/`branch` agree with `rfc`'s own,
+/// the two share one clone (BUG-032 AC1); a different remote is a different
+/// clone.
 fn add_spec_type(mut config: Config, remote: &Path, branch: Option<&str>) -> Config {
     config.documents.types.push(TypeDef {
         dir: "docs/specs".to_string(),
@@ -835,20 +949,16 @@ fn add_spec_type(mut config: Config, remote: &Path, branch: Option<&str>) -> Con
     config
 }
 
-fn identify(clone: &Path) {
-    git(clone, &["config", "user.email", "test@test.com"]);
-    git(clone, &["config", "user.name", "Test"]);
-}
-
 #[test]
-fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
+fn create_with_parent_promotes_the_flat_parent_and_commits_both_in_one_local_commit() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     let config = git_config(remote.path(), Some("next"));
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    let before = commit_count(remote.path(), "next");
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let remote_before = commit_count(remote.path(), "next");
+    let before = commit_count(&clone, "HEAD");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
         root,
@@ -863,7 +973,7 @@ fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
     )
     .unwrap();
 
-    assert!(outcome.is_synced());
+    assert!(!outcome.is_synced());
     let type_def = &config.documents.types[0];
     let root_dir = doc_root(&config, root, type_def);
     assert!(root_dir.join("RFC-001-a/index.md").exists());
@@ -877,10 +987,15 @@ fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
         "RFC-001-child.md",
         "subdir numbering is local to the promoted parent's own folder"
     );
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
+    assert_eq!(
+        commit_count(remote.path(), "next"),
+        remote_before,
+        "the remote is untouched until `push`"
+    );
     let tree = git_stdout(
-        remote.path(),
-        &["ls-tree", "-r", "--name-only", "next", "docs/rfcs"],
+        &clone,
+        &["ls-tree", "-r", "--name-only", "HEAD", "docs/rfcs"],
     );
     assert!(tree.contains("docs/rfcs/RFC-001-a/index.md"), "{tree}");
     assert!(
@@ -902,8 +1017,11 @@ fn create_with_parent_promotes_the_flat_parent_and_pushes_both_in_one_commit() {
     assert_eq!(reloaded.parent_of(&child.path), Some(&parent.path));
 }
 
+// BUG-032 AC1: `rfc` and `spec` declare the same remote and branch, so they
+// resolve to the one shared clone -- there is no separate "the child's own
+// clone" for the child to land in instead.
 #[test]
-fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents_clone() {
+fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_shared_clone() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
@@ -913,9 +1031,8 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents
         Some("next"),
     );
     let store = Store::load(root, &config).unwrap();
-    identify_clone(root);
-    identify(&root.join(".lazyspec/cache/spec"));
-    let before = commit_count(remote.path(), "next");
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let before = commit_count(&clone, "HEAD");
 
     let (path, outcome) = lazyspec::cli::create::run_with_body(
         root,
@@ -930,20 +1047,16 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents
     )
     .unwrap();
 
-    assert!(outcome.is_synced());
+    assert!(!outcome.is_synced());
     assert!(
-        path.starts_with(root.join(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a")),
+        path.starts_with(clone.join("docs/rfcs/RFC-001-a")),
         "{}",
         path.display()
     );
-    assert!(
-        !path.starts_with(root.join(".lazyspec/cache/spec")),
-        "the child must land in the parent's clone, not its own type's"
-    );
-    assert_eq!(commit_count(remote.path(), "next"), before + 1);
+    assert_eq!(commit_count(&clone, "HEAD"), before + 1);
     let tree = git_stdout(
-        remote.path(),
-        &["ls-tree", "-r", "--name-only", "next", "docs/rfcs"],
+        &clone,
+        &["ls-tree", "-r", "--name-only", "HEAD", "docs/rfcs"],
     );
     assert!(
         tree.lines()
@@ -953,7 +1066,7 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_parents
 }
 
 #[test]
-fn create_with_parent_across_two_git_types_different_remotes_rejected_before_any_push() {
+fn create_with_parent_across_two_git_types_different_remotes_rejected_before_any_mutation() {
     let remote_a = shared_repo();
     let remote_b = shared_repo();
     let project = TempDir::new().unwrap();
@@ -964,9 +1077,8 @@ fn create_with_parent_across_two_git_types_different_remotes_rejected_before_any
         Some("next"),
     );
     let store = Store::load(root, &config).unwrap();
-    let rfc_clone = identify_clone(root);
-    let spec_clone = root.join(".lazyspec/cache/spec");
-    identify(&spec_clone);
+    let rfc_clone = identify_clone(root, remote_a.path(), Some("next"));
+    let spec_clone = identify_clone(root, remote_b.path(), Some("next"));
     let before_a = commit_count(remote_a.path(), "next");
     let before_b = commit_count(remote_b.path(), "next");
 
@@ -1007,20 +1119,25 @@ fn create_with_parent_json(root: &Path, title: &str, parent: &str) -> serde_json
 }
 
 #[test]
-fn create_with_parent_through_the_binary_writes_into_the_clone_and_syncs() {
+fn create_with_parent_through_the_binary_writes_into_the_clone_and_commits_locally() {
     let remote = shared_repo();
     let project = TempDir::new().unwrap();
     let root = project.path();
     write_project_config(root, remote.path());
     assert!(ids_via_binary(root).contains("RFC-001"));
-    identify_clone(root);
+    let clone = identify_clone(root, remote.path(), None);
 
     let child = create_with_parent_json(root, "Child", "RFC-001");
 
     let path = child["path"].as_str().unwrap();
     assert!(
-        path.contains(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a"),
+        Path::new(path).starts_with(
+            clone
+                .strip_prefix(root)
+                .unwrap()
+                .join("docs/rfcs/RFC-001-a")
+        ),
         "{path}"
     );
-    assert_eq!(child["synced"], true, "{child}");
+    assert_eq!(child["synced"], false, "{child}");
 }

@@ -80,8 +80,17 @@ impl GitRefOps for RenamingGit {
     fn clone_repo(&self, _remote: &str, _branch: Option<&str>, _dest: &Path) -> Result<()> {
         unreachable!("fix --governs clones nothing")
     }
-    fn commit_and_push(&self, _clone: &Path, _branch: Option<&str>, _message: &str) -> Result<()> {
+    fn commit(&self, _clone: &Path, _message: &str) -> Result<()> {
         unreachable!("fix --governs commits nothing")
+    }
+    fn rebase_onto_remote(&self, _clone: &Path, _branch: Option<&str>) -> Result<()> {
+        unreachable!("fix --governs rebases no clones")
+    }
+    fn push(&self, _clone: &Path, _branch: Option<&str>) -> Result<usize> {
+        unreachable!("fix --governs pushes nothing")
+    }
+    fn unpushed(&self, _clone: &Path, _branch: Option<&str>) -> Result<usize> {
+        unreachable!("fix --governs checks no unpushed commits")
     }
     fn push_ref(&self, _root: &Path, _remote: &str, _refname: &str) -> Result<()> {
         unreachable!("fix --governs pushes nothing")

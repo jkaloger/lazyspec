@@ -122,16 +122,38 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
 /// on the local `root` (RFC-072 Decision 4): the cache belongs to *this*
 /// repo's `.lazyspec/`, never the shared one.
 pub fn doc_root(config: &Config, root: &Path, type_def: &TypeDef) -> PathBuf {
-    let cache = root.join(".lazyspec/cache").join(&type_def.name);
     match type_def.store {
         StoreBackend::Filesystem => normalize(&config.docs_root(root).join(&type_def.dir)),
         StoreBackend::GithubIssues
         | StoreBackend::GithubMilestones
         | StoreBackend::GithubProjects
         | StoreBackend::GitRef
-        | StoreBackend::ClickupTasks => cache,
-        StoreBackend::Git => normalize(&cache.join(&type_def.dir)),
+        | StoreBackend::ClickupTasks => root.join(".lazyspec/cache").join(&type_def.name),
+        StoreBackend::Git => normalize(
+            &crate::engine::git_store::type_clone_root(root, type_def).join(&type_def.dir),
+        ),
     }
+}
+
+/// The configured type whose cache path is a prefix of a root-relative
+/// `doc_path` under `.lazyspec/cache/` -- every cache-backed backend's own
+/// `.lazyspec/cache/<name>/`, or a `git` type's shared, remote-keyed clone
+/// (`.lazyspec/cache/git/<slug>/`, BUG-032 AC1). Decoding the type name out of
+/// a fixed path component (`components().nth(2)`) stopped working once a
+/// `git` type's clone shared the literal `git/` segment across every type on
+/// that remote; this instead checks each configured type's own cache prefix.
+pub fn type_for_cache_path<'a>(config: &'a Config, doc_path: &Path) -> Option<&'a TypeDef> {
+    config.documents.types.iter().find(|t| match t.store {
+        StoreBackend::Filesystem => false,
+        StoreBackend::Git => doc_path.starts_with(crate::engine::git_store::type_clone_relative(t)),
+        StoreBackend::GithubIssues
+        | StoreBackend::GithubMilestones
+        | StoreBackend::GithubProjects
+        | StoreBackend::GitRef
+        | StoreBackend::ClickupTasks => {
+            doc_path.starts_with(Path::new(".lazyspec/cache").join(&t.name))
+        }
+    })
 }
 
 /// The root [`loader::load_type_directory`] makes a `filesystem` type's
@@ -219,7 +241,7 @@ impl Store {
             let full_path = doc_root(config, root, type_def);
 
             if type_def.store == StoreBackend::Git {
-                let clone_root = root.join(".lazyspec/cache").join(&type_def.name);
+                let clone_root = crate::engine::git_store::type_clone_root(root, type_def);
                 if let Some(ops) = git_ref_ops.filter(|_| !fs.exists(&clone_root)) {
                     clone_git_store(root, type_def, &clone_root, ops, fs)?;
                 }
@@ -1621,11 +1643,12 @@ mod tests {
     fn doc_root_joins_dir_against_the_clone_root_for_git_store() {
         let type_def = TypeDef {
             dir: "docs/specs".to_string(),
+            remote: Some("https://example.com/spec.git".to_string()),
             ..TypeDef::test_fixture("spec", StoreBackend::Git)
         };
         assert_eq!(
             doc_root(&Config::default(), Path::new("/a/b"), &type_def),
-            PathBuf::from("/a/b/.lazyspec/cache/spec/docs/specs")
+            PathBuf::from("/a/b/.lazyspec/cache/git/example-com-spec-git/docs/specs")
         );
     }
 
@@ -1662,11 +1685,12 @@ mod tests {
 
         let git = TypeDef {
             dir: "docs/specs".to_string(),
+            remote: Some("https://example.com/spec.git".to_string()),
             ..TypeDef::test_fixture("spec", StoreBackend::Git)
         };
         assert_eq!(
             doc_root(&config, root, &git),
-            PathBuf::from("/local/repo/.lazyspec/cache/spec/docs/specs")
+            PathBuf::from("/local/repo/.lazyspec/cache/git/example-com-spec-git/docs/specs")
         );
     }
 
@@ -2136,7 +2160,7 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/note"
+                "clone_repo:{GIT_REMOTE}:next:/fake/root/.lazyspec/cache/git/example-invalid-docs-git--next"
             )]
         );
     }
@@ -2155,7 +2179,7 @@ mod tests {
         assert_eq!(
             clone_calls(&mock),
             vec![format!(
-                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/note"
+                "clone_repo:{GIT_REMOTE}:default:/fake/root/.lazyspec/cache/git/example-invalid-docs-git"
             )]
         );
     }
@@ -2168,7 +2192,7 @@ mod tests {
 
         let fs = InMemoryFileSystem::new();
         let root = PathBuf::from("/fake/root");
-        let clone = root.join(".lazyspec/cache/note");
+        let clone = root.join(".lazyspec/cache/git/example-invalid-docs-git");
         fs.add_dir(clone.clone());
         fs.add_dir(clone.join("docs/notes"));
         fs.add_file(

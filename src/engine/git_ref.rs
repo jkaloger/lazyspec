@@ -2,13 +2,37 @@ use crate::engine::staleness::Drift;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 // Wall-clock cap for the network `git fetch` in the sync path, so a slow or
 // auth-prompting remote can't wedge the background poll thread (BUG-001).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A rebase (`update_clone`, `rebase_onto_remote`) hit a conflict: the rebase
+/// was aborted, local commits are intact, and `files` names what collided
+/// (BUG-032 AC4/AC5) -- structured so a later `push`/`fetch` JSON surface can
+/// report it rather than parsing prose out of the error chain.
+#[derive(Debug)]
+pub struct RebaseConflict {
+    pub clone: PathBuf,
+    pub files: Vec<String>,
+}
+
+impl std::fmt::Display for RebaseConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rebase conflict in {}: {} -- resolve with `git -C {} pull --rebase`, then `lazyspec push`",
+            self.clone.display(),
+            self.files.join(", "),
+            self.clone.display()
+        )
+    }
+}
+
+impl std::error::Error for RebaseConflict {}
 
 pub trait GitRefOps {
     fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
@@ -34,15 +58,36 @@ pub trait GitRefOps {
     /// of the remote's default branch when `None` (RFC-072 "The git store").
     fn clone_repo(&self, remote: &str, branch: Option<&str>, dest: &Path) -> Result<()>;
     /// Bring an existing clone to the tip of `branch` (or the remote's default
-    /// branch when `None`). Resets hard rather than pulling: an out-of-band edit
-    /// in the clone must not block the refresh.
+    /// branch when `None`): fetch, then rebase local commits onto the fetched
+    /// head (BUG-032 AC5) -- never `reset --hard`, which would discard commits
+    /// a write made locally and never pushed. A conflicted rebase is aborted
+    /// and returned as [`RebaseConflict`]; local commits are intact either way.
+    /// Built on [`rebase_onto_remote`](GitRefOps::rebase_onto_remote).
     fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
-    /// Stage everything in `clone`, commit it as `message`, and push `HEAD` to
-    /// `branch` on `origin` (or to the branch `HEAD` tracks when `None`). A
-    /// clean tree commits nothing and returns `Ok`. Any push failure resets the
-    /// clone to its pre-call `HEAD` before erroring, so a rejected write leaves
-    /// no orphan file for `next_number` to count (STORY-282 AC6).
-    fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()>;
+    /// Stage everything in `clone` and commit it as `message`. Never pushes
+    /// (BUG-032 AC2): a write lands locally, and `push` is the separate,
+    /// explicit step that publishes it. A clean tree commits nothing and
+    /// returns `Ok`. A commit failure resets the clone to its pre-call `HEAD`
+    /// before erroring, so a rejected write leaves no orphan file for
+    /// `next_number` to count (STORY-282 AC6).
+    fn commit(&self, clone: &Path, message: &str) -> Result<()>;
+    /// Fetch `branch` on `origin` (or the branch `HEAD` tracks when `None`,
+    /// updating the remote-tracking ref) and rebase local commits onto it
+    /// (BUG-032 AC3/AC5) -- shared by `update_clone` and, ahead of `push`, a
+    /// caller that needs the rebase and a check (e.g. a duplicate-id guard)
+    /// to run before anything is pushed. A rebase conflict is aborted and
+    /// returned as [`RebaseConflict`]; local commits are intact either way.
+    fn rebase_onto_remote(&self, clone: &Path, branch: Option<&str>) -> Result<()>;
+    /// Push `HEAD` to `branch` on `origin` (or the branch `HEAD` tracks when
+    /// `None`) and report how many commits went -- 0 when nothing was ahead of
+    /// the remote-tracking branch, which pushes nothing (BUG-032 AC3). Callers
+    /// rebase first (`rebase_onto_remote`); this never fetches or rebases
+    /// itself, so a caller can run its own check between the two.
+    fn push(&self, clone: &Path, branch: Option<&str>) -> Result<usize>;
+    /// How many local commits in `clone` are ahead of `branch`'s remote-tracking
+    /// ref (or the branch `HEAD` tracks when `None`) -- what `push` would push,
+    /// without fetching or pushing anything itself.
+    fn unpushed(&self, clone: &Path, branch: Option<&str>) -> Result<usize>;
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()>;
     fn push_new_ref(&self, root: &Path, remote: &str, refname: &str, new_sha: &str) -> Result<()>;
     fn delete_remote_ref(
@@ -113,6 +158,94 @@ impl GitCli {
 
         let output = child.wait_with_output()?;
         Ok(output)
+    }
+
+    /// `branch`, or the clone's current branch when `None` -- what
+    /// `update_clone`/`rebase_onto_remote`/`push`/`unpushed` resolve a caller's `Option<&str>`
+    /// against so a type with no declared `branch` still fetches, rebases and
+    /// pushes the branch its clone actually tracks.
+    fn resolve_branch(&self, clone: &Path, branch: Option<&str>) -> Result<String> {
+        if let Some(branch) = branch {
+            return Ok(branch.to_string());
+        }
+        let output = self.run_git(clone, &["symbolic-ref", "--short", "HEAD"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "could not resolve the clone's current branch: {}",
+                stderr.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Fetch `branch` from `origin`, updating both `FETCH_HEAD` and the
+    /// remote-tracking ref `origin/<branch>` (a plain `git fetch origin
+    /// <branch>` opportunistically updates the tracking ref when it matches
+    /// the clone's configured fetch refspec), so `unpushed`'s count reads
+    /// current.
+    fn fetch_branch(&self, clone: &Path, branch: &str) -> Result<()> {
+        let mut fetch = Command::new("git");
+        fetch
+            .args(["fetch", "origin", branch])
+            .current_dir(clone)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let output = crate::engine::subprocess::output_with_timeout(fetch, FETCH_TIMEOUT)
+            .context("git fetch")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git fetch failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
+    /// Rebase the clone's current branch onto `onto` (`FETCH_HEAD` or an
+    /// `origin/<branch>` tracking ref). A clean rebase replays local commits on
+    /// top; a conflicted one aborts -- local commits stay exactly as they were
+    /// -- and reports [`RebaseConflict`] with the files that collided.
+    fn rebase_onto(&self, clone: &Path, onto: &str) -> Result<()> {
+        let output = self.run_git(clone, &["rebase", onto])?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let files = self.conflicted_files(clone).unwrap_or_default();
+        let _ = self.run_git(clone, &["rebase", "--abort"]);
+        if files.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!("git rebase onto {onto} failed: {stderr}");
+        }
+        Err(RebaseConflict {
+            clone: clone.to_path_buf(),
+            files,
+        }
+        .into())
+    }
+
+    fn conflicted_files(&self, clone: &Path) -> Result<Vec<String>> {
+        let output = self.run_git(clone, &["diff", "--name-only", "--diff-filter=U"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git diff --diff-filter=U failed: {}", stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Local commits on `HEAD` not reachable from `upstream` -- what
+    /// `push` would push and `unpushed` reports.
+    fn count_ahead(&self, clone: &Path, upstream: &str) -> Result<usize> {
+        let range = format!("{upstream}..HEAD");
+        let output = self.run_git(clone, &["rev-list", "--count", &range])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git rev-list --count failed: {}", stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0))
     }
 }
 
@@ -284,26 +417,10 @@ impl GitRefOps for GitCli {
     }
 
     fn update_clone(&self, clone: &Path, branch: Option<&str>) -> Result<()> {
-        let mut fetch = Command::new("git");
-        fetch
-            .args(["fetch", "origin", branch.unwrap_or("HEAD")])
-            .current_dir(clone)
-            .env("GIT_TERMINAL_PROMPT", "0");
-        let output = crate::engine::subprocess::output_with_timeout(fetch, FETCH_TIMEOUT)
-            .context("git fetch")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git fetch failed: {}", stderr.trim());
-        }
-        let output = self.run_git(clone, &["reset", "--hard", "FETCH_HEAD"])?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git reset failed: {}", stderr.trim());
-        }
-        Ok(())
+        self.rebase_onto_remote(clone, branch)
     }
 
-    fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()> {
+    fn commit(&self, clone: &Path, message: &str) -> Result<()> {
         let head = self.head(clone)?;
         let output = self.run_git(clone, &["add", "-A"])?;
         if !output.status.success() {
@@ -320,27 +437,39 @@ impl GitRefOps for GitCli {
             self.run_git(clone, &["reset", "--hard", &head])?;
             bail!("git commit failed: {}", stderr);
         }
-        let refspec = match branch {
-            Some(branch) => format!("HEAD:{branch}"),
-            None => "HEAD".to_string(),
-        };
+        Ok(())
+    }
+
+    fn rebase_onto_remote(&self, clone: &Path, branch: Option<&str>) -> Result<()> {
+        let branch = self.resolve_branch(clone, branch)?;
+        self.fetch_branch(clone, &branch)?;
+        self.rebase_onto(clone, &format!("origin/{branch}"))
+    }
+
+    fn push(&self, clone: &Path, branch: Option<&str>) -> Result<usize> {
+        let branch = self.resolve_branch(clone, branch)?;
+        let tracking = format!("origin/{branch}");
+        let ahead = self.count_ahead(clone, &tracking)?;
+        if ahead == 0 {
+            return Ok(0);
+        }
+        let refspec = format!("HEAD:{branch}");
         let mut push = Command::new("git");
         push.args(["push", "origin", &refspec])
             .current_dir(clone)
             .env("GIT_TERMINAL_PROMPT", "0");
-        let pushed = crate::engine::subprocess::output_with_timeout(push, FETCH_TIMEOUT)
-            .context("git push")
-            .and_then(|output| {
-                if output.status.success() {
-                    return Ok(());
-                }
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("git push failed: {}", stderr.trim())
-            });
-        if pushed.is_err() {
-            self.run_git(clone, &["reset", "--hard", &head])?;
+        let output = crate::engine::subprocess::output_with_timeout(push, FETCH_TIMEOUT)
+            .context("git push")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git push failed: {}", stderr.trim());
         }
-        pushed
+        Ok(ahead)
+    }
+
+    fn unpushed(&self, clone: &Path, branch: Option<&str>) -> Result<usize> {
+        let branch = self.resolve_branch(clone, branch)?;
+        self.count_ahead(clone, &format!("origin/{branch}"))
     }
 
     fn push_ref(&self, root: &Path, remote: &str, refname: &str) -> Result<()> {
@@ -557,7 +686,10 @@ pub mod test_support {
         pub fetch_results: RefCell<Vec<Result<()>>>,
         pub clone_results: RefCell<Vec<Result<()>>>,
         pub update_clone_results: RefCell<Vec<Result<()>>>,
-        pub commit_and_push_results: RefCell<Vec<Result<()>>>,
+        pub commit_results: RefCell<Vec<Result<()>>>,
+        pub rebase_onto_remote_results: RefCell<Vec<Result<()>>>,
+        pub push_commits_results: RefCell<Vec<Result<usize>>>,
+        pub unpushed_results: RefCell<Vec<Result<usize>>>,
         pub push_results: RefCell<Vec<Result<()>>>,
         pub push_new_ref_results: RefCell<Vec<Result<()>>>,
         pub delete_remote_results: RefCell<Vec<Result<()>>>,
@@ -606,7 +738,10 @@ pub mod test_support {
                 fetch_results: RefCell::new(vec![]),
                 clone_results: RefCell::new(vec![]),
                 update_clone_results: RefCell::new(vec![]),
-                commit_and_push_results: RefCell::new(vec![]),
+                commit_results: RefCell::new(vec![]),
+                rebase_onto_remote_results: RefCell::new(vec![]),
+                push_commits_results: RefCell::new(vec![]),
+                unpushed_results: RefCell::new(vec![]),
                 push_results: RefCell::new(vec![]),
                 push_new_ref_results: RefCell::new(vec![]),
                 delete_remote_results: RefCell::new(vec![]),
@@ -677,8 +812,23 @@ pub mod test_support {
             self
         }
 
-        pub fn with_commit_and_push_result(self, result: Result<()>) -> Self {
-            self.commit_and_push_results.borrow_mut().push(result);
+        pub fn with_commit_result(self, result: Result<()>) -> Self {
+            self.commit_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_rebase_onto_remote_result(self, result: Result<()>) -> Self {
+            self.rebase_onto_remote_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_push_commits_result(self, result: Result<usize>) -> Self {
+            self.push_commits_results.borrow_mut().push(result);
+            self
+        }
+
+        pub fn with_unpushed_result(self, result: Result<usize>) -> Self {
+            self.unpushed_results.borrow_mut().push(result);
             self
         }
 
@@ -841,14 +991,38 @@ pub mod test_support {
             Self::pop_or_default(&self.update_clone_results)
         }
 
-        fn commit_and_push(&self, clone: &Path, branch: Option<&str>, message: &str) -> Result<()> {
+        fn commit(&self, clone: &Path, message: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("commit:{}:{}", clone.display(), message));
+            Self::pop_or_default(&self.commit_results)
+        }
+
+        fn rebase_onto_remote(&self, clone: &Path, branch: Option<&str>) -> Result<()> {
             self.calls.borrow_mut().push(format!(
-                "commit_and_push:{}:{}:{}",
+                "rebase_onto_remote:{}:{}",
                 clone.display(),
-                branch.unwrap_or("default"),
-                message
+                branch.unwrap_or("default")
             ));
-            Self::pop_or_default(&self.commit_and_push_results)
+            Self::pop_or_default(&self.rebase_onto_remote_results)
+        }
+
+        fn push(&self, clone: &Path, branch: Option<&str>) -> Result<usize> {
+            self.calls.borrow_mut().push(format!(
+                "push:{}:{}",
+                clone.display(),
+                branch.unwrap_or("default")
+            ));
+            Self::pop_or_default(&self.push_commits_results)
+        }
+
+        fn unpushed(&self, clone: &Path, branch: Option<&str>) -> Result<usize> {
+            self.calls.borrow_mut().push(format!(
+                "unpushed:{}:{}",
+                clone.display(),
+                branch.unwrap_or("default")
+            ));
+            Self::pop_or_default(&self.unpushed_results)
         }
 
         fn push_ref(&self, _root: &Path, remote: &str, refname: &str) -> Result<()> {

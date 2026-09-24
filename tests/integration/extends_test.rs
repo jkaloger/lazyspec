@@ -1,6 +1,7 @@
 use crate::common::{git, git_stdout, TestFixture};
 use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::fs::RealFileSystem;
+use lazyspec::engine::git_store::clone_root;
 use lazyspec::engine::store::Store;
 use std::path::Path;
 use std::process::Command;
@@ -316,7 +317,7 @@ fn git_type_clones_into_the_local_cache_not_the_extended_root() {
         String::from_utf8_lossy(&list.stderr)
     );
 
-    assert!(b.path().join(".lazyspec/cache/rfc").exists());
+    assert!(clone_root(b.path(), &remote.path().to_string_lossy(), None).exists());
     assert!(!a.path().join(".lazyspec").exists());
 }
 

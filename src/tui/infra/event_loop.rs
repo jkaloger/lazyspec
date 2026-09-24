@@ -1748,7 +1748,7 @@ mod tests {
     fn poll_updates_the_clone_of_a_git_type() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let clone_root = root.join(".lazyspec/cache/rfc");
+        let clone_root = root.join(".lazyspec/cache/git/example-invalid-shared-git--main");
         std::fs::create_dir_all(&clone_root).unwrap();
         let mut config = Config::default();
         config.documents.types = vec![TypeDef {
@@ -2106,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn git_edit_commits_and_pushes_the_clone_once() {
+    fn git_edit_commits_the_clone_locally_once() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let mock = MockGitRefClient::new();
@@ -2114,7 +2114,7 @@ mod tests {
 
         let result = try_push_git_edit_with(
             root,
-            Path::new(".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md"),
+            Path::new(".lazyspec/cache/git/example-com-specs-git--next/docs/rfcs/RFC-001-a.md"),
             &git_type_config(),
             &mock,
         );
@@ -2123,7 +2123,7 @@ mod tests {
         assert_eq!(
             *calls.borrow(),
             vec![format!(
-                "commit_and_push:{}/.lazyspec/cache/rfc:next:update RFC-001",
+                "commit:{}/.lazyspec/cache/git/example-com-specs-git--next:update RFC-001",
                 root.display()
             )]
         );

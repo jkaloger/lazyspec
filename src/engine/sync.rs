@@ -247,7 +247,7 @@ fn sync_git_clone(
 ) -> Result<GitRefCounts> {
     use anyhow::Context as _;
 
-    let clone_root = root.join(".lazyspec/cache").join(&td.name);
+    let clone_root = crate::engine::git_store::type_clone_root(root, td);
     let docs = crate::engine::store::doc_root(cfg, root, td);
     let before = md_files(&docs);
 
@@ -1967,7 +1967,9 @@ mod tests {
     #[test]
     fn an_existing_clone_is_updated_on_its_branch_not_recloned() {
         let tmp = TempDir::new().unwrap();
-        let clone_root = tmp.path().join(".lazyspec/cache/rfc");
+        let clone_root = tmp
+            .path()
+            .join(".lazyspec/cache/git/example-invalid-shared-git--next");
         std::fs::create_dir_all(&clone_root).unwrap();
         let ops = MockGitRefClient::new();
 
@@ -1984,7 +1986,11 @@ mod tests {
     #[test]
     fn a_failed_update_names_remote_and_branch_and_fetches_nothing() {
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache/rfc")).unwrap();
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(".lazyspec/cache/git/example-invalid-shared-git--next"),
+        )
+        .unwrap();
         let ops = MockGitRefClient::new()
             .with_update_clone_result(Err(anyhow::anyhow!("could not resolve host")));
 
@@ -2001,7 +2007,9 @@ mod tests {
     #[test]
     fn counts_come_from_the_doc_set_before_and_after() {
         let tmp = TempDir::new().unwrap();
-        let docs = tmp.path().join(".lazyspec/cache/rfc/docs/rfcs");
+        let docs = tmp
+            .path()
+            .join(".lazyspec/cache/git/example-invalid-shared-git--next/docs/rfcs");
         std::fs::create_dir_all(docs.join("nested")).unwrap();
         std::fs::write(docs.join("RFC-001-a.md"), "").unwrap();
         std::fs::write(docs.join("RFC-002-b.md"), "").unwrap();

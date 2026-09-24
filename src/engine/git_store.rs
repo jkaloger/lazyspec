@@ -1,6 +1,7 @@
 //! The `git` store (RFC-072 "The git store"): documents are files in a managed
-//! clone under `.lazyspec/cache/<type>/`, and every write is a file write, a
-//! commit, and a push to the type's declared branch.
+//! clone shared by every type on one remote + branch (BUG-032 AC1), and every
+//! write is a file write and a local commit -- publishing is the separate,
+//! explicit `lazyspec push`.
 
 use std::path::{Path, PathBuf};
 
@@ -11,30 +12,101 @@ use crate::engine::git_ref::{GitRefClient, GitRefOps};
 use crate::engine::store::doc_root;
 use crate::engine::store_dispatch::{CreatedDoc, DocumentStore, FilesystemStore, PushOutcome};
 
-/// Commit and push `type_def`'s clone. Never `LocalOnly` (STORY-282 AC5): an
-/// unreachable remote and a moved remote are both an error the human resolves
-/// with `lazyspec fetch`, not a warning at exit 0.
-fn commit_clone(root: &Path, type_def: &TypeDef, ops: &dyn GitRefOps, message: &str) -> Result<()> {
+/// Where every git type sharing `remote` + `branch` clones to:
+/// `.lazyspec/cache/git/<slug>` (BUG-032 AC1). Keyed on the repo, not the type
+/// name, so two types declaring the same remote and branch resolve to one
+/// clone regardless of how many `[[types]]` entries name it.
+pub fn clone_root(root: &Path, remote: &str, branch: Option<&str>) -> PathBuf {
+    root.join(clone_relative(remote, branch))
+}
+
+/// [`clone_root`] for a configured git type, reading its own `remote` and
+/// `branch`.
+pub(crate) fn type_clone_root(root: &Path, type_def: &TypeDef) -> PathBuf {
+    root.join(type_clone_relative(type_def))
+}
+
+/// [`clone_root`], root-relative -- what a root-relative doc path is checked
+/// against to find its clone.
+fn clone_relative(remote: &str, branch: Option<&str>) -> PathBuf {
+    Path::new(".lazyspec/cache/git").join(slug(remote, branch))
+}
+
+pub(crate) fn type_clone_relative(type_def: &TypeDef) -> PathBuf {
     let remote = type_def
         .remote
         .as_deref()
         .expect("Config::parse rejects a git store without a remote");
-    let branch = type_def.branch.as_deref();
-    let clone = root.join(".lazyspec/cache").join(&type_def.name);
-    ops.commit_and_push(&clone, branch, message)
-        .with_context(|| {
-            format!(
-            "pushing to {remote} ({}): the remote may have moved; run `lazyspec fetch` and retry",
-            branch.unwrap_or("default branch")
-        )
-        })
+    clone_relative(remote, type_def.branch.as_deref())
+}
+
+/// A readable, filesystem-safe slug for `remote` + `branch`: the URL scheme or
+/// `git@` is stripped, every other run of non-alphanumerics folds to one `-`,
+/// and the branch (when pinned) is appended -- so the same repo spelled with a
+/// different scheme, host case, or trailing `.git` still slugs identically.
+fn slug(remote: &str, branch: Option<&str>) -> String {
+    let mut slug = slugify(strip_remote_scheme(remote));
+    if let Some(branch) = branch {
+        slug.push_str("--");
+        slug.push_str(&slugify(branch));
+    }
+    slug
+}
+
+fn strip_remote_scheme(remote: &str) -> &str {
+    for prefix in ["https://", "http://", "ssh://", "git@"] {
+        if let Some(rest) = remote.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    remote
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Commit `type_def`'s clone locally. Never pushes (BUG-032 AC2): `lazyspec
+/// push` is the separate step that publishes it.
+fn commit_clone(root: &Path, type_def: &TypeDef, ops: &dyn GitRefOps, message: &str) -> Result<()> {
+    ops.commit(&type_clone_root(root, type_def), message)
+}
+
+/// What [`GitStore::commit`] and [`commit_if_git_backed_outcome`] report for a
+/// local-only commit (BUG-032 AC2): never `Synced`, so every git write's
+/// `--json` carries `synced: false` and the exact clone to run `lazyspec push`
+/// against.
+fn local_only_warning(clone: &Path) -> String {
+    format!(
+        "committed locally to {}; run `lazyspec push` to publish",
+        clone.display()
+    )
+}
+
+/// The configured `git` type whose clone `doc_path` (root-relative) falls
+/// under, matched by clone-root prefix (BUG-032 AC1) rather than by decoding a
+/// type name out of the path -- two types sharing a clone both resolve here.
+fn git_type_for_doc_path<'a>(config: &'a Config, doc_path: &Path) -> Option<&'a TypeDef> {
+    config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::Git)
+        .find(|t| doc_path.starts_with(type_clone_relative(t)))
 }
 
 /// The commit for a writer that rewrites a document file without going through
 /// [`DocumentStore`] (`link`, `ignore`, `pin`, `fix`, the TUI's tag write).
-/// `doc_path` is root-relative; anything outside `.lazyspec/cache/<type>/`, or
-/// under a type whose store is not `git`, is not ours and is `Ok(())`. A clone
-/// with nothing staged commits nothing, so callers that touch several files may
+/// A path under no git type's clone is not ours and is `Ok(())`. A clone with
+/// nothing staged commits nothing, so callers that touch several files may
 /// call this once per file.
 pub fn commit_if_git_backed(
     root: &Path,
@@ -43,25 +115,38 @@ pub fn commit_if_git_backed(
     ops: &dyn GitRefOps,
     message: &str,
 ) -> Result<()> {
-    if !doc_path.starts_with(".lazyspec/cache/") {
-        return Ok(());
+    match git_type_for_doc_path(config, doc_path) {
+        Some(type_def) => commit_clone(root, type_def, ops, message),
+        None => Ok(()),
     }
-    let type_def = doc_path
-        .components()
-        .nth(2)
-        .and_then(|c| c.as_os_str().to_str())
-        .and_then(|name| config.type_by_name(name));
-    match type_def {
-        Some(type_def) if type_def.store == StoreBackend::Git => {
-            commit_clone(root, type_def, ops, message)
+}
+
+/// [`commit_if_git_backed`], reporting the push outcome: `LocalOnly` naming
+/// the clone when `doc_path` is git-backed, `Synced` (a no-op) otherwise --
+/// for a caller (`create --parent`) that hands the outcome on to `--json`
+/// rather than discarding it.
+pub fn commit_if_git_backed_outcome(
+    root: &Path,
+    config: &Config,
+    doc_path: &Path,
+    ops: &dyn GitRefOps,
+    message: &str,
+) -> Result<PushOutcome> {
+    match git_type_for_doc_path(config, doc_path) {
+        Some(type_def) => {
+            let clone = type_clone_root(root, type_def);
+            commit_clone(root, type_def, ops, message)?;
+            Ok(PushOutcome::LocalOnly {
+                warning: local_only_warning(&clone),
+            })
         }
-        _ => Ok(()),
+        None => Ok(PushOutcome::Synced),
     }
 }
 
 /// [`FilesystemStore`] plus a commit: STORY-283 already points every git doc's
 /// path into the clone, so the file writes are the filesystem store's, and this
-/// store only adds the `commit_and_push` after each one (convention principle 6:
+/// store only adds the local commit after each one (convention principle 6:
 /// one write path).
 pub struct GitStore {
     pub root: PathBuf,
@@ -77,9 +162,15 @@ impl GitStore {
         }
     }
 
+    /// Commit locally and report `LocalOnly` (BUG-032 AC2): a `git` write is
+    /// never pushed here, so it is never `Synced` -- `lazyspec push` is what
+    /// publishes it.
     fn commit(&self, type_def: &TypeDef, message: &str) -> Result<PushOutcome> {
+        let clone = type_clone_root(&self.root, type_def);
         commit_clone(&self.root, type_def, &*self.ops, message)?;
-        Ok(PushOutcome::Synced)
+        Ok(PushOutcome::LocalOnly {
+            warning: local_only_warning(&clone),
+        })
     }
 }
 
@@ -91,7 +182,7 @@ impl DocumentStore for GitStore {
         author: &str,
         body: &str,
     ) -> Result<CreatedDoc> {
-        let clone_root = self.root.join(".lazyspec/cache").join(&type_def.name);
+        let clone_root = type_clone_root(&self.root, type_def);
         let target = doc_root(&self.config, &self.root, type_def);
         let dir = target
             .strip_prefix(&self.root)
@@ -168,12 +259,11 @@ mod tests {
     use crate::engine::config::StoreBackend;
     use crate::engine::git_ref::test_support::MockGitRefClient;
     use std::cell::RefCell;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use tempfile::TempDir;
 
     const REMOTE: &str = "https://example.com/specs.git";
-    const DOC: &str = ".lazyspec/cache/rfc/docs/rfcs/RFC-001-a.md";
 
     fn rfc_type(branch: Option<&str>) -> TypeDef {
         TypeDef {
@@ -184,14 +274,25 @@ mod tests {
         }
     }
 
-    /// A project whose `rfc` clone already holds `RFC-001-a.md`, so `Store::load`
+    /// `type_def`'s clone, root-relative -- same slug rule [`clone_root`] uses,
+    /// so a test asserting a doc or a call log's clone path agrees with the
+    /// store under test regardless of which branch it declares.
+    fn clone_dir(root: &Path, type_def: &TypeDef) -> PathBuf {
+        clone_root(root, REMOTE, type_def.branch.as_deref())
+            .strip_prefix(root)
+            .unwrap()
+            .to_path_buf()
+    }
+
+    /// A project whose clone already holds `RFC-001-a.md`, so `Store::load`
     /// finds the clone and never spawns git (DICTUM-004).
-    fn project(type_def: &TypeDef) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>) {
+    fn project(type_def: &TypeDef) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>, PathBuf) {
         let tmp = TempDir::new().unwrap();
-        let doc = tmp.path().join(DOC);
-        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        let doc = clone_dir(tmp.path(), type_def).join("docs/rfcs/RFC-001-a.md");
+        let full = tmp.path().join(&doc);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
         std::fs::write(
-            &doc,
+            &full,
             "---\ntitle: \"A\"\ntype: rfc\nstatus: draft\nauthor: tester\ndate: 2026-04-01\ntags: []\n---\n\nA.\n",
         )
         .unwrap();
@@ -204,39 +305,46 @@ mod tests {
             config,
             ops: Box::new(mock),
         };
-        (tmp, store, calls)
+        (tmp, store, calls, doc)
     }
 
     fn failing_project(
         type_def: &TypeDef,
         error: &str,
-    ) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>) {
-        let (tmp, mut store, calls) = project(type_def);
-        store.ops = Box::new(
-            MockGitRefClient::new().with_commit_and_push_result(Err(anyhow::anyhow!("{error}"))),
-        );
-        (tmp, store, calls)
+    ) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>, PathBuf) {
+        let (tmp, mut store, calls, doc) = project(type_def);
+        store.ops =
+            Box::new(MockGitRefClient::new().with_commit_result(Err(anyhow::anyhow!("{error}"))));
+        (tmp, store, calls, doc)
     }
 
     fn commit_call(root: &Path, type_def: &TypeDef, message: &str) -> String {
         format!(
-            "commit_and_push:{}/.lazyspec/cache/rfc:{}:{message}",
-            root.display(),
-            type_def.branch.as_deref().unwrap_or("default")
+            "commit:{}:{message}",
+            root.join(clone_dir(root, type_def)).display()
         )
     }
 
+    fn local_only(root: &Path, type_def: &TypeDef) -> PushOutcome {
+        PushOutcome::LocalOnly {
+            warning: format!(
+                "committed locally to {}; run `lazyspec push` to publish",
+                root.join(clone_dir(root, type_def)).display()
+            ),
+        }
+    }
+
     #[test]
-    fn update_rewrites_the_clone_file_and_commits_once() {
+    fn update_rewrites_the_clone_file_and_commits_locally() {
         let td = rfc_type(Some("next"));
-        let (tmp, mut store, calls) = project(&td);
+        let (tmp, mut store, calls, doc) = project(&td);
 
         let outcome = store
             .update(&td, "RFC-001", &[("title", "Renamed")])
             .unwrap();
 
-        assert_eq!(outcome, PushOutcome::Synced);
-        let content = std::fs::read_to_string(tmp.path().join(DOC)).unwrap();
+        assert_eq!(outcome, local_only(tmp.path(), &td));
+        let content = std::fs::read_to_string(tmp.path().join(&doc)).unwrap();
         assert!(content.contains("title: Renamed"), "{content}");
         assert_eq!(
             *calls.borrow(),
@@ -247,17 +355,17 @@ mod tests {
     #[test]
     fn create_writes_under_the_clone_applies_the_body_and_reports_a_root_relative_path() {
         let td = rfc_type(Some("next"));
-        let (tmp, mut store, calls) = project(&td);
+        let (tmp, mut store, calls, _doc) = project(&td);
 
         let created = store
             .create(&td, "Second one", "tester", "Body text.")
             .unwrap();
 
         assert_eq!(created.id, "RFC-002");
-        assert_eq!(created.push_outcome, PushOutcome::Synced);
+        assert_eq!(created.push_outcome, local_only(tmp.path(), &td));
         assert_eq!(
             created.path,
-            Path::new(".lazyspec/cache/rfc/docs/rfcs/RFC-002-second-one.md")
+            clone_dir(tmp.path(), &td).join("docs/rfcs/RFC-002-second-one.md")
         );
         let content = std::fs::read_to_string(tmp.path().join(&created.path)).unwrap();
         assert!(content.contains("Body text."), "{content}");
@@ -269,9 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn create_without_a_branch_pushes_to_the_default_branch() {
+    fn create_without_a_branch_commits_locally() {
         let td = rfc_type(None);
-        let (tmp, mut store, calls) = project(&td);
+        let (tmp, mut store, calls, _doc) = project(&td);
 
         store.create(&td, "Second", "tester", "").unwrap();
 
@@ -281,32 +389,29 @@ mod tests {
         );
     }
 
-    // STORY-282 AC4/AC5: a rejected push is an error naming remote, branch and
-    // the fetch that resolves it -- never `LocalOnly`.
+    // BUG-032 AC2: a commit failure (a clean tree has nothing to reject, so
+    // this is the local-only equivalent of the old rejected-push path) is
+    // still an error, and never `LocalOnly`.
     #[test]
-    fn rejected_push_errors_naming_remote_branch_and_fetch() {
+    fn commit_failure_errors() {
         let td = rfc_type(Some("next"));
-        let (_tmp, mut store, _calls) = failing_project(&td, "! [rejected]");
+        let (_tmp, mut store, _calls, _doc) = failing_project(&td, "git commit failed: bad tree");
 
-        let Err(err) = store.update(&td, "RFC-001", &[("title", "Renamed")]) else {
-            panic!("a rejected push is an error");
-        };
+        let err = store
+            .update(&td, "RFC-001", &[("title", "Renamed")])
+            .unwrap_err();
 
-        let msg = format!("{err:#}");
-        assert!(msg.contains(REMOTE), "{msg}");
-        assert!(msg.contains("(next)"), "{msg}");
-        assert!(msg.contains("lazyspec fetch"), "{msg}");
-        assert!(msg.contains("! [rejected]"), "{msg}");
+        assert!(format!("{err:#}").contains("git commit failed"), "{err:#}");
     }
 
     #[test]
-    fn delete_removes_the_clone_file_and_commits_once() {
+    fn delete_removes_the_clone_file_and_commits_locally() {
         let td = rfc_type(Some("next"));
-        let (tmp, mut store, calls) = project(&td);
+        let (tmp, mut store, calls, doc) = project(&td);
 
         store.delete(&td, "RFC-001").unwrap();
 
-        assert!(!tmp.path().join(DOC).exists());
+        assert!(!tmp.path().join(&doc).exists());
         assert_eq!(
             *calls.borrow(),
             vec![commit_call(tmp.path(), &td, "delete RFC-001")]
@@ -318,16 +423,9 @@ mod tests {
     #[test]
     fn direct_write_under_a_git_type_commits_once() {
         let td = rfc_type(Some("next"));
-        let (tmp, store, calls) = project(&td);
+        let (tmp, store, calls, doc) = project(&td);
 
-        commit_if_git_backed(
-            tmp.path(),
-            &store.config,
-            Path::new(DOC),
-            &*store.ops,
-            "link RFC-001",
-        )
-        .unwrap();
+        commit_if_git_backed(tmp.path(), &store.config, &doc, &*store.ops, "link RFC-001").unwrap();
 
         assert_eq!(
             *calls.borrow(),
@@ -338,7 +436,7 @@ mod tests {
     #[test]
     fn direct_write_outside_the_cache_commits_nothing() {
         let td = rfc_type(Some("next"));
-        let (tmp, store, calls) = project(&td);
+        let (tmp, store, calls, _doc) = project(&td);
 
         commit_if_git_backed(
             tmp.path(),
@@ -355,7 +453,7 @@ mod tests {
     #[test]
     fn direct_write_under_another_backend_commits_nothing() {
         let story = TypeDef::test_fixture("story", StoreBackend::GithubIssues);
-        let (tmp, mut store, calls) = project(&story);
+        let (tmp, mut store, calls, _doc) = project(&story);
         store.config.documents.types = vec![story];
 
         commit_if_git_backed(
@@ -371,40 +469,52 @@ mod tests {
     }
 
     #[test]
-    fn direct_write_rejected_push_errors_naming_remote_branch_and_fetch() {
+    fn direct_write_commit_failure_errors() {
         let td = rfc_type(Some("next"));
-        let (tmp, store, _calls) = failing_project(&td, "! [rejected]");
+        let (tmp, store, _calls, doc) = failing_project(&td, "git commit failed: bad tree");
 
-        let Err(err) = commit_if_git_backed(
-            tmp.path(),
-            &store.config,
-            Path::new(DOC),
-            &*store.ops,
-            "link RFC-001",
-        ) else {
-            panic!("a rejected push is an error");
-        };
+        let err =
+            commit_if_git_backed(tmp.path(), &store.config, &doc, &*store.ops, "link RFC-001")
+                .unwrap_err();
 
-        let msg = format!("{err:#}");
-        assert!(msg.contains(REMOTE), "{msg}");
-        assert!(msg.contains("(next)"), "{msg}");
-        assert!(msg.contains("lazyspec fetch"), "{msg}");
+        assert!(format!("{err:#}").contains("git commit failed"), "{err:#}");
     }
 
     #[test]
     fn sync_tags_only_commits() {
         let td = rfc_type(Some("next"));
-        let (tmp, mut store, calls) = project(&td);
-        let before = std::fs::read(tmp.path().join(DOC)).unwrap();
+        let (tmp, mut store, calls, doc) = project(&td);
+        let before = std::fs::read(tmp.path().join(&doc)).unwrap();
 
         store
             .sync_tags(&td, "RFC-001", &["shared".to_string()], &[])
             .unwrap();
 
-        assert_eq!(std::fs::read(tmp.path().join(DOC)).unwrap(), before);
+        assert_eq!(std::fs::read(tmp.path().join(&doc)).unwrap(), before);
         assert_eq!(
             *calls.borrow(),
             vec![commit_call(tmp.path(), &td, "tag RFC-001")]
+        );
+    }
+
+    // BUG-032 AC1: two types on the same remote + branch resolve to one clone,
+    // regardless of their own name or `dir`; a different branch or remote is a
+    // different clone.
+    #[test]
+    fn clone_root_is_keyed_on_remote_and_branch_not_the_type() {
+        let root = Path::new("/proj");
+
+        assert_eq!(
+            clone_root(root, REMOTE, Some("next")),
+            clone_root(root, REMOTE, Some("next")),
+        );
+        assert_ne!(
+            clone_root(root, REMOTE, Some("next")),
+            clone_root(root, REMOTE, Some("other")),
+        );
+        assert_ne!(
+            clone_root(root, REMOTE, Some("next")),
+            clone_root(root, "https://example.com/other.git", Some("next")),
         );
     }
 }
