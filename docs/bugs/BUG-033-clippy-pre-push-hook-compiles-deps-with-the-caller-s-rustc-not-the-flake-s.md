@@ -1,11 +1,12 @@
 ---
 title: "clippy pre-push hook compiles deps with the caller's rustc, not the flake's"
 type: bug
-status: reported
+status: fixed
 author: "Jack Kaloger"
 date: 2026-09-24
 tags: []
 related: []
+reviewed: 2c7d44bc3f1ef01efb8ae2672580c92224799382
 ---
 
 ## Expected
