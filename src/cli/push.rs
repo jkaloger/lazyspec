@@ -95,6 +95,10 @@ fn error_json(result: &CloneResult) -> serde_json::Value {
             "kind": "rebase_in_progress",
             "message": message,
         }),
+        CloneError::UncommittedChanges(_) => serde_json::json!({
+            "kind": "uncommitted_changes",
+            "message": message,
+        }),
         CloneError::DuplicateIds { collisions, .. } => serde_json::json!({
             "kind": "duplicate_ids",
             "message": message,

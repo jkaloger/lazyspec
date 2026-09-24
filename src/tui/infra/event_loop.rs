@@ -1276,13 +1276,14 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             // A rejected push rolled the clone back, so the plan's `written`
             // entries are no longer true; the error replaces them (DICTUM-006).
             let commit = fixes.written_paths().try_for_each(|path| {
-                crate::engine::git_store::commit_if_git_backed(
+                crate::engine::git_store::commit_if_git_backed_outcome(
                     &root,
                     &config,
                     Path::new(path),
                     &GitCli,
                     "fix",
                 )
+                .map(|_| ())
             });
             let output = match commit {
                 Ok(()) => format_fix_output(&fixes),
@@ -2250,7 +2251,10 @@ mod tests {
     fn git_edit_commits_the_clone_locally_once() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let mock = MockGitRefClient::new();
+        // The editor's write is what left the clone dirty (F6): without it,
+        // `commit_if_git_backed_outcome` now treats a clean clone as nothing
+        // to publish.
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
         let calls = mock.call_log();
 
         let result = try_push_git_edit_with(
@@ -2263,10 +2267,16 @@ mod tests {
         assert_eq!(result, Ok(true), "a git-backed commit reports true");
         assert_eq!(
             *calls.borrow(),
-            vec![format!(
-                "commit:{}/.lazyspec/git/example-com-specs-git--next-b14d63f7:update RFC-001",
-                root.display()
-            )]
+            vec![
+                format!(
+                    "has_uncommitted_changes:{}/.lazyspec/git/example-com-specs-git--next-b14d63f7",
+                    root.display()
+                ),
+                format!(
+                    "commit:{}/.lazyspec/git/example-com-specs-git--next-b14d63f7:update RFC-001",
+                    root.display()
+                ),
+            ]
         );
     }
 

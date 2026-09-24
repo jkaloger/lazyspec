@@ -21,6 +21,7 @@ use crate::engine::issue_body::TypeMatchRule;
 use crate::engine::issue_cache::IssueCache;
 use crate::engine::issue_map::IssueMap;
 use crate::engine::status_colors::StatusColors;
+use crate::engine::store;
 use crate::engine::store_dispatch;
 use crate::engine::task_map::TaskMap;
 
@@ -212,71 +213,92 @@ impl TypeSync for GitRefSync<'_> {
     }
 }
 
-/// Refreshes a `git` type's managed clone (RFC-072 "The git store"): clones
-/// when the clone root is missing, otherwise brings it to the branch tip.
+/// Refreshes every configured `git` type's managed clone (RFC-072 "The git
+/// store"), grouped by shared clone (F1): [`ops::push::distinct_clones`]'s
+/// same grouping, so two types sharing a remote + branch pay one
+/// `update_clone` (or `clone_repo`, when the clone is missing) between them
+/// rather than one each. `filter` is applied to which types get an outcome,
+/// never to which clones get fetched -- a filtered-out sibling still shares
+/// the same physical clone, so its type's fetch already covers it.
+///
+/// Every member type's own doc-root files are snapshotted before that one
+/// call and diffed after, so each type's `new`/`removed` still counts its own
+/// subdirectory -- just measured against the one fetch the whole clone paid
+/// for, instead of a second one whose "before" was already the first type's
+/// "after".
 pub struct GitSync<'c> {
     pub ops: &'c dyn GitRefOps,
 }
 
-impl TypeSync for GitSync<'_> {
-    fn sync(
-        &mut self,
-        _ctx: &mut SyncContext,
-        root: &Path,
-        td: &TypeDef,
-        cfg: &Config,
-    ) -> SyncOutcome {
-        match sync_git_clone(root, self.ops, td, cfg) {
-            Ok(c) => SyncOutcome {
-                type_name: td.name.clone(),
-                fetched: c.fetched,
-                new: c.new,
-                removed: c.removed,
-                ..Default::default()
-            },
-            Err(e) => SyncOutcome::failed(&td.name, format!("{e:#}")),
+fn sync_git_clones(
+    root: &Path,
+    cfg: &Config,
+    ops: &dyn GitRefOps,
+    filter: Option<&str>,
+) -> Vec<SyncOutcome> {
+    use crate::engine::ops::push::distinct_clones;
+
+    let mut outcomes = Vec::new();
+    for group in distinct_clones(root, cfg) {
+        let git_types: Vec<&TypeDef> = group
+            .type_names()
+            .iter()
+            .filter_map(|name| cfg.type_by_name(name))
+            .filter(|t| t.store == StoreBackend::Git)
+            .collect();
+        // The URL-`extends` clone `distinct_clones` also reports (its
+        // `types` are `filesystem`, never `git`) is `push`'s business, not
+        // fetch's.
+        let Some(&first) = git_types.first() else {
+            continue;
+        };
+
+        let before: HashMap<&str, HashSet<std::path::PathBuf>> = git_types
+            .iter()
+            .map(|t| (t.name.as_str(), md_files(&store::doc_root(cfg, root, t))))
+            .collect();
+
+        let update = if group.exists() {
+            ops.update_clone(&group.path, group.branch.as_deref())
+        } else {
+            store::clone_git_store(
+                root,
+                first,
+                &group.path,
+                ops,
+                &crate::engine::fs::RealFileSystem,
+            )
+        };
+
+        for t in git_types {
+            if filter.is_some_and(|f| f != t.name) {
+                continue;
+            }
+            match &update {
+                Ok(()) => {
+                    let after = md_files(&store::doc_root(cfg, root, t));
+                    let before = &before[t.name.as_str()];
+                    outcomes.push(SyncOutcome {
+                        type_name: t.name.clone(),
+                        fetched: after.len(),
+                        new: after.difference(before).count(),
+                        removed: before.difference(&after).count(),
+                        ..Default::default()
+                    });
+                }
+                Err(e) => outcomes.push(SyncOutcome::failed(
+                    &t.name,
+                    format!(
+                        "updating {} ({}) for type {}: {e:#}",
+                        t.remote.as_deref().unwrap_or_default(),
+                        t.branch.as_deref().unwrap_or("default branch"),
+                        t.name
+                    ),
+                )),
+            }
         }
     }
-}
-
-fn sync_git_clone(
-    root: &Path,
-    ops: &dyn GitRefOps,
-    td: &TypeDef,
-    cfg: &Config,
-) -> Result<GitRefCounts> {
-    use anyhow::Context as _;
-
-    let clone_root = crate::engine::git_store::type_clone_root(root, td);
-    let docs = crate::engine::store::doc_root(cfg, root, td);
-    let before = md_files(&docs);
-
-    if clone_root.exists() {
-        let branch = td.branch.as_deref();
-        ops.update_clone(&clone_root, branch).with_context(|| {
-            format!(
-                "updating {} ({}) for type {}",
-                td.remote.as_deref().unwrap_or_default(),
-                branch.unwrap_or("default branch"),
-                td.name
-            )
-        })?;
-    } else {
-        crate::engine::store::clone_git_store(
-            root,
-            td,
-            &clone_root,
-            ops,
-            &crate::engine::fs::RealFileSystem,
-        )?;
-    }
-
-    let after = md_files(&docs);
-    Ok(GitRefCounts {
-        fetched: after.len(),
-        new: after.difference(&before).count(),
-        removed: before.difference(&after).count(),
-    })
+    outcomes
 }
 
 /// Every `.md` under `dir`, recursively -- the set the loader will read, so the
@@ -424,6 +446,17 @@ pub fn sync_all(
 
     let mut outcomes = Vec::new();
     for backend in order {
+        // `git` fetches per shared clone, not per type (F1): a type-by-type
+        // dispatch would run one `update_clone` per type sharing a clone, and
+        // every type after the first would diff against a doc set the first
+        // type's fetch already brought current -- reporting new:0/removed:0
+        // regardless of what actually changed. `sync_git_backend` groups by
+        // clone first, so it cannot go through the uniform per-`td` loop
+        // below.
+        if backend == StoreBackend::Git {
+            outcomes.extend(sync_git_backend(syncers, root, config, filter));
+            continue;
+        }
         for td in config.documents.types.iter().filter(|t| t.store == backend) {
             if filter.is_some_and(|f| f != td.name) {
                 continue;
@@ -438,6 +471,34 @@ pub fn sync_all(
         }
     }
     outcomes
+}
+
+/// The `git` backend's slice of [`sync_all`]'s loop (F1): one [`SyncOutcome`]
+/// per configured `git` type (respecting `filter`, same as every other
+/// backend), but fetched by [`sync_git_clones`]'s shared-clone grouping
+/// rather than by a per-`td` dispatch. A configured `git` type with no
+/// [`GitSync`] syncer fails the same way [`run_syncer`] would have, one
+/// outcome per type, so a missing syncer is still reported per type instead
+/// of being swallowed by the grouping.
+fn sync_git_backend(
+    syncers: &Syncers,
+    root: &Path,
+    config: &Config,
+    filter: Option<&str>,
+) -> Vec<SyncOutcome> {
+    let configured = config
+        .documents
+        .types
+        .iter()
+        .filter(|t| t.store == StoreBackend::Git)
+        .filter(|t| filter.is_none_or(|f| f == t.name));
+
+    match syncers.git.as_ref() {
+        Some(git) => sync_git_clones(root, config, git.ops, filter),
+        None => configured
+            .map(|td| SyncOutcome::failed(&td.name, "no syncer configured for backend 'git'"))
+            .collect(),
+    }
 }
 
 /// The composed round's warnings, split by who should hear them. One request is
@@ -527,7 +588,10 @@ fn dispatch(
             cfg,
             "clickup-tasks",
         )),
-        StoreBackend::Git => Some(run_syncer(syncers.git.as_mut(), ctx, root, td, cfg, "git")),
+        // `sync_all` never reaches here for `Git`: `sync_git_backend` handles
+        // the whole backend, grouped by clone, before this per-`td` loop
+        // runs (F1).
+        StoreBackend::Git => None,
         StoreBackend::Filesystem => None,
         StoreBackend::GithubProjects => None,
     }
@@ -2024,5 +2088,66 @@ mod tests {
             (3, 0, 0),
             "the mock changes nothing, so the set is unchanged"
         );
+    }
+
+    fn two_git_types_sharing_a_clone_config() -> Config {
+        let mut config = Config::default();
+        config.documents.types = vec![
+            TypeDef {
+                dir: "docs/rfcs".to_string(),
+                remote: Some(GIT_REMOTE.to_string()),
+                branch: Some("next".to_string()),
+                ..type_def("rfc", "RFC", StoreBackend::Git)
+            },
+            TypeDef {
+                dir: "docs/specs".to_string(),
+                remote: Some(GIT_REMOTE.to_string()),
+                branch: Some("next".to_string()),
+                ..type_def("spec", "SPEC", StoreBackend::Git)
+            },
+        ];
+        config
+    }
+
+    // F1: two types sharing one clone must pay one `update_clone` between
+    // them, not one each -- and each type's own counts must still reflect
+    // its own subdirectory rather than diffing away to zero because a
+    // sibling's fetch already ran first.
+    #[test]
+    fn two_types_sharing_a_clone_pay_one_update_clone_and_each_keep_its_own_counts() {
+        let tmp = TempDir::new().unwrap();
+        let clone_root = tmp
+            .path()
+            .join(".lazyspec/git/example-invalid-shared-git--next-9ed165ba");
+        std::fs::create_dir_all(clone_root.join("docs/rfcs")).unwrap();
+        std::fs::create_dir_all(clone_root.join("docs/specs")).unwrap();
+        std::fs::write(clone_root.join("docs/rfcs/RFC-001-a.md"), "").unwrap();
+        std::fs::write(clone_root.join("docs/specs/SPEC-001-a.md"), "").unwrap();
+        let ops = MockGitRefClient::new();
+        let config = two_git_types_sharing_a_clone_config();
+
+        let mut ctx = SyncContext {
+            gh: None,
+            clickup: None,
+            fetch: None,
+        };
+        let mut syncers = Syncers {
+            git: Some(GitSync { ops: &ops }),
+            ..Default::default()
+        };
+        let outcomes = sync_all(tmp.path(), &config, &mut ctx, &mut syncers, None);
+
+        assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+        assert_eq!(
+            calls_starting(&ops, "update_clone:").len(),
+            1,
+            "one shared clone must pay one update_clone between its two types, got {:?}",
+            ops.call_log().borrow()
+        );
+        for outcome in &outcomes {
+            assert!(outcome.error.is_none(), "{outcome:?}");
+            assert_eq!(outcome.fetched, 1, "{}: {outcome:?}", outcome.type_name);
+            assert_eq!(outcome.new, 0, "{}: {outcome:?}", outcome.type_name);
+        }
     }
 }

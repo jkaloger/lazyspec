@@ -396,13 +396,14 @@ fn update_tags(
         Ok(())
     })?;
     let id = crate::engine::store::extract_id(relative);
-    crate::engine::git_store::commit_if_git_backed(
+    crate::engine::git_store::commit_if_git_backed_outcome(
         root,
         config,
         relative,
         &crate::engine::git_ref::GitCli,
         &format!("tag {id}"),
     )
+    .map(|_| ())
 }
 
 pub fn resolve_editor_from(editor: Option<&str>, visual: Option<&str>) -> String {
@@ -2898,6 +2899,7 @@ impl App {
                         &doc_type_str,
                         &title,
                         &author,
+                        &crate::engine::git_ref::GitCli,
                         |p| {
                             let message = match &p {
                                 ReservationProgress::QueryingRemote => {
@@ -2977,6 +2979,7 @@ impl App {
             &doc_type_str,
             &title,
             &author,
+            &crate::engine::git_ref::GitCli,
             |_| {},
         )?;
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();

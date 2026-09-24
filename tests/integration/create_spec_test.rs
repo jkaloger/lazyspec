@@ -1,4 +1,5 @@
 use lazyspec::engine::document::{DocMeta, Status};
+use lazyspec::engine::git_ref::GitCli;
 use std::fs;
 
 #[test]
@@ -13,6 +14,7 @@ fn create_spec_produces_flat_file() {
         "spec",
         "Auth Flow",
         "jkaloger",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -42,6 +44,7 @@ fn created_spec_has_correct_frontmatter() {
         "spec",
         "Payment Gateway",
         "alice",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -67,6 +70,7 @@ fn created_spec_loads_in_store() {
         "spec",
         "Search Index",
         "carol",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -92,6 +96,7 @@ fn non_subdirectory_types_still_produce_flat_files() {
         "rfc",
         "Flat File Test",
         "dave",
+        &GitCli,
         |_| {},
     )
     .unwrap();

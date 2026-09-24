@@ -183,6 +183,7 @@ fn create_writes_into_the_clone_and_commits_locally_without_pushing() {
         "tester",
         None,
         Some("Shared body."),
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -361,6 +362,34 @@ fn ignore_and_unignore_each_commit_locally_once() {
         !unignore_outcome.is_synced(),
         "a git write is local-only now"
     );
+}
+
+// F6: a rewrite that lands byte-identical content (the doc was already
+// ignored) leaves the clone clean, so the outcome is `Synced` with no
+// warning -- not another `LocalOnly` claiming there is something to push.
+#[test]
+fn ignore_on_an_already_ignored_git_doc_is_synced_and_commits_nothing() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let config = git_config(remote.path(), Some("next"));
+    let store = Store::load(root, &config).unwrap();
+    let clone = identify_clone(root, remote.path(), Some("next"));
+    let fs = RealFileSystem;
+
+    lazyspec::cli::ignore::ignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
+    let before = commit_count(&clone, "HEAD");
+
+    let outcome =
+        lazyspec::cli::ignore::ignore(root, &store, &config, &GitCli, "RFC-001", &fs).unwrap();
+
+    assert_eq!(
+        commit_count(&clone, "HEAD"),
+        before,
+        "an already-ignored doc has nothing left to commit"
+    );
+    assert!(outcome.is_synced(), "{outcome:?}");
+    assert!(outcome.warning().is_none(), "{outcome:?}");
 }
 
 #[test]
@@ -542,6 +571,7 @@ fn two_git_types_on_one_remote_can_both_create_without_colliding() {
         "tester",
         None,
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -554,6 +584,7 @@ fn two_git_types_on_one_remote_can_both_create_without_colliding() {
         "tester",
         None,
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -585,8 +616,17 @@ fn create_succeeds_locally_even_while_the_remote_has_moved_ahead() {
 
     teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
 
-    let path = lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {})
-        .expect("a local commit never needs the remote to agree");
+    let path = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "rfc",
+        "Mine",
+        "tester",
+        &GitCli,
+        |_| {},
+    )
+    .expect("a local commit never needs the remote to agree");
 
     assert!(path.exists());
     assert_eq!(commit_count(&clone, "HEAD"), before + 1);
@@ -603,7 +643,17 @@ fn rebase_onto_remote_then_push_rebases_over_a_teammate_commit() {
     let store = Store::load(root, &config).unwrap();
     let clone = identify_clone(root, remote.path(), Some("next"));
 
-    lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {}).unwrap();
+    lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "rfc",
+        "Mine",
+        "tester",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
     teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
 
     GitCli.rebase_onto_remote(&clone, Some("next")).unwrap();
@@ -706,7 +756,17 @@ fn update_clone_rebases_and_keeps_the_unpushed_local_commit() {
     let store = Store::load(root, &config).unwrap();
     let clone = identify_clone(root, remote.path(), Some("next"));
 
-    lazyspec::cli::create::run(root, &config, &store, "rfc", "Mine", "tester", |_| {}).unwrap();
+    lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "rfc",
+        "Mine",
+        "tester",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
     let local_subject = git_stdout(&clone, &["log", "-1", "--format=%s"]);
     teammate_commits_on(remote.path(), "next", "RFC-003-teammate.md", "Teammate");
 
@@ -852,6 +912,105 @@ fn fetch_type_filter_accepts_a_git_type_and_names_git_when_refusing_another() {
         stderr.contains("git-ref, git, or clickup-tasks"),
         "the refusal lists git among the fetchable backends: {stderr}"
     );
+}
+
+// F1: two types sharing one clone must each see their own teammate-pushed
+// doc as `new: 1` -- not the second type reporting `new: 0` because the
+// first type's fetch (against the one shared clone) already ran and moved
+// what the second type's own "before" snapshot would have compared against.
+#[test]
+fn fetch_reports_new_one_for_both_types_sharing_a_clone() {
+    let remote = shared_repo();
+    write_rfc(remote.path(), "SPEC-001-a.md", "Spec A"); // seeds docs/rfcs; moved below
+    std::fs::create_dir_all(remote.path().join("docs/specs")).unwrap();
+    std::fs::rename(
+        remote.path().join("docs/rfcs/SPEC-001-a.md"),
+        remote.path().join("docs/specs/SPEC-001-a.md"),
+    )
+    .unwrap();
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "-m", "seed specs"]);
+
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_two_git_types_config(root, remote.path(), None);
+    lazyspec(root, &["fetch", "--json"]);
+
+    write_rfc(remote.path(), "RFC-002-b.md", "B");
+    write_rfc(remote.path(), "SPEC-002-b.md", "Spec B");
+    std::fs::rename(
+        remote.path().join("docs/rfcs/SPEC-002-b.md"),
+        remote.path().join("docs/specs/SPEC-002-b.md"),
+    )
+    .unwrap();
+    git(remote.path(), &["add", "-A"]);
+    git(
+        remote.path(),
+        &["commit", "-m", "teammate adds one of each"],
+    );
+
+    let outcomes = fetch_json(root, &["fetch", "--json"]);
+
+    let by_type = |name: &str| {
+        outcomes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["type"] == name)
+            .unwrap_or_else(|| panic!("no outcome for '{name}': {outcomes}"))
+    };
+    assert_eq!(by_type("rfc")["new"], 1, "{outcomes}");
+    assert_eq!(by_type("spec")["new"], 1, "{outcomes}");
+}
+
+// F3: a file hand-edited directly in the clone (not through lazyspec) must
+// block both `push` and `fetch` before either touches the rebase -- naming
+// the clone and how to clear it -- rather than rebasing over it and either
+// dragging the edit into a replayed commit or losing it to a conflict abort.
+#[test]
+fn push_and_fetch_refuse_a_hand_edited_file_in_the_clone() {
+    let remote = shared_repo();
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    write_project_config(root, remote.path(), None);
+    assert!(ids_via_binary(root).contains("RFC-001"));
+
+    let clone = clone_root(root, &remote.path().to_string_lossy(), None);
+    let doc = clone.join("docs/rfcs/RFC-001-a.md");
+    let before = std::fs::read_to_string(&doc).unwrap();
+    std::fs::write(&doc, format!("{before}\nhand-edited, never committed\n")).unwrap();
+
+    let push_output = push_output(root);
+    assert!(!push_output.status.success(), "push must refuse");
+    let push_value = push_json(&push_output);
+    let clone_entry = &push_value["clones"][0];
+    assert_eq!(
+        clone_entry["error"]["kind"], "uncommitted_changes",
+        "{push_value}"
+    );
+    let push_message = clone_entry["error"]["message"].as_str().unwrap();
+    assert!(
+        push_message.contains(&clone.display().to_string()),
+        "{push_message}"
+    );
+    assert!(push_message.contains("stash"), "{push_message}");
+    assert_eq!(
+        std::fs::read_to_string(&doc).unwrap(),
+        format!("{before}\nhand-edited, never committed\n"),
+        "the hand edit must survive untouched"
+    );
+
+    let fetch_output = lazyspec(root, &["fetch", "--json"]);
+    assert!(!fetch_output.status.success(), "fetch must refuse too");
+    let fetch_stdout = String::from_utf8_lossy(&fetch_output.stdout);
+    let fetch_value: serde_json::Value = serde_json::from_str(&fetch_stdout)
+        .unwrap_or_else(|e| panic!("{e}\nstdout: {fetch_stdout}"));
+    let fetch_message = fetch_value[0]["error"].as_str().unwrap();
+    assert!(
+        fetch_message.contains(&clone.display().to_string()),
+        "{fetch_message}"
+    );
+    assert!(fetch_message.contains("stash"), "{fetch_message}");
 }
 
 // --- BUG-032 AC8: `fetch` migrates old per-type clones ---
@@ -1021,7 +1180,8 @@ fn reservations(remote: &Path) -> Vec<u32> {
 }
 
 fn create_rfc(root: &Path, config: &Config, store: &Store, title: &str) -> anyhow::Result<String> {
-    let path = lazyspec::cli::create::run(root, config, store, "rfc", title, "tester", |_| {})?;
+    let path =
+        lazyspec::cli::create::run(root, config, store, "rfc", title, "tester", &GitCli, |_| {})?;
     Ok(path.file_name().unwrap().to_string_lossy().into_owned())
 }
 
@@ -1134,6 +1294,7 @@ fn create_with_parent_promotes_the_flat_parent_and_commits_both_in_one_local_com
         "tester",
         Some("RFC-001"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -1208,6 +1369,7 @@ fn create_with_parent_across_two_git_types_sharing_a_remote_lands_in_the_shared_
         "tester",
         Some("RFC-001"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -1256,6 +1418,7 @@ fn create_with_parent_across_two_git_types_different_remotes_rejected_before_any
         "tester",
         Some("RFC-001"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap_err();

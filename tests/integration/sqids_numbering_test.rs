@@ -1,4 +1,5 @@
 use lazyspec::engine::config::SqidsConfig;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::template::next_sqids_id;
 use std::fs;
 
@@ -51,6 +52,7 @@ fn create_with_sqids_produces_sqids_filename() {
         "rfc",
         "Test Feature",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -92,6 +94,7 @@ fn create_without_numbering_field_uses_incremental() {
         "rfc",
         "Incremental Test",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -127,6 +130,7 @@ numbering = "incremental"
         "rfc",
         "Explicit Incremental",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -154,6 +158,7 @@ fn different_salts_produce_different_ids() {
         "rfc",
         "Same Title",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -164,6 +169,7 @@ fn different_salts_produce_different_ids() {
         "rfc",
         "Same Title",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -194,6 +200,7 @@ fn min_length_five_produces_ids_at_least_five_chars() {
         "rfc",
         "Length Test",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -290,6 +297,7 @@ fn create_retries_on_collision() {
         "rfc",
         "First Doc",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -304,6 +312,7 @@ fn create_retries_on_collision() {
         "rfc",
         "Second Doc",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -358,6 +367,7 @@ fn sqids_id_is_lowercase() {
         "rfc",
         "Case Test",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -386,6 +396,7 @@ fn mixed_numbering_types_work_together() {
         "rfc",
         "Sqids RFC",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -399,6 +410,7 @@ fn mixed_numbering_types_work_together() {
         "story",
         "Incremental Story",
         "author",
+        &GitCli,
         |_| {},
     )
     .unwrap();

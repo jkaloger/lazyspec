@@ -115,18 +115,6 @@ fn local_only_warning(clone: &Path) -> String {
     )
 }
 
-/// The configured `git` type whose clone `doc_path` (root-relative) falls
-/// under, matched by clone-root prefix (BUG-032 AC1) rather than by decoding a
-/// type name out of the path -- two types sharing a clone both resolve here.
-fn git_type_for_doc_path<'a>(config: &'a Config, doc_path: &Path) -> Option<&'a TypeDef> {
-    config
-        .documents
-        .types
-        .iter()
-        .filter(|t| t.store == StoreBackend::Git)
-        .find(|t| doc_path.starts_with(type_clone_relative(t)))
-}
-
 /// The URL-`extends` clone (BUG-032 AC10): a commit target parallel to a
 /// `git` type's, but one clone shared by every `filesystem` type instead of
 /// one keyed by remote + branch (RFC-072 Decision 4: only `filesystem`
@@ -148,7 +136,9 @@ fn extends_clone_root(config: &Config) -> Option<&Path> {
 /// check handles both shapes alike. `None` when `doc_path` belongs to
 /// neither.
 fn clone_for_doc_path(root: &Path, config: &Config, doc_path: &Path) -> Option<PathBuf> {
-    if let Some(type_def) = git_type_for_doc_path(config, doc_path) {
+    if let Some(type_def) = crate::engine::store::type_for_cache_path(config, doc_path)
+        .filter(|t| t.store == StoreBackend::Git)
+    {
         return Some(type_clone_root(root, type_def));
     }
     let extends_root = extends_clone_root(config)?;
@@ -163,27 +153,14 @@ fn clone_for_doc_path(root: &Path, config: &Config, doc_path: &Path) -> Option<P
 }
 
 /// The commit for a writer that rewrites a document file without going through
-/// [`DocumentStore`] (`link`, `ignore`, `pin`, `fix`, the TUI's tag write).
-/// A path under no git type's clone and no `extends` clone is not ours and is
-/// `Ok(())`. A clone with nothing staged commits nothing, so callers that
-/// touch several files may call this once per file.
-pub fn commit_if_git_backed(
-    root: &Path,
-    config: &Config,
-    doc_path: &Path,
-    ops: &dyn GitRefOps,
-    message: &str,
-) -> Result<()> {
-    match clone_for_doc_path(root, config, doc_path) {
-        Some(clone) => ops.commit(&clone, message),
-        None => Ok(()),
-    }
-}
-
-/// [`commit_if_git_backed`], reporting the push outcome: `LocalOnly` naming
-/// the clone when `doc_path` is git- or `extends`-backed, `Synced` (a no-op)
-/// otherwise -- for a caller (`create --parent`) that hands the outcome on to
-/// `--json` rather than discarding it.
+/// [`DocumentStore`] (`link`, `ignore`, `pin`, `fix`, the TUI's tag write):
+/// `LocalOnly` naming the clone when `doc_path` is git- or `extends`-backed
+/// *and* the rewrite actually staged something, `Synced` otherwise -- a path
+/// under no git type's clone and no `extends` clone is not ours, and a clone
+/// with nothing staged (e.g. `ignore` on an already-ignored doc) published
+/// nothing, so neither is "committed locally, awaiting push" (matches
+/// [`commit_if_extends_backed`]'s no-op rule). Callers that touch several
+/// files may call this once per file.
 pub fn commit_if_git_backed_outcome(
     root: &Path,
     config: &Config,
@@ -193,6 +170,9 @@ pub fn commit_if_git_backed_outcome(
 ) -> Result<PushOutcome> {
     match clone_for_doc_path(root, config, doc_path) {
         Some(clone) => {
+            if !ops.has_uncommitted_changes(&clone)? {
+                return Ok(PushOutcome::Synced);
+            }
             ops.commit(&clone, message)?;
             Ok(PushOutcome::LocalOnly {
                 warning: local_only_warning(&clone),
@@ -350,6 +330,11 @@ impl GitStore {
         FilesystemStore {
             root: self.root.clone(),
             config: self.config.clone(),
+            // Never actually asked: `set_provenance`/`sync_tags`'s `extends`
+            // commit only fires for a `filesystem` type, and a `GitStore`'s
+            // own `type_def` is always `git` -- this is a fresh, stateless
+            // `GitCli`, not `self.ops`, purely to satisfy the field.
+            ops: Box::new(crate::engine::git_ref::GitCli),
         }
     }
 
@@ -489,7 +474,10 @@ mod tests {
         .unwrap();
         let mut config = Config::default();
         config.documents.types = vec![type_def.clone()];
-        let mock = MockGitRefClient::new();
+        // `has_uncommitted_changes` gates `commit_if_git_backed_outcome`
+        // (F6): queued `true` so the direct-writer tests below still see a
+        // commit, since `GitStore`'s own methods never ask this at all.
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
         let calls = mock.call_log();
         let store = GitStore {
             root: tmp.path().to_path_buf(),
@@ -504,8 +492,11 @@ mod tests {
         error: &str,
     ) -> (TempDir, GitStore, Rc<RefCell<Vec<String>>>, PathBuf) {
         let (tmp, mut store, calls, doc) = project(type_def);
-        store.ops =
-            Box::new(MockGitRefClient::new().with_commit_result(Err(anyhow::anyhow!("{error}"))));
+        store.ops = Box::new(
+            MockGitRefClient::new()
+                .with_has_uncommitted_changes_result(Ok(true))
+                .with_commit_result(Err(anyhow::anyhow!("{error}"))),
+        );
         (tmp, store, calls, doc)
     }
 
@@ -609,18 +600,60 @@ mod tests {
         );
     }
 
-    // --- commit_if_git_backed: the direct writers' commit ---
+    // --- commit_if_git_backed_outcome: the direct writers' commit ---
 
     #[test]
     fn direct_write_under_a_git_type_commits_once() {
         let td = rfc_type(Some("next"));
         let (tmp, store, calls, doc) = project(&td);
 
-        commit_if_git_backed(tmp.path(), &store.config, &doc, &*store.ops, "link RFC-001").unwrap();
+        let outcome = commit_if_git_backed_outcome(
+            tmp.path(),
+            &store.config,
+            &doc,
+            &*store.ops,
+            "link RFC-001",
+        )
+        .unwrap();
 
+        assert_eq!(outcome, local_only(tmp.path(), &td));
         assert_eq!(
             *calls.borrow(),
-            vec![commit_call(tmp.path(), &td, "link RFC-001")]
+            vec![
+                format!(
+                    "has_uncommitted_changes:{}",
+                    tmp.path().join(clone_dir(tmp.path(), &td)).display()
+                ),
+                commit_call(tmp.path(), &td, "link RFC-001"),
+            ]
+        );
+    }
+
+    // BUG-032 F6: a clean clone (nothing staged) is not "committed locally" --
+    // `ignore` on an already-ignored doc must report `Synced`, not `LocalOnly`
+    // with a warning nobody can act on.
+    #[test]
+    fn direct_write_with_nothing_staged_is_synced_and_never_commits() {
+        let td = rfc_type(Some("next"));
+        let (tmp, mut store, _unused_calls, doc) = project(&td);
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(false));
+        let calls = mock.call_log();
+        store.ops = Box::new(mock);
+
+        let outcome = commit_if_git_backed_outcome(
+            tmp.path(),
+            &store.config,
+            &doc,
+            &*store.ops,
+            "link RFC-001",
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PushOutcome::Synced);
+        assert!(
+            !calls.borrow().iter().any(|c| c.starts_with("commit:")),
+            "{:?}",
+            calls.borrow()
         );
     }
 
@@ -629,7 +662,7 @@ mod tests {
         let td = rfc_type(Some("next"));
         let (tmp, store, calls, _doc) = project(&td);
 
-        commit_if_git_backed(
+        commit_if_git_backed_outcome(
             tmp.path(),
             &store.config,
             Path::new("docs/rfcs/RFC-001-a.md"),
@@ -647,7 +680,7 @@ mod tests {
         let (tmp, mut store, calls, _doc) = project(&story);
         store.config.documents.types = vec![story];
 
-        commit_if_git_backed(
+        commit_if_git_backed_outcome(
             tmp.path(),
             &store.config,
             Path::new(".lazyspec/cache/story/STORY-1.md"),
@@ -664,9 +697,14 @@ mod tests {
         let td = rfc_type(Some("next"));
         let (tmp, store, _calls, doc) = failing_project(&td, "git commit failed: bad tree");
 
-        let err =
-            commit_if_git_backed(tmp.path(), &store.config, &doc, &*store.ops, "link RFC-001")
-                .unwrap_err();
+        let err = commit_if_git_backed_outcome(
+            tmp.path(),
+            &store.config,
+            &doc,
+            &*store.ops,
+            "link RFC-001",
+        )
+        .unwrap_err();
 
         assert!(format!("{err:#}").contains("git commit failed"), "{err:#}");
     }
@@ -911,7 +949,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = url_extends(tmp.path());
         let doc_path = Path::new(".lazyspec/cache/config/docs/rfcs/RFC-001-a.md");
-        let mock = MockGitRefClient::new();
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
         let calls = mock.call_log();
 
         let outcome =
@@ -927,7 +965,10 @@ mod tests {
         );
         assert_eq!(
             *calls.borrow(),
-            vec![format!("commit:{}:link RFC-001", clone.display())]
+            vec![
+                format!("has_uncommitted_changes:{}", clone.display()),
+                format!("commit:{}:link RFC-001", clone.display()),
+            ]
         );
     }
 

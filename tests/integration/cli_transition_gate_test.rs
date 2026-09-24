@@ -2,6 +2,7 @@ use crate::common::TestFixture;
 use lazyspec::engine::config::Config;
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::Store;
 use std::fs;
 
@@ -149,6 +150,7 @@ fn create_ignores_the_parents_status() {
         "test",
         None,
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -179,6 +181,7 @@ fn create_succeeds_with_no_parent_document_at_all() {
         "test",
         None,
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap()

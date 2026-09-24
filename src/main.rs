@@ -197,6 +197,7 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
+                    &GitCli,
                     |p| {
                         if let Some(pb) = &pb {
                             pb.set_message(lazyspec::cli::spinner::reservation_message(&p));
@@ -223,6 +224,7 @@ fn main() -> anyhow::Result<()> {
                     &author,
                     parent.as_deref(),
                     body_content.as_deref(),
+                    &GitCli,
                     |p| {
                         if let Some(pb) = &pb {
                             pb.set_message(lazyspec::cli::spinner::reservation_message(&p));

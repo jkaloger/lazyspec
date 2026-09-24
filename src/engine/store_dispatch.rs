@@ -15,6 +15,7 @@ use crate::engine::gh::{
     self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
 };
 use crate::engine::gh_schema::GhSchemaSnapshot;
+use crate::engine::git_ref::GitRefClient;
 use crate::engine::issue_body;
 use crate::engine::issue_cache::{self, IssueCache};
 use crate::engine::issue_map::IssueMap;
@@ -131,6 +132,11 @@ pub trait DocumentStore: gh::AsAny {
 pub struct FilesystemStore {
     pub root: PathBuf,
     pub config: Config,
+    /// Injected rather than constructed inline (F4/BUG-032 follow-up): the
+    /// engine never hardcodes a transport, so a caller -- production or a
+    /// mock test -- decides what `set_provenance`/`sync_tags`'s `extends`
+    /// commit talks to.
+    pub ops: Box<dyn GitRefClient>,
 }
 
 /// A store placeholder registered for a backend that the current config cannot
@@ -579,7 +585,7 @@ impl DocumentStore for FilesystemStore {
             &self.root,
             &self.config,
             type_def,
-            &crate::engine::git_ref::GitCli,
+            &*self.ops,
             &format!("provenance {doc_id}"),
         )
     }
@@ -600,7 +606,7 @@ impl DocumentStore for FilesystemStore {
             &self.root,
             &self.config,
             type_def,
-            &crate::engine::git_ref::GitCli,
+            &*self.ops,
             &format!("tag {doc_id}"),
         )
     }
@@ -3006,6 +3012,7 @@ pub fn build_registry(root: &std::path::Path, config: &Config) -> DocumentStoreR
         Box::new(FilesystemStore {
             root: root.to_path_buf(),
             config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         }),
     );
 
@@ -3224,6 +3231,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
@@ -3242,6 +3250,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
@@ -3260,6 +3269,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
         let td = test_type_def(StoreBackend::Filesystem);
 
@@ -3269,6 +3279,43 @@ mod tests {
         fs_store
             .sync_tags(&td, "RFC-1", &[], &["security".to_string()])
             .unwrap();
+    }
+
+    // F4: `FilesystemStore`'s `extends` commit talks to its injected `ops`
+    // field, never a hardcoded `GitCli` -- proved by handing it a mock and
+    // asserting the commit landed there, which a hardcoded transport could
+    // never do.
+    #[test]
+    fn sync_tags_commits_to_the_injected_ops_not_a_hardcoded_gitcli() {
+        let root = tmp_root("fs_sync_tags_injected_ops");
+        let clone = root.join(".lazyspec/cache/config");
+        std::fs::create_dir_all(&clone).unwrap();
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
+        let calls = mock.call_log();
+        let mut fs_store = FilesystemStore {
+            root: root.clone(),
+            config: Config {
+                extends: Some(crate::engine::config::Extends {
+                    root: clone.clone(),
+                    remote: Some("https://example.com/shared.git".to_string()),
+                    branch: Some("next".to_string()),
+                }),
+                ..Config::default()
+            },
+            ops: Box::new(mock),
+        };
+        let td = test_type_def(StoreBackend::Filesystem);
+
+        fs_store
+            .sync_tags(&td, "RFC-1", &["security".to_string()], &[])
+            .unwrap();
+
+        assert!(
+            calls.borrow().iter().any(|c| c.starts_with("commit:")),
+            "the extends commit must run through the store's own `ops`, not a \
+             separately constructed GitCli: {:?}",
+            calls.borrow()
+        );
     }
 
     // AC: GitHub-issues tag add. Each added label is ensured, then applied via a
@@ -4403,6 +4450,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
@@ -5671,6 +5719,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
         let ms_store = milestone_store(&root, MockGhMilestoneClient::new());
 
@@ -5689,6 +5738,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
         let td = test_type_def(StoreBackend::GithubMilestones);
         let mut registry = DocumentStoreRegistry::new();
@@ -5741,6 +5791,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
@@ -5761,6 +5812,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let gh_store = GithubIssuesStore {
@@ -6771,6 +6823,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config: config.clone(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::Filesystem);
@@ -6806,6 +6859,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::GithubIssues);
@@ -6828,6 +6882,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let mock = MockGitRefClient::new()
@@ -6859,6 +6914,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let mock = MockGitRefClient::new();
@@ -6906,6 +6962,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = test_type_def(StoreBackend::GitRef);
@@ -7457,6 +7514,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = type_def_with_attrs(
@@ -7491,6 +7549,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = type_def_with_attrs(
@@ -7525,6 +7584,7 @@ mod tests {
         let mut fs_store = FilesystemStore {
             root: root.clone(),
             config,
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
 
         let td = type_def_with_attrs(
@@ -8703,6 +8763,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
         let proj_store = projects_store(&root, vec![org_board_response("PVT_x")]);
 
@@ -8720,6 +8781,7 @@ mod tests {
         let fs_store = FilesystemStore {
             root: root.clone(),
             config: Config::default(),
+            ops: Box::new(crate::engine::git_ref::GitCli),
         };
         let td = projects_type_def();
         let mut registry = DocumentStoreRegistry::new();

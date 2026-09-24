@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::engine::config::{Config, StoreBackend};
-use crate::engine::git_ref::{GitRefOps, RebaseConflict, RebaseInProgress};
+use crate::engine::git_ref::{GitRefOps, RebaseConflict, RebaseInProgress, UncommittedChanges};
 use crate::engine::git_store::type_clone_root;
 use crate::engine::store::{doc_root, extract_id};
 
@@ -119,6 +119,7 @@ pub struct DuplicateId {
 pub enum CloneError {
     RebaseConflict(RebaseConflict),
     RebaseInProgress(RebaseInProgress),
+    UncommittedChanges(UncommittedChanges),
     DuplicateIds {
         clone: PathBuf,
         collisions: Vec<DuplicateId>,
@@ -148,6 +149,7 @@ pub fn describe_error(result: &CloneResult) -> Option<String> {
     Some(match err {
         CloneError::RebaseConflict(conflict) => conflict.to_string(),
         CloneError::RebaseInProgress(in_progress) => in_progress.to_string(),
+        CloneError::UncommittedChanges(dirty) => dirty.to_string(),
         CloneError::DuplicateIds { clone, collisions } => {
             let pairs: Vec<String> = collisions
                 .iter()
@@ -225,8 +227,12 @@ fn classify_rebase_error(err: anyhow::Error) -> CloneError {
         Ok(conflict) => return CloneError::RebaseConflict(conflict),
         Err(err) => err,
     };
-    match err.downcast::<RebaseInProgress>() {
-        Ok(in_progress) => CloneError::RebaseInProgress(in_progress),
+    let err = match err.downcast::<RebaseInProgress>() {
+        Ok(in_progress) => return CloneError::RebaseInProgress(in_progress),
+        Err(err) => err,
+    };
+    match err.downcast::<UncommittedChanges>() {
+        Ok(dirty) => CloneError::UncommittedChanges(dirty),
         Err(err) => CloneError::Other(format!("{err:#}")),
     }
 }

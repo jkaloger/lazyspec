@@ -4,7 +4,7 @@ use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::DocType;
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
-use crate::engine::git_ref::GitCli;
+use crate::engine::git_ref::{GitCli, GitRefOps};
 use crate::engine::git_ref_store::GitRefStore;
 use crate::engine::git_store::commit_if_git_backed_outcome;
 use crate::engine::issue_cache::IssueCache;
@@ -18,6 +18,7 @@ use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: &Path,
     config: &Config,
@@ -25,6 +26,7 @@ pub fn run(
     doc_type: &str,
     title: &str,
     author: &str,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<PathBuf> {
     run_with_body(
@@ -36,6 +38,7 @@ pub fn run(
         author,
         None,
         None,
+        git,
         on_progress,
     )
     .map(|(path, _)| path)
@@ -57,6 +60,7 @@ pub fn run_with_body(
     author: &str,
     parent: Option<&str>,
     body: Option<&str>,
+    git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<(PathBuf, PushOutcome)> {
     let type_def = config.type_by_name(doc_type).ok_or_else(|| {
@@ -88,7 +92,7 @@ pub fn run_with_body(
     // too and whose write lands (and commits) inside the parent's clone.
     if let Some(parent_id) = parent {
         return create_with_parent(
-            root, config, store, type_def, title, author, body, parent_id,
+            root, config, store, type_def, title, author, body, parent_id, git,
         );
     }
 
@@ -227,7 +231,7 @@ pub fn run_with_body(
     let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
     let id = crate::engine::store::extract_id(&relative);
     let push_outcome =
-        commit_if_git_backed_outcome(root, config, &relative, &GitCli, &format!("create {id}"))?;
+        commit_if_git_backed_outcome(root, config, &relative, git, &format!("create {id}"))?;
 
     Ok((path, push_outcome))
 }
@@ -255,6 +259,7 @@ fn create_with_parent(
     author: &str,
     body: Option<&str>,
     parent_id: &str,
+    git: &dyn GitRefOps,
 ) -> Result<(PathBuf, PushOutcome)> {
     let parent_meta = store
         .resolve_shorthand(parent_id)
@@ -368,7 +373,7 @@ fn create_with_parent(
         root,
         config,
         &parent_meta.path,
-        &GitCli,
+        git,
         &format!("create child of {parent_id}"),
     )?;
 
@@ -484,6 +489,7 @@ mod tests {
             "tester",
             None,
             "RFC-001",
+            &GitCli,
         )
         .unwrap_err();
 
@@ -524,6 +530,7 @@ mod tests {
             "tester",
             None,
             "A-001",
+            &GitCli,
         )
         .unwrap_err();
 

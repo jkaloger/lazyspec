@@ -3,6 +3,7 @@ use lazyspec::engine::config::{starter_types, Config, Edge, Lifecycle, StoreBack
 use lazyspec::engine::document::DocMeta;
 use lazyspec::engine::fs::RealFileSystem;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
+use lazyspec::engine::git_ref::GitCli;
 use lazyspec::engine::store::Store;
 use std::fs;
 use std::path::Path;
@@ -64,6 +65,7 @@ fn create_bug_seeds_first_lifecycle_state() {
         "bug",
         "Widget crash",
         "tester",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -94,6 +96,7 @@ fn bug_created_then_transitions_to_triaged() {
         "bug",
         "Widget crash",
         "tester",
+        &GitCli,
         |_| {},
     )
     .unwrap();
@@ -197,6 +200,7 @@ fn default_lifecycle_type_still_seeds_draft() {
         "story",
         "Some story",
         "tester",
+        &GitCli,
         |_| {},
     )
     .unwrap();

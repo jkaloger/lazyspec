@@ -56,6 +56,33 @@ impl std::fmt::Display for RebaseInProgress {
 
 impl std::error::Error for RebaseInProgress {}
 
+/// `clone` had an uncommitted change (`git status --porcelain` non-empty) when
+/// a rebase (`update_clone`/`rebase_onto_remote`/`push`'s pre-rebase step)
+/// went to run there. Rebasing over a dirty tree either drags the
+/// uncommitted content into every replayed commit or refuses outright, and
+/// either way it is the human's to resolve there, not lazyspec's to guess
+/// at -- so this bails before touching the rebase, structured the same way
+/// as [`RebaseInProgress`] and [`RebaseConflict`] so a `--json` surface can
+/// report it rather than parsing prose out of the error chain.
+#[derive(Debug)]
+pub struct UncommittedChanges {
+    pub clone: PathBuf,
+}
+
+impl std::fmt::Display for UncommittedChanges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} has uncommitted changes -- commit them there (`git -C {} commit -am ...`) or stash them (`git -C {} stash`), then re-run this command",
+            self.clone.display(),
+            self.clone.display(),
+            self.clone.display(),
+        )
+    }
+}
+
+impl std::error::Error for UncommittedChanges {}
+
 pub trait GitRefOps {
     fn resolve_ref(&self, root: &Path, refname: &str) -> Result<Option<String>>;
     fn list_refs(&self, root: &Path, pattern: &str) -> Result<Vec<(String, String)>>;
@@ -246,8 +273,19 @@ impl GitCli {
     /// is left untouched and reported as [`RebaseInProgress`]; this never
     /// aborts a rebase it did not itself start.
     fn rebase_onto(&self, clone: &Path, onto: &str) -> Result<()> {
+        // Checked in this order deliberately: a rebase already in progress
+        // (started outside this call) typically leaves conflict markers
+        // uncommitted, and that dirt is not the human's to resolve by
+        // stashing -- `rebase --continue`/`--abort` is. Only a tree that is
+        // dirty *and not* already mid-rebase is `UncommittedChanges`.
         if self.rebase_in_progress(clone)?.is_some() {
             return Err(RebaseInProgress {
+                clone: clone.to_path_buf(),
+            }
+            .into());
+        }
+        if self.has_uncommitted_changes(clone)? {
+            return Err(UncommittedChanges {
                 clone: clone.to_path_buf(),
             }
             .into());

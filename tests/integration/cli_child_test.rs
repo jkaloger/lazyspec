@@ -1,5 +1,6 @@
 use crate::common::TestFixture;
 use lazyspec::engine::config::TypeDef;
+use lazyspec::engine::git_ref::GitCli;
 
 const PARENT_CONTENT: &str = "\
 ---
@@ -72,6 +73,7 @@ fn create_with_parent_promotes_flat_parent_and_tracks_child() {
         "test",
         Some("RFC-003"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -122,6 +124,7 @@ fn create_with_parent_idempotent_on_promoted_parent() {
         "test",
         Some("RFC-003"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -135,6 +138,7 @@ fn create_with_parent_idempotent_on_promoted_parent() {
         "test",
         Some("RFC-003"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap()
@@ -180,6 +184,7 @@ fn create_with_parent_cross_store_rejected_before_mutation() {
         "test",
         Some("RFC-003"),
         None,
+        &GitCli,
         |_| {},
     )
     .unwrap_err();
