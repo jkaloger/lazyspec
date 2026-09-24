@@ -48,6 +48,12 @@
             clippy = {
               enable = true;
               stages = [ "pre-push" ];
+              # The hook wrapper only puts packageOverrides.cargo on PATH, so
+              # without rustc here deps build with whatever rustc the caller has.
+              packageOverrides.cargo = pkgs.symlinkJoin {
+                name = "cargo-with-rustc";
+                paths = [ pkgs.cargo pkgs.rustc ];
+              };
               settings = {
                 denyWarnings = true;
                 allFeatures = false;
