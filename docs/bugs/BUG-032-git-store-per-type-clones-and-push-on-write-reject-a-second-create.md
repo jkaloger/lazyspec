@@ -1,14 +1,14 @@
 ---
 title: 'git store: per-type clones and push-on-write reject a second create'
 type: bug
-status: in-progress
+status: fixed
 author: Jack Kaloger
 date: 2026-09-24
 tags: []
 related:
 - related-to: STORY-282
 - related-to: RFC-072
-reviewed: 2c56ed0b69d66e46b6caa0309f9434b4294d8ad0
+reviewed: 24d68628ba6236df43ba0e501dab24c6e9e05bc0
 ---
 
 ## Summary
