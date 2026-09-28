@@ -25,6 +25,7 @@ mod cli_git_ref_validate_test;
 mod cli_govern_test;
 mod cli_ignore_test;
 mod cli_init_greeting_test;
+mod cli_init_template_test;
 mod cli_init_test;
 mod cli_json_test;
 mod cli_lifecycle_seed_test;

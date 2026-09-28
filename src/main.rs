@@ -27,9 +27,14 @@ fn main() -> anyhow::Result<()> {
         non_interactive,
         json,
         template,
+        force,
     }) = &cli.command
     {
         use std::io::IsTerminal;
+        if let Some(pack) = lazyspec::cli::init::pack_template(template.as_deref()) {
+            lazyspec::cli::init::run_from_template(&cwd, pack, *force, *json, &GitCli)?;
+            return Ok(());
+        }
         let interactive = lazyspec::cli::init::init_is_interactive(
             *non_interactive,
             *json,
@@ -38,9 +43,14 @@ fn main() -> anyhow::Result<()> {
         );
         if interactive {
             let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
-            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter, template.as_deref())?;
+            lazyspec::cli::init::run_init_interactive(
+                &cwd,
+                &mut prompter,
+                template.as_deref(),
+                *force,
+            )?;
         } else {
-            lazyspec::cli::init::run(&cwd)?;
+            lazyspec::cli::init::run(&cwd, *force)?;
         }
         return Ok(());
     }

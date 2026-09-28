@@ -79,7 +79,9 @@ pub enum Commands {
     /// Initialize lazyspec in the current project. On a TTY with neither flag,
     /// walks an interactive wizard: it designs a blank DAG -- types, lifecycles,
     /// and [[edges]] rows once two types are declared -- unless --template
-    /// starter picks the starter config to tweak instead.
+    /// starter picks the starter config to tweak instead. --template <dir|url>
+    /// adopts a workflow pack instead of running any wizard: it copies that
+    /// pack's .lazyspec.toml and .lazyspec/templates/ into the project.
     Init {
         /// Skip the wizard and write the starter config unchanged
         #[arg(long)]
@@ -87,10 +89,15 @@ pub enum Commands {
         /// Suppress the wizard (implies --non-interactive) and write the starter config unchanged
         #[arg(long)]
         json: bool,
-        /// Pre-select a starter template for the interactive wizard (only `starter`
-        /// is supported; the default is a blank DAG). Ignored on non-interactive runs.
-        #[arg(long, value_parser = ["starter"])]
+        /// `starter` pre-selects the starter designer for the interactive wizard.
+        /// Any other value is a workflow pack to adopt: a local directory or a
+        /// clone URL, each carrying its own `.lazyspec.toml` and
+        /// `.lazyspec/templates/`. A pack skips the wizard entirely.
+        #[arg(long)]
         template: Option<String>,
+        /// With --template, overwrite an existing .lazyspec.toml instead of refusing
+        #[arg(long)]
+        force: bool,
     },
     /// Create a new document from template
     Create {

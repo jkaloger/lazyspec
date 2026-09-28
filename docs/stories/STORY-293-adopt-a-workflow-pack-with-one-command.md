@@ -1,13 +1,13 @@
 ---
 title: Adopt a workflow pack with one command
 type: story
-status: accepted
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
 related:
 - implements: RFC-074
-reviewed: a6983d9cb6cbf9c5c2a647cfca0703ff0b38da8b
+reviewed: 4eb2881ee37a9f9cd3657e405169388670ee0e9d
 ---
 
 ## Value

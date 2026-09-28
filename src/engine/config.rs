@@ -1,4 +1,4 @@
-mod extends;
+pub(crate) mod extends;
 
 use crate::engine::document::Status;
 use anyhow::{bail, Context, Result};

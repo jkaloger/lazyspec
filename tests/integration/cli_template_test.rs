@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 fn init_root() -> TempDir {
     let dir = TempDir::new().unwrap();
-    lazyspec::cli::init::run(dir.path()).unwrap();
+    lazyspec::cli::init::run(dir.path(), false).unwrap();
     dir
 }
 

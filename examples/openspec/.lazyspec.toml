@@ -1,0 +1,58 @@
+[naming]
+pattern = "{type}-{n:03}-{title}.md"
+
+[templates]
+dir = ".lazyspec/templates"
+
+# A change is a folder: index.md (the proposal's header, this document's own
+# frontmatter) plus proposal.md, design.md and tasks.md as parts -- one
+# `create change` call scaffolds all four (RFC-074). `subdirectory = true` is
+# required alongside a directory template; the loader refuses the pack
+# otherwise.
+[[types]]
+name = "change"
+plural = "changes"
+dir = "changes"
+prefix = "CHANGE"
+icon = "◇"
+subdirectory = true
+intent = "A proposed change to the project: why it's needed, what it changes, the design behind it, and the tasks that implement it. Lives as a folder of parts rather than one file so each concern (proposal/design/tasks) can be read, reviewed and updated on its own."
+lifecycle = { states = ["draft", "approved", "archived"], edges = [
+  { from = "draft", to = "approved" },
+  { from = "approved", to = "archived" },
+] }
+
+# A delta is an ad hoc child of one change: `create delta <title> --parent
+# <CHANGE-id>` lands it as a sibling file inside that change's own folder
+# (RFC-074 motivation #1), one delta per affected capability. It carries no
+# directory template of its own -- it is a single file, not a bundle.
+[[types]]
+name = "delta"
+plural = "deltas"
+dir = "deltas"
+prefix = "DELTA"
+icon = "Δ"
+intent = "The detailed spec diff for one capability a change affects: what a capability gains, loses or has altered. Created per affected capability with `create delta <title> --parent <change-id>`; link it back with `implements: <change-id>` so `validate` stops flagging it as orphaned."
+lifecycle = { states = ["draft", "approved"], edges = [
+  { from = "draft", to = "approved" },
+] }
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+traversal = "chain"
+
+[[relationships]]
+name = "related-to"
+
+# Soft nudge, not a hard requirement: a delta with no `implements` link back to
+# its change is still valid (it already lives inside the change's own folder),
+# but `validate` warns so a delta doesn't go untracked in `context` walks and
+# reports.
+[[edges]]
+name = "deltas-need-changes"
+from = "delta"
+to = "change"
+via = "implements"
+required = "warning"
+traversal = "chain"
