@@ -1,12 +1,13 @@
 ---
 title: Warn when a bundle is missing a declared part
 type: story
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
 related:
 - implements: RFC-074
+reviewed: a6983d9cb6cbf9c5c2a647cfca0703ff0b38da8b
 ---
 
 ## Value

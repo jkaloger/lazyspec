@@ -1,7 +1,7 @@
 ---
 title: Scaffold, read and write a bundled document
 type: story
-status: draft
+status: accepted
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
@@ -9,6 +9,7 @@ related:
 - implements: RFC-074
 - blocks: STORY-292
 - blocks: STORY-293
+reviewed: a6983d9cb6cbf9c5c2a647cfca0703ff0b38da8b
 ---
 
 ## Value
