@@ -90,12 +90,17 @@ fn resolve_scope_path(store: &Store, id: &str) -> anyhow::Result<std::path::Path
 }
 
 /// Whether `issue`'s rendered finding names `target` at all: its `path`
-/// field equals it, or its `paths` field contains it. Read off the same
-/// JSON [`ValidationIssue::to_json`] emits, rather than a match over every
+/// field equals it, its `paths` field contains it, or its `source` field
+/// equals it (`broken-link` names the document the broken reference lives
+/// in as `source`, not `path`). Read off the same JSON
+/// [`ValidationIssue::to_json`] emits, rather than a match over every
 /// variant, so a rule added later is scoped by `--id` with no change here.
 fn issue_names_path(issue: &ValidationIssue, target: &str) -> bool {
     let json = issue.to_json();
     if json.get("path").and_then(|v| v.as_str()) == Some(target) {
+        return true;
+    }
+    if json.get("source").and_then(|v| v.as_str()) == Some(target) {
         return true;
     }
     json.get("paths")
@@ -491,6 +496,19 @@ mod scope_tests {
 
         assert!(issue_names_path(&issue, "docs/stories/STORY-002-b.md"));
         assert!(!issue_names_path(&issue, "docs/stories/STORY-003-c.md"));
+    }
+
+    // AC2: `broken-link` names the document the broken reference lives in as
+    // `source`, not `path`; `--id` on that document must still scope it in.
+    #[test]
+    fn issue_names_path_matches_a_broken_links_source_field() {
+        let issue = ValidationIssue::BrokenLink {
+            source: story_path(),
+            target: "STORY-999".to_string(),
+        };
+
+        assert!(issue_names_path(&issue, "docs/stories/STORY-001-a.md"));
+        assert!(!issue_names_path(&issue, "docs/stories/STORY-002-b.md"));
     }
 
     // A finding with no document at all (`governs-unowned` names a source

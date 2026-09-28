@@ -406,12 +406,19 @@ pub fn delete_document(root: &Path, store: &Store, doc_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write a part's body (RFC-074 AC7): `update <id> --part <name>` targets the
+/// Write a part's body (STORY-291 AC7): `update <id> --part <name>` targets the
 /// existing part's path when the document already has one by that name, or a
 /// new `{name}.md` beside its `index.md` otherwise -- creating the part. A
 /// part carries no frontmatter, so the body is written byte for byte (with a
 /// single trailing newline), unlike [`update_document`]'s reserved `body` key,
 /// which preserves the parent's frontmatter around it.
+///
+/// Refuses names that would let `--part` escape being "a part": `index` (the
+/// parent itself), any name containing `/` or `..` (path traversal out of the
+/// document's folder), an existing child document's stem (a real document
+/// with its own frontmatter), and any document whose own path is not an
+/// `index.md` (a flat document has no folder to hold a part in; writing
+/// `--part` there would silently overwrite an unrelated file beside it).
 pub fn write_part(
     root: &Path,
     store: &Store,
@@ -423,6 +430,39 @@ pub fn write_part(
         .get(Path::new(doc_id))
         .or_else(|| store.resolve_shorthand(doc_id).ok())
         .ok_or_else(|| anyhow!("could not resolve document: {}", doc_id))?;
+
+    if doc.path.file_name().and_then(|f| f.to_str()) != Some("index.md") {
+        return Err(anyhow!(
+            "'{}' is not a bundle (its path is not an index.md): --part only targets a document scaffolded from a directory template",
+            doc_id
+        ));
+    }
+
+    if part_name.is_empty() || part_name.contains('/') || part_name.contains("..") {
+        return Err(anyhow!(
+            "invalid part name '{}': must not contain '/' or '..'",
+            part_name
+        ));
+    }
+
+    if part_name == "index" {
+        return Err(anyhow!(
+            "'index' is the document itself; use --body to update it, not --part"
+        ));
+    }
+
+    let child_stems: Vec<String> = store
+        .children_of(&doc.path)
+        .iter()
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    if child_stems.iter().any(|stem| stem == part_name) {
+        return Err(anyhow!(
+            "'{}' is a child document of '{}', not a part; use `update` on it directly",
+            part_name,
+            doc_id
+        ));
+    }
 
     let target = match doc.parts.iter().find(|p| p.name == part_name) {
         Some(existing) => root.join(&existing.path),

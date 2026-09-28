@@ -1498,12 +1498,44 @@ impl Checker for MissingPartRule {
                 if doc.validate_ignore {
                     continue;
                 }
+                // A declared part that carries frontmatter loads as its own
+                // child document (AC3) rather than a part of the one whose
+                // folder it sits in. That child is a distinct `DocMeta`, of
+                // the same directory-templated type when its own `type:`
+                // says so, so it would otherwise be checked here too and
+                // raise a `missing-part` warning for every file in the very
+                // folder it already occupies. It is nested under a parent
+                // (`store.parent_of` finds one), so skip it here: its
+                // presence is counted via the parent's own check below. A
+                // flat document with no parent -- predating the type's
+                // directory template (AC4) -- is not nested under anyone and
+                // still gets checked in full.
+                if store.parent_of(&doc.path).is_some() {
+                    continue;
+                }
+
+                // Presence is decided by the file names actually in the
+                // folder: parts and sidecars the loader already classified,
+                // plus any child document's file name -- covering a declared
+                // part that accidentally grew frontmatter and loaded as a
+                // child instead.
+                let child_file_names: std::collections::HashSet<&str> = store
+                    .children_of(&doc.path)
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|f| f.to_str()))
+                    .collect();
+
                 for file_name in &declared {
                     let present = match file_name.strip_suffix(".md") {
-                        Some(stem) => doc.parts.iter().any(|p| p.name == stem),
-                        None => doc.sidecars.iter().any(|s| {
-                            s.file_name().and_then(|f| f.to_str()) == Some(file_name.as_str())
-                        }),
+                        Some(stem) => {
+                            doc.parts.iter().any(|p| p.name == stem)
+                                || child_file_names.contains(file_name.as_str())
+                        }
+                        None => {
+                            doc.sidecars.iter().any(|s| {
+                                s.file_name().and_then(|f| f.to_str()) == Some(file_name.as_str())
+                            }) || child_file_names.contains(file_name.as_str())
+                        }
                     };
                     if !present {
                         issues.push((
@@ -3818,6 +3850,36 @@ mod missing_part_tests {
                 ("docs/change/CHANGE-002-beta/design.md", "design body"),
                 ("docs/change/CHANGE-002-beta/notes.yaml", "note: 2"),
                 ("docs/change/CHANGE-002-beta/extra.md", "extra body"),
+            ],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
+    }
+
+    // STORY-292 AC1/AC3 regression: a declared part that carries frontmatter
+    // loads as a child document instead of a part (AC3). The parent must
+    // still see it as present (not a false `missing-part`), and the child
+    // itself -- of the same directory-templated type -- must not be checked
+    // a second time and raise a warning for every file in the folder it
+    // already sits in.
+    #[test]
+    fn a_declared_part_that_grew_frontmatter_counts_as_present_and_is_not_checked_itself() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-004-gamma/index.md",
+                    &change_bundle("Gamma"),
+                ),
+                (
+                    "docs/change/CHANGE-004-gamma/design.md",
+                    &change_bundle("Design"),
+                ),
+                ("docs/change/CHANGE-004-gamma/notes.yaml", "note: 4"),
             ],
             &config,
         );

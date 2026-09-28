@@ -9,7 +9,7 @@ use crate::engine::clickup::TaskUpdate;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
 use crate::engine::document::{
-    body_section, compose_frontmatter, AttrValue, DocMeta, DocType, Status,
+    body_section, compose_frontmatter, AttrValue, DocMeta, DocType, Part, Status,
 };
 use crate::engine::gh::{
     self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
@@ -86,6 +86,13 @@ pub struct CreatedDoc {
     pub path: PathBuf,
     pub id: String,
     pub push_outcome: PushOutcome,
+    /// A directory template's parts and sidecars (STORY-291 AC2), scaffolded
+    /// alongside `path` by [`GitStore::create`](crate::engine::git_store::GitStore)
+    /// -- the only backend that can hit a directory template, since every
+    /// other backend materializes one cache file per document. Empty for
+    /// them, and for a `git` create against a flat-file template.
+    pub parts: Vec<Part>,
+    pub sidecars: Vec<PathBuf>,
 }
 
 pub trait DocumentStore: gh::AsAny {
@@ -345,6 +352,8 @@ impl DocumentStore for ClickupTasksStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -524,6 +533,8 @@ impl DocumentStore for FilesystemStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -1952,6 +1963,8 @@ impl DocumentStore for GithubIssuesStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -2384,6 +2397,8 @@ impl DocumentStore for GithubMilestonesStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -2727,6 +2742,8 @@ impl DocumentStore for GithubProjectsStore {
             path: relative,
             id: doc_id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 

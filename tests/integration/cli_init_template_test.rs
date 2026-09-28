@@ -111,11 +111,10 @@ fn init_template_refuses_existing_config_without_force_and_overwrites_with_force
     assert_pack_adopted(root);
 }
 
-// AC4: `--template starter` is unaffected by the pack path -- it still
-// pre-selects the built-in starter designer, non-interactively writing the
-// starter config unchanged, and sets no `extends` either.
+// AC4: plain `init` (no `--template` at all) writes the starter config
+// unaffected by pack support existing, and sets no `extends`.
 #[test]
-fn init_template_starter_is_unaffected_and_sets_no_extends() {
+fn init_run_writes_the_starter_config_unaffected_by_pack_support() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
@@ -124,6 +123,18 @@ fn init_template_starter_is_unaffected_and_sets_no_extends() {
     let config = Config::load(root, &RealFileSystem).unwrap();
     assert!(config.extends.is_none());
     assert!(config.type_by_name("rfc").is_some());
+}
+
+// AC4: `--template starter` is `init`'s built-in name, not a pack -- main's
+// dispatch (`if let Some(pack) = pack_template(template) { run_from_template
+// ... }`) never reaches `run_from_template` for it, so it cannot go through
+// the network/local-dir pack path `run_from_template` implements; it falls
+// through to the ordinary (wizard-capable, but pre-selected past the first
+// screen) `init` path instead.
+#[test]
+fn template_starter_is_excluded_from_the_pack_path() {
+    assert!(init::pack_template(Some("starter")).is_none());
+    assert!(init::pack_template(None).is_none());
 }
 
 // AC6: `init --template <pack>` followed by `create change "x"` yields the
@@ -220,6 +231,52 @@ fn init_template_openspec_pack_then_create_change_yields_four_files() {
             "tasks.md".to_string(),
         ],
         "the delta joins the change's four parts as a fifth file in the same folder"
+    );
+}
+
+// AC1: `--json` lists every file written, relative to root -- exercised
+// through the real binary since `run_from_template` prints its JSON payload
+// rather than returning it.
+#[test]
+fn init_template_json_lists_the_files_written() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args([
+            "init",
+            "--template",
+            openspec_pack().to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let files: Vec<&str> = json["files"]
+        .as_array()
+        .expect("files is an array")
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+
+    assert!(files.contains(&".lazyspec.toml"), "got: {files:?}");
+    assert!(
+        files
+            .iter()
+            .any(|f| f.contains("templates/change/index.md")),
+        "got: {files:?}"
+    );
+    assert_eq!(
+        files[0], ".lazyspec.toml",
+        "config first, then templates in directory-listing order: {files:?}"
     );
 }
 

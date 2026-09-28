@@ -621,7 +621,11 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         // absolute path as the cache/store key.
                         let key = path.strip_prefix(root).unwrap_or(path);
                         let _ = app.store.reload_file(root, key, &*app.fs);
-                        app.invalidate_expansion(key);
+                        // A part or sidecar has no cache entry of its own
+                        // (STORY-291 AC6/AC8 fold it into the index's cached
+                        // body); invalidate whichever path actually holds it.
+                        let cache_key = app.store.bundle_root(key);
+                        app.invalidate_expansion(&cache_key);
                     } else {
                         has_non_md = true;
                         // The root `.lazyspec.toml` (or the extended project's,
@@ -1177,7 +1181,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
-                app.invalidate_expansion(relative);
+                let cache_key = app.store.bundle_root(relative);
+                app.invalidate_expansion(&cache_key);
                 if let Some(ref shared_store) = shared_gh_store {
                     let push_root = root.clone();
                     let push_relative = relative.to_path_buf();

@@ -149,10 +149,40 @@ pub fn run_from_template(
     Ok(())
 }
 
+/// Whether the clone at `clone_root` already came from `url`/`branch`, read
+/// straight off `.git/config` and `.git/HEAD` rather than asking git (this
+/// only ever needs "is it safe to reuse", never a walk of the repo itself).
+/// Anything unreadable -- no clone yet, a `.git` this does not recognize --
+/// reads as "no match": the caller re-clones rather than risking copying the
+/// wrong pack.
+fn clone_matches(clone_root: &Path, url: &str, branch: Option<&str>) -> bool {
+    let Ok(config) = fs::read_to_string(clone_root.join(".git/config")) else {
+        return false;
+    };
+    if !config.lines().any(|l| l.trim() == format!("url = {url}")) {
+        return false;
+    }
+    match branch {
+        None => true,
+        Some(branch) => fs::read_to_string(clone_root.join(".git/HEAD"))
+            .map(|head| head.trim() == format!("ref: refs/heads/{branch}"))
+            .unwrap_or(false),
+    }
+}
+
 /// Where `template` (an `init --template` value that is not `starter`) reads
 /// a pack from: a local directory as-is, or -- when it names a clone URL --
-/// cloned into `.lazyspec/cache/config/`, reusing the same clone on a second
-/// run exactly as a URL `extends` does (`Config::load_extended_url`).
+/// cloned into `.lazyspec/cache/config/`, the same path a URL `extends`
+/// clones into (AC2).
+///
+/// A clone already at that path is reused only when [`clone_matches`] it --
+/// same url, same branch. `--template` never sets `extends` (AC4), so
+/// nothing here can otherwise tell whether an existing clone is a real
+/// `extends` clone, a previous `--template <other-url>` run's leftover, or
+/// actually this url: copying it on that assumption is how a stale or
+/// mismatched clone silently became the installed "pack" (STORY-293
+/// follow-up). A mismatch is removed and re-cloned, so `--template <url>`
+/// always installs exactly what it names.
 fn resolve_pack_source(
     root: &Path,
     template: &str,
@@ -176,6 +206,10 @@ fn resolve_pack_source(
 
     let (url, branch) = extends::split_fragment(template);
     let clone_root = root.join(".lazyspec/cache/config");
+    if clone_root.exists() && !clone_matches(&clone_root, url, branch) {
+        fs::remove_dir_all(&clone_root)
+            .with_context(|| format!("removing stale clone at {}", clone_root.display()))?;
+    }
     if !clone_root.exists() {
         ensure_cache_gitignored(root, &RealFileSystem)?;
         git_ref_ops
@@ -1622,10 +1656,9 @@ mod tests {
     }
 
     // AC2: a clone URL is cloned into `.lazyspec/cache/config/`, the same path
-    // a URL `extends` clones into, and the clone is reused (never re-cloned)
-    // on a second call once it exists.
+    // a URL `extends` clones into.
     #[test]
-    fn resolve_pack_source_url_clones_once_and_reuses_existing_clone() {
+    fn resolve_pack_source_url_clones_into_the_shared_cache_path() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let ops = MockGitRefClient::new();
@@ -1642,14 +1675,88 @@ mod tests {
                     + &clone_root.display().to_string()
             ]
         );
+    }
 
-        // The mock's clone_repo never actually creates the directory, so a
-        // second call would clone again under a real filesystem too -- create
-        // it here to stand in for the clone landing, and confirm no second
-        // clone_repo call follows.
-        fs::create_dir_all(&clone_root).unwrap();
+    fn write_fake_clone(clone_root: &Path, url: &str, branch: &str) {
+        fs::create_dir_all(clone_root.join(".git")).unwrap();
+        fs::write(
+            clone_root.join(".git/config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+        fs::write(
+            clone_root.join(".git/HEAD"),
+            format!("ref: refs/heads/{branch}\n"),
+        )
+        .unwrap();
+    }
+
+    // STORY-293 follow-up: a clone already at that path from the exact same
+    // url and branch is reused rather than re-cloned.
+    #[test]
+    fn resolve_pack_source_url_reuses_a_clone_that_matches_url_and_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(&clone_root, "https://example.invalid/pack.git", "next");
+
+        let resolved =
+            resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+
+        assert_eq!(resolved, clone_root);
+        assert!(
+            calls.borrow().is_empty(),
+            "a matching clone is reused, not re-cloned: {:?}",
+            calls.borrow()
+        );
+    }
+
+    // STORY-293 follow-up: a clone at that path from a different url (an
+    // unrelated `extends`, or a previous `--template <other-url>` run's
+    // leftover) must not be copied as if it were this pack -- it is removed
+    // and re-cloned from the url actually asked for.
+    #[test]
+    fn resolve_pack_source_url_reclones_a_clone_from_a_different_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(
+            &clone_root,
+            "https://example.invalid/other-pack.git",
+            "next",
+        );
+
+        let resolved =
+            resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+
+        assert_eq!(resolved, clone_root);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "clone_repo:https://example.invalid/pack.git:next:".to_string()
+                    + &clone_root.display().to_string()
+            ],
+            "a mismatched clone is removed and re-cloned"
+        );
+    }
+
+    // Same as above, for a branch mismatch on an otherwise identical url.
+    #[test]
+    fn resolve_pack_source_url_reclones_a_clone_from_a_different_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(&clone_root, "https://example.invalid/pack.git", "main");
+
         resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
-        assert_eq!(calls.borrow().len(), 1, "clone must not repeat");
+
+        assert_eq!(calls.borrow().len(), 1, "a branch mismatch is re-cloned");
     }
 
     // AC1/AC5: `install_pack` copies `.lazyspec.toml` and every file under

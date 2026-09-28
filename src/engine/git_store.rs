@@ -365,7 +365,7 @@ impl DocumentStore for GitStore {
             .with_context(|| format!("{} is outside {}", target.display(), self.root.display()))?
             .to_string_lossy()
             .into_owned();
-        let path = crate::engine::fs_ops::create_document(
+        let created = crate::engine::fs_ops::create_document(
             &self.root,
             &self.config,
             &type_def.name,
@@ -377,8 +377,8 @@ impl DocumentStore for GitStore {
             type_def.subdirectory,
             Some(&clone_root),
             |_| {},
-        )?
-        .path;
+        )?;
+        let path = created.path;
         if !body.is_empty() {
             crate::engine::fs_ops::replace_body(&path, body)?;
         }
@@ -389,6 +389,8 @@ impl DocumentStore for GitStore {
             path: relative,
             id,
             push_outcome,
+            parts: created.parts,
+            sidecars: created.sidecars,
         })
     }
 
@@ -557,6 +559,51 @@ mod tests {
             *calls.borrow(),
             vec![commit_call(tmp.path(), &td, "create RFC-002")]
         );
+    }
+
+    // STORY-291 AC2/AC7 follow-up: a `git`-backed type whose template is a
+    // directory scaffolds the whole bundle inside its clone, same as a
+    // filesystem type, and `CreatedDoc` must carry the resulting parts and
+    // sidecars rather than reporting a bundle create as if it had none.
+    #[test]
+    fn create_scaffolds_a_directory_template_and_reports_its_parts_and_sidecars() {
+        let td = TypeDef {
+            dir: "docs/change".to_string(),
+            remote: Some(REMOTE.to_string()),
+            branch: Some("next".to_string()),
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Git)
+        };
+        let tmp = TempDir::new().unwrap();
+        let templates = tmp.path().join(".lazyspec/templates/change");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(
+            templates.join("index.md"),
+            "---\ntitle: \"{title}\"\ntype: {type}\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n\nindex body\n",
+        )
+        .unwrap();
+        std::fs::write(templates.join("design.md"), "design for {title}\n").unwrap();
+        std::fs::write(templates.join("notes.yaml"), "note: 1\n").unwrap();
+
+        let mut config = Config::default();
+        config.documents.types = vec![td.clone()];
+        let mock = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
+        let mut store = GitStore {
+            root: tmp.path().to_path_buf(),
+            config,
+            ops: Box::new(mock),
+        };
+
+        let created = store.create(&td, "Alpha", "tester", "").unwrap();
+
+        assert_eq!(created.parts.len(), 1, "got: {:?}", created.parts);
+        assert_eq!(created.parts[0].name, "design");
+        assert_eq!(
+            created.sidecars,
+            vec![created.path.parent().unwrap().join("notes.yaml")]
+        );
+        assert!(tmp.path().join(&created.parts[0].path).is_file());
+        assert!(tmp.path().join(&created.sidecars[0]).is_file());
     }
 
     #[test]

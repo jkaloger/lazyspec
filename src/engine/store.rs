@@ -6,7 +6,7 @@ pub use links::Link;
 
 use crate::engine::cache_lock::CacheLock;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
-use crate::engine::document::{DocMeta, DocType, Status};
+use crate::engine::document::{DocMeta, DocType, Part, Status};
 use crate::engine::fs::{FileSystem, RealFileSystem};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::refs::RefExpander;
@@ -541,12 +541,33 @@ impl Store {
         }
     }
 
+    /// Reload `relative_path` after an edit (TUI action, `$EDITOR`, or a
+    /// filesystem watch event). A bundle folder (STORY-291) needs more than
+    /// the touched file re-read: a part or sidecar carries no id of its own
+    /// (`reload_file` cannot look it up in `self.docs` to find its parent),
+    /// and the index document's `parts`/`sidecars` describe the whole
+    /// folder, not the one file that changed. So when `relative_path` names
+    /// the index itself or anything beside it, the whole folder is
+    /// rescanned via [`reload_bundle`](Store::reload_bundle) instead of
+    /// treating `relative_path` as a lone document (STORY-291 AC4/AC6).
     pub fn reload_file(
         &mut self,
         root: &Path,
         relative_path: &Path,
         fs: &dyn FileSystem,
     ) -> Result<()> {
+        let file_name = relative_path.file_name().and_then(|f| f.to_str());
+        let index_path = if file_name == Some("index.md") {
+            Some(relative_path.to_path_buf())
+        } else {
+            relative_path.parent().map(|p| p.join("index.md"))
+        };
+        if let Some(index_path) = index_path {
+            if fs.exists(&root.join(&index_path)) {
+                return self.reload_bundle(root, &index_path, fs);
+            }
+        }
+
         // Drop any memoized body so a changed file is re-read (file-watch
         // invalidation, ADR-013). Covers both the removed and re-parsed cases.
         self.body_cache.lock().unwrap().remove(relative_path);
@@ -587,6 +608,204 @@ impl Store {
         }
         self.rebuild_links();
         Ok(())
+    }
+
+    /// Rescan `index_path`'s whole folder from disk after an edit landed
+    /// somewhere inside it: reparse the index document itself, and rebuild
+    /// its `parts`, `sidecars`, and this store's `children`/`parent_of`
+    /// entries for the folder -- the same classification
+    /// [`load_subdirectory`](loader::load_subdirectory) applies on a full
+    /// load (STORY-291 AC3), run again here for one folder instead of the
+    /// whole store. Declared part order is not reconstructed (this function
+    /// has no template to consult, unlike a full [`Store::load`]); a part
+    /// already known keeps its previous position, new ones sort in
+    /// alphabetically after (approximating AC5 until the next full reload).
+    ///
+    /// The index's cached body ([`Store::body_cache`], which folds part
+    /// bodies into the index's entry per AC8) is invalidated here, since a
+    /// part edit changes it but never touches the index file itself.
+    fn reload_bundle(&mut self, root: &Path, index_path: &Path, fs: &dyn FileSystem) -> Result<()> {
+        self.body_cache.lock().unwrap().remove(index_path);
+        self.governs_globs.remove(index_path);
+
+        let previous_part_order: Vec<String> = self
+            .docs
+            .get(index_path)
+            .map(|m| m.parts.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+
+        // Drop the folder's previously known children before rescanning: one
+        // that was renamed or removed must not survive as a stale entry.
+        if let Some(old_children) = self.children.remove(index_path) {
+            for child in &old_children {
+                self.parent_of.remove(child);
+                self.docs.remove(child);
+                self.body_cache.lock().unwrap().remove(child);
+                self.governs_globs.remove(child);
+            }
+        }
+
+        let full_index = root.join(index_path);
+        if !fs.exists(&full_index) {
+            self.docs.remove(index_path);
+            self.rebuild_links();
+            return Ok(());
+        }
+
+        let content = fs.read_to_string(&full_index)?;
+        match DocMeta::parse(&content) {
+            Ok(mut meta) => {
+                meta.path = index_path.to_path_buf();
+                meta.id = extract_id(&meta.path);
+                self.parse_errors.retain(|e| e.path != index_path);
+                if !meta.governs.is_empty() {
+                    match loader::compile_governs(&meta) {
+                        Ok(globs) => {
+                            self.governs_globs.insert(index_path.to_path_buf(), globs);
+                        }
+                        Err(e) => self.parse_errors.push(e),
+                    }
+                }
+                self.docs.insert(index_path.to_path_buf(), meta);
+            }
+            Err(e) => {
+                self.docs.remove(index_path);
+                self.parse_errors.retain(|pe| pe.path != index_path);
+                self.parse_errors.push(ParseError {
+                    path: index_path.to_path_buf(),
+                    error: e.to_string(),
+                });
+                self.rebuild_links();
+                return Ok(());
+            }
+        }
+
+        let folder = full_index
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let mut parts_found: Vec<(String, PathBuf)> = Vec::new();
+        let mut sidecars = Vec::new();
+        let mut child_paths = Vec::new();
+        if let Ok(entries) = fs.read_dir(&folder) {
+            for entry_path in entries {
+                if fs.is_dir(&entry_path) {
+                    continue;
+                }
+                let name = entry_path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or_default();
+                if name == "index.md" {
+                    continue;
+                }
+                let relative = entry_path
+                    .strip_prefix(root)
+                    .unwrap_or(&entry_path)
+                    .to_path_buf();
+
+                if entry_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    sidecars.push(relative);
+                    continue;
+                }
+
+                let entry_content = match fs.read_to_string(&entry_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if entry_content.trim_start().starts_with("---") {
+                    match DocMeta::parse(&entry_content) {
+                        Ok(mut child_meta) => {
+                            child_meta.path = relative.clone();
+                            child_meta.id = extract_id(&child_meta.path);
+                            self.parse_errors.retain(|e| e.path != relative);
+                            if !child_meta.governs.is_empty() {
+                                match loader::compile_governs(&child_meta) {
+                                    Ok(globs) => {
+                                        self.governs_globs.insert(relative.clone(), globs);
+                                    }
+                                    Err(e) => self.parse_errors.push(e),
+                                }
+                            }
+                            self.docs.insert(relative.clone(), child_meta);
+                            child_paths.push(relative);
+                        }
+                        Err(e) => {
+                            self.parse_errors.retain(|pe| pe.path != relative);
+                            self.parse_errors.push(ParseError {
+                                path: relative,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                    continue;
+                }
+
+                let stem = entry_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name)
+                    .to_string();
+                parts_found.push((stem, relative));
+            }
+        }
+        child_paths.sort();
+        sidecars.sort();
+
+        let mut parts = Vec::new();
+        for name in &previous_part_order {
+            if let Some(pos) = parts_found.iter().position(|(n, _)| n == name) {
+                let (name, path) = parts_found.remove(pos);
+                parts.push(Part { name, path });
+            }
+        }
+        parts_found.sort_by(|a, b| a.0.cmp(&b.0));
+        parts.extend(
+            parts_found
+                .into_iter()
+                .map(|(name, path)| Part { name, path }),
+        );
+
+        if let Some(index_meta) = self.docs.get_mut(index_path) {
+            index_meta.parts = parts;
+            index_meta.sidecars = sidecars;
+        }
+
+        for cp in &child_paths {
+            self.parent_of.insert(cp.clone(), index_path.to_path_buf());
+        }
+        if !child_paths.is_empty() {
+            self.children.insert(index_path.to_path_buf(), child_paths);
+        }
+
+        self.rebuild_links();
+        Ok(())
+    }
+
+    /// The path whose cached body ([`Store::cached_or_read_body`]) and the
+    /// TUI's expansion caches must be invalidated for a change at `path`:
+    /// `path` itself, unless `path` is a bundle part or sidecar, in which
+    /// case it is folded into its index document's cached body (AC8) and the
+    /// index's path is the one to invalidate. Meant to be read after
+    /// [`reload_file`](Store::reload_file) has already rescanned the folder,
+    /// so the index's `parts`/`sidecars` are current.
+    pub fn bundle_root(&self, path: &Path) -> PathBuf {
+        if let Some(parent) = self.parent_of(path) {
+            return parent.clone();
+        }
+        if let Some(dir) = path.parent() {
+            let index_path = dir.join("index.md");
+            if index_path != path {
+                if let Some(index_meta) = self.docs.get(&index_path) {
+                    let is_part = index_meta.parts.iter().any(|p| p.path == path);
+                    let is_sidecar = index_meta.sidecars.iter().any(|s| s == path);
+                    if is_part || is_sidecar {
+                        return index_path;
+                    }
+                }
+            }
+        }
+        path.to_path_buf()
     }
 
     pub fn remove_file(&mut self, relative_path: &Path) {
@@ -1663,6 +1882,126 @@ mod tests {
             store.search("fuzzy", &fs).is_empty(),
             "the old body token no longer matches after reload"
         );
+    }
+
+    /// A `change` bundle -- `index.md`, a `design.md` part, a `notes.yaml`
+    /// sidecar -- loaded through the same in-memory filesystem `reload_file`
+    /// is asked to reload from, so a test can edit one file and reload just
+    /// that path the way the TUI's file watcher does.
+    fn bundle_store() -> (Store, InMemoryFileSystem, PathBuf, PathBuf, PathBuf) {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        fs.add_dir(root.join("docs/change"));
+        fs.add_dir(root.join("docs/change/CHANGE-001-alpha"));
+
+        let index_path = PathBuf::from("docs/change/CHANGE-001-alpha/index.md");
+        let design_path = PathBuf::from("docs/change/CHANGE-001-alpha/design.md");
+        let notes_path = PathBuf::from("docs/change/CHANGE-001-alpha/notes.yaml");
+
+        fs.add_file(
+            root.join(&index_path),
+            "---\ntitle: \"Alpha\"\ntype: change\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nindex body\n",
+        );
+        fs.add_file(root.join(&design_path), "the fuzzy design\n");
+        fs.add_file(root.join(&notes_path), "note: 1\n");
+
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        });
+
+        let store = Store::load_with_fs(&root, &config, &fs, None).unwrap();
+        (store, fs, root, index_path, design_path)
+    }
+
+    // STORY-291 AC4/AC6: editing a part through the TUI or a file-watch event
+    // reloads the path of the part, not the index -- that must not be treated
+    // as "no frontmatter found" (a part carries none by design), and the
+    // index's own `parts` must still list it afterwards.
+    #[test]
+    fn reload_file_on_a_part_rescans_the_bundle_instead_of_erroring() {
+        let (mut store, fs, root, index_path, design_path) = bundle_store();
+
+        fs.add_file(root.join(&design_path), "an edited design\n");
+        store.reload_file(&root, &design_path, &fs).unwrap();
+
+        assert!(
+            store.parse_errors().is_empty(),
+            "a part has no frontmatter and must not be reported as a parse error: {:?}",
+            store.parse_errors()
+        );
+        let index = store.get(&index_path).expect("index still loads");
+        assert!(
+            index.parts.iter().any(|p| p.path == design_path),
+            "the part survives being reloaded by its own path: {:?}",
+            index.parts
+        );
+        assert!(index.sidecars.iter().any(|s| s.ends_with("notes.yaml")));
+    }
+
+    // STORY-291 AC4/AC6: reparsing the index on its own must not reset
+    // `parts`/`sidecars` to empty -- the folder did not stop being a bundle
+    // just because only the index's frontmatter/body changed.
+    #[test]
+    fn reload_file_on_the_index_keeps_its_parts_and_sidecars() {
+        let (mut store, fs, root, index_path, design_path) = bundle_store();
+
+        fs.add_file(
+            root.join(&index_path),
+            "---\ntitle: \"Alpha renamed\"\ntype: change\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nbody\n",
+        );
+        store.reload_file(&root, &index_path, &fs).unwrap();
+
+        let index = store.get(&index_path).expect("index still loads");
+        assert_eq!(index.title, "Alpha renamed");
+        assert!(
+            index.parts.iter().any(|p| p.path == design_path),
+            "parts survive an index-only reload: {:?}",
+            index.parts
+        );
+        assert_eq!(index.sidecars.len(), 1);
+    }
+
+    // STORY-291 AC6/AC8: a part's body is folded into its index's cached
+    // body; reloading the part must invalidate the index's cache entry, not
+    // (only) an entry keyed on the part's own path, which is never cached.
+    #[test]
+    fn reload_file_on_a_part_invalidates_the_indexs_cached_body() {
+        let (mut store, fs, root, _index_path, design_path) = bundle_store();
+
+        assert_eq!(
+            store.search("fuzzy", &fs).len(),
+            1,
+            "cold body match on the part"
+        );
+
+        fs.add_file(root.join(&design_path), "the gadget design\n");
+        assert!(
+            store.search("gadget", &fs).is_empty(),
+            "cached body is stale until reload"
+        );
+
+        store.reload_file(&root, &design_path, &fs).unwrap();
+
+        assert_eq!(
+            store.search("gadget", &fs).len(),
+            1,
+            "reloading the part invalidates the index's cached body"
+        );
+    }
+
+    // STORY-291 AC6/AC8: the cache-invalidation key for a part or sidecar is
+    // its index's path, not its own -- callers (the TUI's expansion cache)
+    // read this after `reload_file` to invalidate the right entry.
+    #[test]
+    fn bundle_root_maps_a_part_or_sidecar_to_its_index() {
+        let (store, _fs, _root, index_path, design_path) = bundle_store();
+        let notes_path = PathBuf::from("docs/change/CHANGE-001-alpha/notes.yaml");
+
+        assert_eq!(store.bundle_root(&design_path), index_path);
+        assert_eq!(store.bundle_root(&notes_path), index_path);
+        assert_eq!(store.bundle_root(&index_path), index_path);
     }
 
     // STORY-283 AC1/AC2: one resolution for every `filesystem` spelling, absolute

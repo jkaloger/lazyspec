@@ -200,6 +200,8 @@ impl GitRefStore {
             path: relative,
             id,
             push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

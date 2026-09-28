@@ -30,6 +30,7 @@ mod cli_init_test;
 mod cli_json_test;
 mod cli_lifecycle_seed_test;
 mod cli_link_test;
+mod cli_missing_part_test;
 mod cli_mutate_test;
 mod cli_no_config_test;
 mod cli_query_test;

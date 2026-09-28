@@ -158,8 +158,8 @@ pub fn run_with_body_full(
         return Ok(CreateOutcome {
             path: root.join(&created.path),
             push_outcome: created.push_outcome,
-            parts: Vec::new(),
-            sidecars: Vec::new(),
+            parts: created.parts,
+            sidecars: created.sidecars,
         });
     }
 

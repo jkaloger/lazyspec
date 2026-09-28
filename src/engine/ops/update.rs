@@ -9,10 +9,12 @@ use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
-/// `update <id> --part <name> --body|--body-file` (RFC-074 AC7): write a
+/// `update <id> --part <name> --body|--body-file` (STORY-291 AC7): write a
 /// part's whole body, creating the part if the document has none by that
 /// name. Parts are a filesystem concept (a `.md` beside `index.md`), so this
-/// refuses any other backend by name rather than silently doing nothing.
+/// refuses any backend that is not one -- filesystem, and a `git` store,
+/// which scaffolds and reads a bundle the same way from inside its clone
+/// (STORY-291 AC2/AC7) -- rather than silently doing nothing.
 pub fn run_part(
     root: &Path,
     config: &Config,
@@ -26,19 +28,19 @@ pub fn run_part(
     let type_def = config
         .type_by_name(doc.doc_type.as_str())
         .ok_or_else(|| anyhow!("document {} has unknown type '{}'", doc_id, doc.doc_type))?;
-    if type_def.store != StoreBackend::Filesystem {
+    if !matches!(type_def.store, StoreBackend::Filesystem | StoreBackend::Git) {
         bail!(
-            "'--part' is only supported for filesystem-backed documents; type '{}' uses store '{}'",
+            "'--part' is only supported for filesystem- or git-backed documents; type '{}' uses store '{}'",
             type_def.name,
             type_def.store
         );
     }
 
     fs_ops::write_part(root, store, doc_id, part_name, body)?;
-    crate::engine::git_store::commit_if_extends_backed(
+    crate::engine::git_store::commit_if_git_backed_outcome(
         root,
         config,
-        type_def,
+        &doc.path,
         git,
         &format!("update part {} of {}", part_name, doc.id),
     )
@@ -431,5 +433,88 @@ mod tests {
         // A target that would be off-edge for any local DAG: still allowed.
         gate_status_transition(&td, "open", "in progress").unwrap();
         gate_status_transition(&td, "in progress", "done").unwrap();
+    }
+
+    // STORY-291 AC2/AC7 follow-up: `--part` is a filesystem concept, and a
+    // `git` store's documents live on disk inside its clone the same way, so
+    // `run_part` must write and commit there rather than reject it as an
+    // unsupported backend.
+    fn git_bundle_project() -> (TempDir, Config, TypeDef, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let remote = "https://example.com/change.git";
+        let td = TypeDef {
+            dir: "docs/change".to_string(),
+            remote: Some(remote.to_string()),
+            branch: Some("next".to_string()),
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Git)
+        };
+        let clone_root = crate::engine::git_store::clone_root(tmp.path(), remote, Some("next"));
+        let doc_dir = clone_root.join("docs/change/CHANGE-001-alpha");
+        std::fs::create_dir_all(&doc_dir).unwrap();
+        std::fs::write(
+            doc_dir.join("index.md"),
+            "---\ntitle: \"Alpha\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(doc_dir.join("design.md"), "old design\n").unwrap();
+
+        let mut config = Config::default();
+        config.documents.types = vec![td.clone()];
+        (tmp, config, td, doc_dir)
+    }
+
+    #[test]
+    fn run_part_writes_and_commits_a_git_backed_bundle() {
+        let (tmp, config, _td, doc_dir) = git_bundle_project();
+        let store = Store::load(tmp.path(), &config).unwrap();
+        let git = MockGitRefClient::new().with_has_uncommitted_changes_result(Ok(true));
+
+        let outcome = run_part(
+            tmp.path(),
+            &config,
+            &store,
+            "CHANGE-001",
+            "design",
+            "new design",
+            &git,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, PushOutcome::LocalOnly { .. }),
+            "got: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(doc_dir.join("design.md")).unwrap(),
+            "new design\n"
+        );
+    }
+
+    // A backend that is neither filesystem nor git (a part has nowhere to
+    // live for one) is still rejected by name.
+    #[test]
+    fn run_part_rejects_a_backend_with_no_filesystem_shape() {
+        let tmp = TempDir::new().unwrap();
+        let doc = "---\ntitle: \"T\"\ntype: task\nstatus: open\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nbody\n";
+        std::fs::create_dir_all(tmp.path().join(".lazyspec/cache/task")).unwrap();
+        std::fs::write(tmp.path().join(".lazyspec/cache/task/TASK-001-t.md"), doc).unwrap();
+        let mut config = Config::default();
+        config.documents.types = vec![TypeDef::test_fixture("task", StoreBackend::ClickupTasks)];
+        let store = Store::load(tmp.path(), &config).unwrap();
+        let git = MockGitRefClient::new();
+
+        let err = run_part(
+            tmp.path(),
+            &config,
+            &store,
+            "TASK-001",
+            "design",
+            "new design",
+            &git,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("clickup"), "{err}");
     }
 }

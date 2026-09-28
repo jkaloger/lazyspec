@@ -1,6 +1,7 @@
 use lazyspec::cli::show;
 use lazyspec::engine::git_ref::test_support::MockGitRefClient;
 use std::fs;
+use std::process::Command;
 
 // RFC-074 AC3/AC6: a bundle folder (an `index.md` beside frontmatter-less
 // `.md` parts and a non-`.md` sidecar) loads with no parse errors, and
@@ -17,6 +18,16 @@ fn write_bundle(fixture: &crate::common::TestFixture) {
     fs::write(dir.join("design.md"), "Design content.\n").unwrap();
     fs::write(dir.join("tasks.md"), "Tasks content.\n").unwrap();
     fs::write(dir.join("notes.yaml"), "note: sidecar\n").unwrap();
+    // A `.md` beside `index.md` that carries frontmatter is a child document
+    // (AC3), not a part -- present so `show`'s `Children:` block is not empty
+    // and `show_human_output_lists_a_parts_block_after_children` actually
+    // exercises the "Parts: follows Children:" ordering it asserts, rather
+    // than skipping the check because there was nothing to find.
+    fs::write(
+        dir.join("follow-up.md"),
+        "---\ntitle: \"Follow up\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nFollow-up body.\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -66,10 +77,8 @@ fn show_human_output_lists_a_parts_block_after_children() {
     let text = String::from_utf8(out).unwrap();
 
     let parts_pos = text.find("Parts:").expect("Parts: block present");
-    let children_pos = text.find("Children:");
-    if let Some(children_pos) = children_pos {
-        assert!(parts_pos > children_pos, "Parts: must follow Children:");
-    }
+    let children_pos = text.find("Children:").expect("Children: block present");
+    assert!(parts_pos > children_pos, "Parts: must follow Children:");
     assert!(text.contains("design"), "got: {text}");
     assert!(text.contains("tasks"), "got: {text}");
     assert!(text.contains("notes.yaml"), "got: {text}");
@@ -283,4 +292,115 @@ fn update_part_creates_an_absent_part() {
         fs::read_to_string(&risks_path).unwrap(),
         "New risks section.\n"
     );
+}
+
+// STORY-291 AC6: `-e` expands `@ref` inside a part's body too, not just the
+// index's -- `show --parts -e` (human) and `show --json --parts -e`
+// (`expand=true`) both read a part through `Store::get_part_body_expanded`.
+fn write_bundle_with_a_ref_in_a_part(fixture: &crate::common::TestFixture) {
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(fixture.root())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(fixture.root())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(fixture.root())
+        .status()
+        .unwrap();
+
+    let dir = fixture.root().join("docs/rfcs/RFC-001-change");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("index.md"),
+        "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nParent body.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("design.md"),
+        "See the code:\n\n@ref referenced.txt\n",
+    )
+    .unwrap();
+    fs::write(fixture.root().join("referenced.txt"), "referenced content").unwrap();
+
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(fixture.root())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-q", "-m", "bundle with a ref"])
+        .current_dir(fixture.root())
+        .status()
+        .unwrap();
+}
+
+#[test]
+fn show_parts_expand_resolves_a_ref_inside_a_part_body() {
+    let fixture = crate::common::TestFixture::new();
+    write_bundle_with_a_ref_in_a_part(&fixture);
+    let store = fixture.store();
+
+    let mut out = Vec::new();
+    show::run(
+        &mut out,
+        &store,
+        "RFC-001",
+        show::ShowArgs {
+            expand: true,
+            max_ref_lines: 25,
+            fs: &lazyspec::engine::fs::RealFileSystem,
+            config: &fixture.config(),
+            git: &MockGitRefClient::new(),
+            parts: true,
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+
+    assert!(
+        text.contains("referenced content"),
+        "the part's @ref must expand to the referenced file's content, got: {text}"
+    );
+    assert!(
+        !text.contains("@ref referenced.txt"),
+        "the raw @ref directive must not survive expansion, got: {text}"
+    );
+}
+
+#[test]
+fn show_json_parts_expand_resolves_a_ref_inside_a_part_body() {
+    let fixture = crate::common::TestFixture::new();
+    write_bundle_with_a_ref_in_a_part(&fixture);
+    let store = fixture.store();
+
+    let output = show::run_json(
+        &store,
+        "RFC-001",
+        true,
+        25,
+        &lazyspec::engine::fs::RealFileSystem,
+        &fixture.config(),
+        fixture.root(),
+        &crate::common::NoopGh,
+        &MockGitRefClient::new(),
+        true,
+    )
+    .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let design = json["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "design")
+        .expect("design part present");
+    let body = design["body"].as_str().unwrap();
+    assert!(body.contains("referenced content"), "got: {body}");
+    assert!(!body.contains("@ref referenced.txt"), "got: {body}");
 }
