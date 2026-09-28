@@ -3267,6 +3267,8 @@ mod tests {
             virtual_doc: false,
             assignee: None,
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

@@ -287,10 +287,19 @@ impl Store {
                 }
             }
 
+            let templates_dir = config
+                .docs_root(root)
+                .join(&config.filesystem.templates.dir);
+            let declared_parts = crate::engine::template::directory_template_part_order(
+                &templates_dir,
+                &type_def.name,
+            );
+
             loader::load_type_directory(
                 path_root_for_relativizing(config, root, type_def),
                 &full_path,
                 type_def,
+                &declared_parts,
                 &mut docs,
                 &mut children,
                 &mut parent_of,
@@ -420,6 +429,27 @@ impl Store {
 
     pub fn get_body(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
         self.get_body_raw(path, fs)
+    }
+
+    /// The body of a part (RFC-074): the whole file content, since a part
+    /// carries no frontmatter of its own to split off (unlike
+    /// [`Store::get_body_raw`], which reads past a document's frontmatter).
+    pub fn get_part_body_raw(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+        let full_path = self.root.join(path);
+        fs.read_to_string(&full_path)
+    }
+
+    /// [`Store::get_part_body_raw`] with `@ref` directives expanded, mirroring
+    /// [`Store::get_body_expanded`] for a part rather than a document.
+    pub fn get_part_body_expanded(
+        &self,
+        path: &Path,
+        max_lines: usize,
+        fs: &dyn FileSystem,
+    ) -> Result<String> {
+        let body = self.get_part_body_raw(path, fs)?;
+        let expander = RefExpander::with_max_lines(self.root.clone(), max_lines);
+        expander.expand(&body)
     }
 
     pub fn resolve_shorthand(&self, id: &str) -> Result<&DocMeta, ResolveError> {
@@ -612,7 +642,7 @@ impl Store {
         let as_path = relative_to_governs_root(&self.root, &self.governs_root, Path::new(query));
 
         for meta in self.docs.values() {
-            let body = self.cached_or_read_body(&meta.path, fs);
+            let body = self.cached_or_read_body(meta, fs);
             if let Some((score, match_field, snippet)) = score_doc_fields(
                 &pattern,
                 &mut matcher,
@@ -657,7 +687,7 @@ impl Store {
                 path: meta.path.clone(),
                 title: meta.title.clone(),
                 tags: meta.tags.clone(),
-                body: self.cached_or_read_body(&meta.path, fs),
+                body: self.cached_or_read_body(meta, fs),
             })
             .collect();
         SearchCorpus {
@@ -668,18 +698,31 @@ impl Store {
         }
     }
 
-    /// Body text for `path`, served from the in-memory body cache when present
-    /// and otherwise read from disk and memoized. `None` when the file cannot be
-    /// read. See [`body_cache`](Store::body_cache) for the ADR-013 rationale.
-    fn cached_or_read_body(&self, path: &Path, fs: &dyn FileSystem) -> Option<String> {
-        if let Some(body) = self.body_cache.lock().unwrap().get(path) {
+    /// Body text for `meta`, served from the in-memory body cache when present
+    /// and otherwise read from disk and memoized. `None` when the document's own
+    /// file cannot be read.
+    ///
+    /// RFC-074 AC8: a bundle's parts are appended after the document's own
+    /// body, so a fuzzy hit inside a part's file scores against -- and its
+    /// `SearchResult`/`CorpusDoc` reports -- the parent document, not a
+    /// separate entry for the part (a part has no id of its own to report). A
+    /// part that fails to read is skipped rather than failing the whole body.
+    /// See [`body_cache`](Store::body_cache) for the ADR-013 rationale.
+    fn cached_or_read_body(&self, meta: &DocMeta, fs: &dyn FileSystem) -> Option<String> {
+        if let Some(body) = self.body_cache.lock().unwrap().get(&meta.path) {
             return Some(body.clone());
         }
-        let body = self.get_body_raw(path, fs).ok()?;
+        let mut body = self.get_body_raw(&meta.path, fs).ok()?;
+        for part in &meta.parts {
+            if let Ok(part_body) = self.get_part_body_raw(&part.path, fs) {
+                body.push('\n');
+                body.push_str(&part_body);
+            }
+        }
         self.body_cache
             .lock()
             .unwrap()
-            .insert(path.to_path_buf(), body.clone());
+            .insert(meta.path.clone(), body.clone());
         Some(body)
     }
 }
@@ -1462,6 +1505,31 @@ mod tests {
         assert!(results[0].snippet.contains("fuzzy"));
     }
 
+    // RFC-074 AC8: a fuzzy hit inside a bundle's part reports the parent
+    // document, since a part carries no id of its own.
+    #[test]
+    fn search_matches_a_part_body_and_reports_the_parent_document() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let dir = root.join("docs/rfcs/RFC-1-change");
+        fs.add_dir(root.join("docs/rfcs"));
+        fs.add_dir(dir.clone());
+        fs.add_file(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\nparent body\n",
+        );
+        fs.add_file(dir.join("design.md"), "the fuzzy matcher lives here\n");
+
+        let store = Store::load_with_fs(&root, &Config::default(), &fs, None).unwrap();
+
+        let results = store.search("fuzzy", &fs);
+
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].doc.id, "RFC-1");
+        assert_eq!(results[0].match_field, "body");
+        assert!(results[0].snippet.contains("fuzzy"));
+    }
+
     #[test]
     fn search_multi_field_match_returns_one_result_with_best_field_score() {
         // "core" matches the title only as a scattered subsequence
@@ -2009,6 +2077,78 @@ mod tests {
             &format!(
                 "---\ntitle: \"{child}\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\nchild\n"
             ),
+        );
+    }
+
+    // RFC-074 AC3/AC4: a frontmatter-less `.md` beside an `index.md` is a
+    // part, not a parse error; a non-`.md` file beside it is a sidecar.
+    // AC5 (no declared template order in this fixture): extra parts are
+    // ordered alphabetically.
+    #[test]
+    fn bundle_folder_classifies_parts_and_sidecars_with_no_parse_errors() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        let dir = root.join("docs/rfcs/RFC-1-change");
+        fs.add_dir(root.join("docs/rfcs"));
+        fs.add_dir(dir.clone());
+        fs.add_file(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\nparent\n",
+        );
+        fs.add_file(dir.join("tasks.md"), "# Tasks\n\n- [ ] one\n");
+        fs.add_file(dir.join("design.md"), "# Design\n\nsome design prose\n");
+        fs.add_file(dir.join("index.yaml"), "foo: bar\n");
+
+        let store = Store::load_with_fs(&root, &Config::default(), &fs, None).unwrap();
+
+        assert!(
+            store.parse_errors().is_empty(),
+            "frontmatter-less parts must not be parse errors: {:?}",
+            store.parse_errors()
+        );
+
+        let doc = store
+            .resolve_shorthand("RFC-1")
+            .expect("index.md should still load as the document");
+        assert_eq!(
+            doc.parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["design", "tasks"],
+            "no declared template order: extras sort alphabetically"
+        );
+        assert_eq!(
+            doc.parts[0].path,
+            PathBuf::from("docs/rfcs/RFC-1-change/design.md")
+        );
+        assert_eq!(
+            doc.sidecars,
+            vec![PathBuf::from("docs/rfcs/RFC-1-change/index.yaml")]
+        );
+    }
+
+    // RFC-074 AC4: a frontmatter-less `.md` directly in a type's flat `dir`
+    // (no subdirectory, so no `index.md` to be a part of) is still a parse
+    // error, reported once.
+    #[test]
+    fn top_level_frontmatter_less_md_in_flat_type_dir_is_still_a_parse_error() {
+        let fs = InMemoryFileSystem::new();
+        let root = PathBuf::from("/fake/root");
+        fs.add_dir(root.join("docs/rfcs"));
+        fs.add_file(root.join("docs/rfcs/RFC-1-stray.md"), "not a document\n");
+
+        let store = Store::load_with_fs(&root, &Config::default(), &fs, None).unwrap();
+
+        assert_eq!(
+            store.parse_errors().len(),
+            1,
+            "got: {:?}",
+            store.parse_errors()
+        );
+        assert_eq!(
+            store.parse_errors()[0].path,
+            PathBuf::from("docs/rfcs/RFC-1-stray.md")
         );
     }
 

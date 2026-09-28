@@ -1759,6 +1759,50 @@ mod tests {
         );
     }
 
+    // RFC-074 AC6: the TUI preview's expansion worker concatenates a bundle's
+    // parts after the index body, under a `## <name>` heading, in part order --
+    // the same shape `show --parts` renders.
+    #[test]
+    fn request_expansion_concatenates_a_bundles_parts_after_the_index_body() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        std::fs::write(dir.join("tasks.md"), "Tasks content.\n").unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        app.request_expansion(&tx);
+
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expansion worker must send a result");
+        let AppEvent::ExpansionResult { body, .. } = event else {
+            panic!("expected ExpansionResult");
+        };
+
+        let parent_pos = body.find("Parent body.").expect("parent body present");
+        let design_heading = body.find("## design").expect("design heading present");
+        let design_body = body.find("Design content.").expect("design body present");
+        let tasks_heading = body.find("## tasks").expect("tasks heading present");
+        let tasks_body = body.find("Tasks content.").expect("tasks body present");
+
+        assert!(parent_pos < design_heading);
+        assert!(design_heading < design_body);
+        assert!(design_body < tasks_heading);
+        assert!(tasks_heading < tasks_body);
+    }
+
     // AC6 negative: an md-only FileChange must NOT request a reload, otherwise
     // every doc edit would re-parse the config and rebuild the store.
     #[test]

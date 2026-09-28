@@ -1,7 +1,7 @@
 use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
-use crate::engine::document::DocType;
+use crate::engine::document::{DocType, Part};
 use crate::engine::fs_ops;
 use crate::engine::gh::GhCli;
 use crate::engine::git_ref::{GitCli, GitRefOps};
@@ -17,6 +17,18 @@ use crate::engine::store_dispatch::{
 use anyhow::{anyhow, bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// What creating a document produced: its path and push outcome always, plus
+/// (RFC-074 AC2) any parts and sidecars a directory template scaffolded.
+/// `parts`/`sidecars` are empty for every backend and template shape except a
+/// filesystem (or git-store) create against a directory template.
+#[derive(Debug, Clone)]
+pub struct CreateOutcome {
+    pub path: PathBuf,
+    pub push_outcome: PushOutcome,
+    pub parts: Vec<Part>,
+    pub sidecars: Vec<PathBuf>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -50,6 +62,10 @@ pub fn run(
 /// REST/GraphQL stores whose create either lands remotely or errors); only a
 /// git-ref-backed create can report `LocalOnly` when the deferred push cannot
 /// reach the remote, carrying the warning the CLI surfaces in its JSON.
+///
+/// Thin wrapper over [`run_with_body_full`] for the callers (the human CLI
+/// path, the TUI) that have no use for a directory template's parts and
+/// sidecars -- only `create --json` (RFC-074 AC2) does, via the full form.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_body(
     root: &Path,
@@ -63,6 +79,37 @@ pub fn run_with_body(
     git: &dyn GitRefOps,
     on_progress: impl Fn(reservation::ReservationProgress),
 ) -> Result<(PathBuf, PushOutcome)> {
+    run_with_body_full(
+        root,
+        config,
+        store,
+        doc_type,
+        title,
+        author,
+        parent,
+        body,
+        git,
+        on_progress,
+    )
+    .map(|r| (r.path, r.push_outcome))
+}
+
+/// [`run_with_body`], additionally reporting the parts and sidecars a
+/// directory template scaffolded (RFC-074 AC2). Empty for every backend and
+/// template shape but a filesystem/git-store create against one.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_body_full(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    doc_type: &str,
+    title: &str,
+    author: &str,
+    parent: Option<&str>,
+    body: Option<&str>,
+    git: &dyn GitRefOps,
+    on_progress: impl Fn(reservation::ReservationProgress),
+) -> Result<CreateOutcome> {
     let type_def = config.type_by_name(doc_type).ok_or_else(|| {
         anyhow!(
             "unknown doc type: '{}'. valid types: {}",
@@ -91,9 +138,15 @@ pub fn run_with_body(
     // through `create_with_parent`, whose same-repo guard applies to git types
     // too and whose write lands (and commits) inside the parent's clone.
     if let Some(parent_id) = parent {
-        return create_with_parent(
+        let (path, push_outcome) = create_with_parent(
             root, config, store, type_def, title, author, body, parent_id, git,
-        );
+        )?;
+        return Ok(CreateOutcome {
+            path,
+            push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::Git {
@@ -102,7 +155,12 @@ pub fn run_with_body(
             registry
                 .for_type(type_def)?
                 .create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::GithubIssues {
@@ -127,7 +185,12 @@ pub fn run_with_body(
             issue_cache: IssueCache::new(root),
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::GithubMilestones {
@@ -151,7 +214,12 @@ pub fn run_with_body(
             issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::GithubProjects {
@@ -175,7 +243,12 @@ pub fn run_with_body(
             issue_map: IssueMap::load(root)?,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::GitRef {
@@ -187,7 +260,12 @@ pub fn run_with_body(
             reserved_number: None,
         };
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     if type_def.store == StoreBackend::ClickupTasks {
@@ -204,13 +282,18 @@ pub fn run_with_body(
             || LayeredCredentialStore::global().load_clickup_token(),
         )?;
         let created = store.create(type_def, title, author, body.unwrap_or(""))?;
-        return Ok((root.join(&created.path), created.push_outcome));
+        return Ok(CreateOutcome {
+            path: root.join(&created.path),
+            push_outcome: created.push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     let dir = crate::engine::store::doc_root(config, root, type_def)
         .to_string_lossy()
         .into_owned();
-    let path = fs_ops::create_document(
+    let created = fs_ops::create_document(
         root,
         config,
         doc_type,
@@ -223,6 +306,7 @@ pub fn run_with_body(
         None,
         on_progress,
     )?;
+    let path = created.path;
 
     if let Some(body_text) = body {
         fs_ops::replace_body(&path, body_text)?;
@@ -233,7 +317,12 @@ pub fn run_with_body(
     let push_outcome =
         commit_if_git_backed_outcome(root, config, &relative, git, &format!("create {id}"))?;
 
-    Ok((path, push_outcome))
+    Ok(CreateOutcome {
+        path,
+        push_outcome,
+        parts: created.parts,
+        sidecars: created.sidecars,
+    })
 }
 
 /// Author a child of `parent_id`, branching on the child type's store.

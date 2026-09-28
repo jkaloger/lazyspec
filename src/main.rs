@@ -260,6 +260,7 @@ fn main() -> anyhow::Result<()> {
             expand_references,
             max_ref_lines,
             open,
+            parts,
         }) => {
             refresh_github_cache(&cwd, &config);
             let store = load_store(&cwd, &config)?;
@@ -277,6 +278,7 @@ fn main() -> anyhow::Result<()> {
                     &cwd,
                     &gh,
                     &GitCli,
+                    parts,
                 )?;
                 println!("{}", output);
             } else {
@@ -290,6 +292,7 @@ fn main() -> anyhow::Result<()> {
                         fs: &fs,
                         config: &config,
                         git: &GitCli,
+                        parts,
                     },
                 )?;
             }
@@ -301,11 +304,34 @@ fn main() -> anyhow::Result<()> {
             assignee,
             body,
             body_file,
+            part,
             attr,
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = load_store(&cwd, &config)?;
+
+            if let Some(part_name) = &part {
+                let has_conflicting_flags =
+                    status.is_some() || title.is_some() || assignee.is_some() || !attr.is_empty();
+                let output = lazyspec::cli::update::run_part_cli(
+                    &cwd,
+                    &config,
+                    &store,
+                    &path,
+                    part_name,
+                    body_content.as_deref(),
+                    has_conflicting_flags,
+                    &GitCli,
+                    json,
+                )?;
+                println!("{}", output.message);
+                if let Some(warning) = &output.warning {
+                    eprintln!("{}", warning);
+                }
+                return Ok(());
+            }
+
             let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
             let mut updates = Vec::new();
             if let Some(ref s) = status {

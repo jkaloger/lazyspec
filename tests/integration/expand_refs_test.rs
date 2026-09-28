@@ -99,6 +99,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -156,6 +157,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -198,6 +200,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -246,6 +249,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -289,6 +293,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -335,6 +340,7 @@ tags: []
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -379,6 +385,7 @@ tags: []
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -432,6 +439,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -484,6 +492,7 @@ See the code:
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
 
     assert!(result.is_ok());
@@ -716,6 +725,7 @@ tags: []
         fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     );
     assert!(result.is_ok());
     let output = result.unwrap();

@@ -157,6 +157,7 @@ fn show_json_retains_comments() {
         root,
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+        false,
     )
     .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();

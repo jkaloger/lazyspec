@@ -147,6 +147,11 @@ pub enum Commands {
         /// target and spawn nothing.
         #[arg(long)]
         open: bool,
+        /// Render the concatenated form (RFC-074): the index body, then each
+        /// part's body under a `## <name>` heading, in part order. With
+        /// --json, each `parts[]` entry gains a `body` field instead.
+        #[arg(long)]
+        parts: bool,
     },
     /// Update document frontmatter
     Update {
@@ -168,6 +173,10 @@ pub enum Commands {
         /// Read body from file (use `-` for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Write a part's body instead of the document's own (RFC-074):
+        /// requires --body or --body-file, creates the part if absent
+        #[arg(long)]
+        part: Option<String>,
         /// Set a custom attribute (repeatable): --attr key=value
         #[arg(long = "attr", value_name = "KEY=VALUE")]
         attr: Vec<String>,

@@ -1742,6 +1742,8 @@ mod attr_schema_tests {
             assignee: None,
             id: "STORY-001".to_string(),
             attributes,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -1996,6 +1998,8 @@ mod unknown_relationship_tests {
             assignee: None,
             id: "MILESTONE-001".to_string(),
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -2309,6 +2313,8 @@ mod edge_tests {
             assignee: None,
             id: id.to_string(),
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

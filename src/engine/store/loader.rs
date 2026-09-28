@@ -1,5 +1,5 @@
 use crate::engine::config::{AttrDef, TypeDef};
-use crate::engine::document::{DocMeta, DocType, Status};
+use crate::engine::document::{DocMeta, DocType, Part, Status};
 use crate::engine::fs::FileSystem;
 use anyhow::Result;
 use chrono::Utc;
@@ -34,6 +34,7 @@ pub fn load_type_directory(
     root: &Path,
     full_path: &Path,
     type_def: &TypeDef,
+    declared_parts: &[String],
     docs: &mut HashMap<PathBuf, DocMeta>,
     children: &mut HashMap<PathBuf, Vec<PathBuf>>,
     parent_of: &mut HashMap<PathBuf, PathBuf>,
@@ -46,6 +47,7 @@ pub fn load_type_directory(
                 root,
                 &path,
                 type_def,
+                declared_parts,
                 docs,
                 children,
                 parent_of,
@@ -122,11 +124,115 @@ fn load_child_markdown_files(
     Ok(child_paths)
 }
 
+/// What a document folder holds besides its `index.md` (RFC-074 AC3): child
+/// documents (a `.md` carrying frontmatter, unchanged from before this
+/// story), parts (a `.md` with none), and sidecars (anything else).
+struct FolderContents {
+    child_paths: Vec<PathBuf>,
+    parts: Vec<Part>,
+    sidecars: Vec<PathBuf>,
+}
+
+/// True iff `content` opens with a YAML frontmatter delimiter. Cheap
+/// discriminator between a child document (has frontmatter, parsed and
+/// validated the usual way) and a part (has none, and is never a parse
+/// error) -- checked directly rather than by matching `split_frontmatter`'s
+/// error text, so a file that opens with `---` but is otherwise malformed
+/// still takes the child-document path and surfaces its real parse error.
+fn looks_like_frontmatter(content: &str) -> bool {
+    content.trim_start().starts_with("---")
+}
+
+/// Scan a document folder's entries (everything beside `index.md`),
+/// classifying each into a child document, a part, or a sidecar per the
+/// RFC-074 AC3 table. Parts are ordered by `declared_parts` (the template's
+/// declared order) first, then any extra parts alphabetically (AC5).
+#[allow(clippy::too_many_arguments)]
+fn scan_document_folder(
+    root: &Path,
+    dir: &Path,
+    schema: &[AttrDef],
+    declared_parts: &[String],
+    docs: &mut HashMap<PathBuf, DocMeta>,
+    parse_errors: &mut Vec<ParseError>,
+    fs: &dyn FileSystem,
+) -> Result<FolderContents> {
+    let mut child_paths = Vec::new();
+    let mut sidecars = Vec::new();
+    // (stem, relative path) for every frontmatter-less `.md`, before ordering.
+    let mut found_parts: Vec<(String, PathBuf)> = Vec::new();
+
+    for entry_path in fs.read_dir(dir)? {
+        if fs.is_dir(&entry_path) {
+            continue;
+        }
+        let file_name = entry_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default();
+        if file_name == "index.md" {
+            continue;
+        }
+
+        let relative = entry_path
+            .strip_prefix(root)
+            .unwrap_or(&entry_path)
+            .to_path_buf();
+
+        if entry_path.extension().and_then(|e| e.to_str()) != Some("md") {
+            sidecars.push(relative);
+            continue;
+        }
+
+        let content = fs.read_to_string(&entry_path)?;
+        if looks_like_frontmatter(&content) {
+            if let Some(rel) =
+                parse_document_entry(root, &entry_path, schema, docs, parse_errors, fs)?
+            {
+                child_paths.push(rel);
+            }
+            continue;
+        }
+
+        let stem = entry_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        found_parts.push((stem, relative));
+    }
+
+    // Deterministic loader order, same reasoning as `load_child_markdown_files`.
+    child_paths.sort();
+    sidecars.sort();
+
+    let mut parts = Vec::new();
+    for name in declared_parts {
+        if let Some(pos) = found_parts.iter().position(|(n, _)| n == name) {
+            let (name, path) = found_parts.remove(pos);
+            parts.push(Part { name, path });
+        }
+    }
+    found_parts.sort_by(|a, b| a.0.cmp(&b.0));
+    parts.extend(
+        found_parts
+            .into_iter()
+            .map(|(name, path)| Part { name, path }),
+    );
+
+    Ok(FolderContents {
+        child_paths,
+        parts,
+        sidecars,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_subdirectory(
     root: &Path,
     path: &Path,
     type_def: &TypeDef,
+    declared_parts: &[String],
     docs: &mut HashMap<PathBuf, DocMeta>,
     children: &mut HashMap<PathBuf, Vec<PathBuf>>,
     parent_of: &mut HashMap<PathBuf, PathBuf>,
@@ -148,11 +254,15 @@ fn load_subdirectory(
             parse_errors,
             fs,
         )?;
-        let child_paths = load_child_markdown_files(
+        let FolderContents {
+            child_paths,
+            parts,
+            sidecars,
+        } = scan_document_folder(
             root,
             path,
-            true,
             &type_def.attributes,
+            declared_parts,
             docs,
             parse_errors,
             fs,
@@ -161,7 +271,11 @@ fn load_subdirectory(
             parent_of.insert(cp.clone(), parent_relative.clone());
         }
         if !child_paths.is_empty() {
-            children.insert(parent_relative, child_paths);
+            children.insert(parent_relative.clone(), child_paths);
+        }
+        if let Some(index_meta) = docs.get_mut(&parent_relative) {
+            index_meta.parts = parts;
+            index_meta.sidecars = sidecars;
         }
         return Ok(());
     }
@@ -210,6 +324,8 @@ fn load_subdirectory(
         assignee: None,
         attributes: Default::default(),
         id: extract_id(&parent_relative),
+        parts: Vec::new(),
+        sidecars: Vec::new(),
     };
     docs.insert(parent_relative.clone(), virtual_meta);
 

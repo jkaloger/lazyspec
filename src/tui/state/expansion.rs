@@ -9,10 +9,24 @@ use std::sync::Arc;
 
 use super::{App, AppEvent, StaleFindingsRequest, StalenessRequest};
 
+/// `text` with `@ref` directives expanded, or `text` unchanged when it has
+/// none or expansion fails/cancels. The lenient fallback [`request_expansion`]
+/// uses for a bundle's parts (RFC-074 AC6): a preview degrading to plain text
+/// for one part is preferable to the whole concatenated form vanishing.
+fn expand_or_plain(text: &str, expander: &RefExpander, cancel: &Arc<AtomicBool>) -> String {
+    if !text.contains("@ref ") {
+        return text.to_string();
+    }
+    match expander.expand_cancellable(text, cancel) {
+        Ok(Some(expanded)) => expanded,
+        _ => text.to_string(),
+    }
+}
+
 impl App {
     pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
-        let doc_path = match self.selected_doc_meta() {
-            Some(meta) => meta.path.clone(),
+        let (doc_path, parts) = match self.selected_doc_meta() {
+            Some(meta) => (meta.path.clone(), meta.parts.clone()),
             None => return,
         };
 
@@ -48,6 +62,29 @@ impl App {
                 Ok(b) => b,
                 Err(_) => return,
             };
+
+            // RFC-074 AC6: a bundle's parts are expanded the same way as the
+            // index body, then concatenated after it under a `## <name>`
+            // heading -- the same shape `show --parts` renders. Bypasses the
+            // disk cache below, which is keyed on the index body alone.
+            if !parts.is_empty() {
+                let expander = RefExpander::new(root.clone());
+                let mut full = expand_or_plain(&body, &expander, &cancel);
+                for part in &parts {
+                    let Ok(part_content) = fs::read_to_string(root.join(&part.path)) else {
+                        continue;
+                    };
+                    let part_body = expand_or_plain(&part_content, &expander, &cancel);
+                    full.push_str(&format!("\n\n## {}\n\n{}", part.name, part_body));
+                }
+                let body_hash = DiskCache::body_hash(&full);
+                let _ = tx.send(AppEvent::ExpansionResult {
+                    path: doc_path,
+                    body: full,
+                    body_hash,
+                });
+                return;
+            }
 
             if !body.contains("@ref ") {
                 let body_hash = DiskCache::body_hash(&body);

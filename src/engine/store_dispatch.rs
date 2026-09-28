@@ -512,7 +512,8 @@ impl DocumentStore for FilesystemStore {
             type_def.subdirectory,
             None,
             |_| {},
-        )?;
+        )?
+        .path;
 
         let relative = path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
         let id = crate::engine::store::extract_id_from_name(
@@ -1858,6 +1859,8 @@ impl DocumentStore for GithubIssuesStore {
             assignee: None,
             attributes: Default::default(),
             id: String::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
@@ -2338,6 +2341,8 @@ impl GithubMilestonesStore {
             assignee: None,
             attributes,
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 }
@@ -2628,6 +2633,8 @@ impl GithubProjectsStore {
             assignee: None,
             attributes: Default::default(),
             id: doc_id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, &node_id)?;
 
@@ -2702,6 +2709,8 @@ impl DocumentStore for GithubProjectsStore {
             assignee: None,
             attributes: Default::default(),
             id: doc_id.clone(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, &node_id)?;
 
@@ -6083,6 +6092,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         meta.tags = vec![];
         let body = issue_body::serialize(&meta, "prose");
@@ -6184,6 +6195,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         issue_body::serialize(&meta, prose)
     }
@@ -6713,6 +6726,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         let body = issue_body::serialize(&meta, "ADOPTED PROSE LINE");
         let view_issue = GhIssue {
@@ -7005,6 +7020,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -7050,6 +7067,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -7177,6 +7196,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: String::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         let err = write_cache_file(&root, &td, &meta, "body").unwrap_err();
@@ -7212,6 +7233,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-042".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -7456,6 +7479,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -8437,6 +8462,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "STORY-400".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         let body = issue_body::serialize(&parent_meta, "body");
         assert!(
@@ -8872,6 +8899,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

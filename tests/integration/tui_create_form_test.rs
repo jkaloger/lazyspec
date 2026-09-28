@@ -1,5 +1,7 @@
 use crate::common::TestFixture;
+use lazyspec::engine::config::{Config, StoreBackend, TypeDef};
 use lazyspec::engine::document::DocType;
+use lazyspec::engine::store::Store;
 use lazyspec::tui::state::{App, FormField};
 
 fn setup_app() -> (TestFixture, App) {
@@ -177,4 +179,69 @@ fn test_create_form_cancel() {
     assert!(app.create_form.title.is_empty());
     assert!(app.create_form.tags.is_empty());
     assert!(app.create_form.related.is_empty());
+}
+
+// RFC-074 AC2: the TUI create path reaches the same scaffold as the CLI --
+// `submit_create_form` calls `ops::create::run` (src/tui/state/app.rs), which
+// on a directory-templated type writes every declared part, not just index.md.
+#[test]
+fn test_submit_create_form_scaffolds_a_directory_template() {
+    let fixture = TestFixture::new();
+    let root = fixture.root();
+
+    let mut config = Config::default();
+    config.documents.types.push(TypeDef {
+        dir: "docs/changes".to_string(),
+        prefix: "CHANGE".to_string(),
+        subdirectory: true,
+        ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+    });
+    std::fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+
+    let template_dir = root.join(".lazyspec/templates/change");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(
+        template_dir.join("index.md"),
+        "---\ntitle: \"{title}\"\ntype: {type}\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n\nParent for {title}.\n",
+    )
+    .unwrap();
+    std::fs::write(template_dir.join("design.md"), "# Design for {title}\n").unwrap();
+    std::fs::write(template_dir.join("tasks.md"), "# Tasks for {title}\n").unwrap();
+
+    let store = Store::load(root, &config).unwrap();
+    let mut app = App::new(
+        store,
+        &config,
+        ratatui_image::picker::Picker::halfblocks(),
+        Box::new(lazyspec::engine::fs::RealFileSystem),
+    );
+
+    let change_index = app
+        .doc_types
+        .iter()
+        .position(|t| t.as_str() == "change")
+        .expect("change type registered from config");
+    app.selected_type = change_index;
+    app.open_create_form();
+    assert_eq!(app.create_form.doc_type, DocType::new("change"));
+
+    for c in "Add caching".chars() {
+        app.form_type_char(c);
+    }
+
+    app.submit_create_form(root, &config).unwrap();
+
+    let spec_dir = root.join("docs/changes/CHANGE-001-add-caching");
+    assert!(
+        spec_dir.join("design.md").is_file(),
+        "expected design.md scaffolded under {}",
+        spec_dir.display()
+    );
+    assert!(
+        spec_dir.join("tasks.md").is_file(),
+        "expected tasks.md scaffolded under {}",
+        spec_dir.display()
+    );
+    let design_content = std::fs::read_to_string(spec_dir.join("design.md")).unwrap();
+    assert_eq!(design_content, "# Design for Add caching\n");
 }

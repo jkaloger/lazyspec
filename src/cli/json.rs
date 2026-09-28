@@ -77,6 +77,16 @@ pub fn doc_to_json(doc: &DocMeta) -> Value {
         }).collect::<Vec<_>>(),
         "validate_ignore": doc.validate_ignore,
         "attributes": doc.attributes,
+        // RFC-074 AC2/AC6: always present, empty for a document that is not a
+        // bundle, so `show`/`list`/`context`/`create --json` never differ on
+        // whether a caller has to branch on their absence.
+        "parts": doc.parts.iter().map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "path": p.path.to_string_lossy(),
+            })
+        }).collect::<Vec<_>>(),
+        "sidecars": doc.sidecars.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>(),
     });
     if let Some(pct) = computed_percent_complete(doc) {
         if let Some(obj) = value.as_object_mut() {
@@ -153,6 +163,8 @@ mod tests {
             assignee: None,
             attributes,
             id: "MILESTONE-1".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -173,6 +185,44 @@ mod tests {
         let json = doc_to_json(&meta);
         assert_eq!(json["id"], serde_json::json!("ISSUE-42"));
         assert!(!json["id"].is_null());
+    }
+
+    // RFC-074 AC6: a bundle document's parts/sidecars serialize as name/path
+    // objects and bare path strings respectively.
+    #[test]
+    fn doc_to_json_carries_parts_and_sidecars() {
+        use crate::engine::document::Part;
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+        meta.parts = vec![Part {
+            name: "design".to_string(),
+            path: PathBuf::from("docs/changes/CHANGE-1/design.md"),
+        }];
+        meta.sidecars = vec![PathBuf::from("docs/changes/CHANGE-1/index.yaml")];
+
+        let json = doc_to_json(&meta);
+
+        assert_eq!(
+            json["parts"],
+            serde_json::json!([{"name": "design", "path": "docs/changes/CHANGE-1/design.md"}])
+        );
+        assert_eq!(
+            json["sidecars"],
+            serde_json::json!(["docs/changes/CHANGE-1/index.yaml"])
+        );
+    }
+
+    // RFC-074 AC6: a non-bundle document still carries both keys as empty
+    // arrays, matching `governs`'s always-present-but-empty convention.
+    #[test]
+    fn doc_to_json_carries_empty_parts_and_sidecars_when_not_a_bundle() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+
+        let json = doc_to_json(&meta);
+
+        assert_eq!(json["parts"], serde_json::json!([]));
+        assert_eq!(json["sidecars"], serde_json::json!([]));
     }
 
     // STORY-265 AC5: a pinned document carries its globs and review anchor, in

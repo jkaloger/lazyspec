@@ -158,6 +158,8 @@ impl GitRefStore {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, body)?;
 

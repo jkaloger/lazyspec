@@ -4708,6 +4708,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         let meta_b = DocMeta {
             path: PathBuf::from("docs/rfcs/RFC-001-dup.md"),
@@ -4726,6 +4728,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         store.docs.insert(meta_a.path.clone(), meta_a);
@@ -5232,6 +5236,8 @@ mod tests {
                 virtual_doc: false,
                 assignee: None,
                 attributes: Default::default(),
+                parts: Vec::new(),
+                sidecars: Vec::new(),
             },
         );
     }
@@ -5635,6 +5641,8 @@ mod tests {
                     virtual_doc: false,
                     assignee: None,
                     attributes: Default::default(),
+                    parts: Vec::new(),
+                    sidecars: Vec::new(),
                 },
             );
             app.doc_tree[0].path = path.clone();
@@ -5689,6 +5697,8 @@ mod tests {
                 virtual_doc: false,
                 assignee: None,
                 attributes: Default::default(),
+                parts: Vec::new(),
+                sidecars: Vec::new(),
             },
         );
         app.doc_tree[0].path = path.clone();

@@ -377,7 +377,8 @@ impl DocumentStore for GitStore {
             type_def.subdirectory,
             Some(&clone_root),
             |_| {},
-        )?;
+        )?
+        .path;
         if !body.is_empty() {
             crate::engine::fs_ops::replace_body(&path, body)?;
         }

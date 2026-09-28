@@ -445,6 +445,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             flat_root,
             &flat_gh,
             &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+            false,
         )
         .unwrap(),
     )
@@ -460,6 +461,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             nested_root,
             &nested_gh,
             &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+            false,
         )
         .unwrap(),
     )

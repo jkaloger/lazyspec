@@ -6,8 +6,43 @@ use crate::engine::git_ref::GitRefOps;
 use crate::engine::ops::resolve::resolve_shorthand_or_path;
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::Path;
+
+/// `update <id> --part <name> --body|--body-file` (RFC-074 AC7): write a
+/// part's whole body, creating the part if the document has none by that
+/// name. Parts are a filesystem concept (a `.md` beside `index.md`), so this
+/// refuses any other backend by name rather than silently doing nothing.
+pub fn run_part(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    doc_id: &str,
+    part_name: &str,
+    body: &str,
+    git: &dyn GitRefOps,
+) -> Result<PushOutcome> {
+    let doc = resolve_shorthand_or_path(store, doc_id)?;
+    let type_def = config
+        .type_by_name(doc.doc_type.as_str())
+        .ok_or_else(|| anyhow!("document {} has unknown type '{}'", doc_id, doc.doc_type))?;
+    if type_def.store != StoreBackend::Filesystem {
+        bail!(
+            "'--part' is only supported for filesystem-backed documents; type '{}' uses store '{}'",
+            type_def.name,
+            type_def.store
+        );
+    }
+
+    fs_ops::write_part(root, store, doc_id, part_name, body)?;
+    crate::engine::git_store::commit_if_extends_backed(
+        root,
+        config,
+        type_def,
+        git,
+        &format!("update part {} of {}", part_name, doc.id),
+    )
+}
 
 /// Gate a `--status` change against the type's local lifecycle before it reaches
 /// the backend.
