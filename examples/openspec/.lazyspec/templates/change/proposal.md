@@ -13,8 +13,8 @@
 ### New Capabilities
 <!-- Capabilities being introduced. Use kebab-case for path segments you introduce
      (e.g., user-auth or identity/user-auth) that follow the project's existing
-     spec organization. Each gets a delta spec:
-     `lazyspec create delta <capability-path> --parent <this change's id>`. -->
+     spec organization. Each gets a delta spec: a frontmatter-less
+     `<capability-path>.md` in this change's folder, starting `# Spec Delta`. -->
 - `<capability-path>`: <brief description of what this capability covers>
 
 ### Modified Capabilities
@@ -27,3 +27,39 @@
 ## Impact
 
 <!-- Affected code, APIs, dependencies, systems -->
+
+<!--
+Delta spec format, one file per capability listed above:
+
+    # Spec Delta
+
+    ## Purpose
+    New capabilities only: one or two sentences on what the capability is for.
+    Delete this section for an existing capability.
+
+    ## ADDED Requirements
+
+    ### Requirement: <name>
+    The system SHALL ...
+
+    #### Scenario: <name>
+    - **WHEN** <condition>
+    - **THEN** <expected outcome>
+
+    ## MODIFIED Requirements
+    Copy the ENTIRE existing requirement block (`### Requirement:` through
+    every scenario) from the capability's spec, then edit it to the new
+    behaviour. The header text must match the existing one exactly.
+
+    ## REMOVED Requirements
+    ### Requirement: <name>
+    **Reason**: <why it is going>
+    **Migration**: <what replaces it>
+
+    ## RENAMED Requirements
+    - FROM: `### Requirement: <old name>`
+    - TO: `### Requirement: <new name>`
+
+Use only the sections that apply. Every requirement uses SHALL/MUST and has at
+least one `#### Scenario:` (exactly four hashes) with WHEN/THEN bullets.
+-->

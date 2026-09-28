@@ -10,9 +10,10 @@ use lazyspec::engine::store::Store;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// AC6's first consumer: `examples/openspec/` in this repository, a `change`
-/// type with a `change/{index,proposal,design,tasks}.md` directory template
-/// and a `delta` type created per affected capability with `create --parent`.
+/// AC6's first consumer: `examples/openspec/` in this repository, a `spec`
+/// type for capability specs and a `change` type with a
+/// `change/{index,proposal,design,tasks}.md` directory template. Delta specs
+/// are frontmatter-less parts added to a change's folder, not a type.
 fn openspec_pack() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/openspec")
 }
@@ -25,7 +26,7 @@ fn assert_pack_adopted(root: &Path) {
         .is_file());
     assert!(root.join(".lazyspec/templates/change/design.md").is_file());
     assert!(root.join(".lazyspec/templates/change/tasks.md").is_file());
-    assert!(root.join(".lazyspec/templates/delta.md").is_file());
+    assert!(root.join(".lazyspec/templates/spec.md").is_file());
 }
 
 // AC1: `init --template <dir>` copies that directory's `.lazyspec.toml` and
@@ -53,7 +54,7 @@ fn init_template_dir_copies_config_and_templates() {
         "adopting a pack must not set extends"
     );
     assert!(config.type_by_name("change").is_some());
-    assert!(config.type_by_name("delta").is_some());
+    assert!(config.type_by_name("spec").is_some());
 }
 
 // AC2: `init --template <url>` clones into `.lazyspec/cache/config/` (the
@@ -188,49 +189,36 @@ fn init_template_openspec_pack_then_create_change_yields_four_files() {
         "create change must scaffold exactly the four declared files"
     );
 
-    // AC6: `delta` is the pack's other first consumer -- `create delta ...
-    // --parent <change id>` lands the delta as a sibling file inside that
-    // same change folder, not in the flat `deltas/` directory a parent-less
-    // delta would use.
-    let change_id = json["id"].as_str().unwrap();
-    let store = Store::load(root, &config).unwrap();
-    let delta_output = lazyspec::cli::create::run_json_with_body(
-        root,
-        &config,
-        &store,
-        "delta",
-        "cap",
-        "agent",
-        Some(change_id),
-        None,
-        &GitCli,
-        |_| {},
+    // AC6: a delta spec is one more part of the change, as in OpenSpec -- a
+    // frontmatter-less `<capability>.md` dropped beside `index.md` loads as a
+    // part sharing the change's id, not as a document or a parse error.
+    std::fs::write(
+        change_dir.join("theme.md"),
+        "# Spec Delta\n\n## ADDED Requirements\n\n### Requirement: Theme selection\n",
     )
     .unwrap();
-    let delta_json: serde_json::Value = serde_json::from_str(&delta_output).unwrap();
-    let delta_path = root.join(delta_json["path"].as_str().unwrap());
-
-    assert_eq!(
-        delta_path.parent().unwrap(),
-        change_dir,
-        "create delta --parent <change id> must land the delta inside the change's own folder"
+    let store = Store::load(root, &config).unwrap();
+    assert!(
+        store.parse_errors().is_empty(),
+        "got: {:?}",
+        store.parse_errors()
     );
-
-    let mut files: Vec<String> = std::fs::read_dir(change_dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    files.sort();
+    let change = store
+        .resolve_shorthand(json["id"].as_str().unwrap())
+        .unwrap();
     assert_eq!(
-        files,
-        vec![
-            "DELTA-001-cap.md".to_string(),
-            "design.md".to_string(),
-            "index.md".to_string(),
-            "proposal.md".to_string(),
-            "tasks.md".to_string(),
-        ],
-        "the delta joins the change's four parts as a fifth file in the same folder"
+        change
+            .parts
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["design", "proposal", "tasks", "theme"],
+        "the delta spec joins the change's three template parts as a fourth part"
+    );
+    assert_eq!(
+        store.all_docs().len(),
+        1,
+        "the delta spec must not become a document"
     );
 }
 

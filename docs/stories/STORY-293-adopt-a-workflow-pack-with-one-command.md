@@ -21,7 +21,7 @@ As someone standing up a lazyspec project, I run `init --template <path-or-url>`
 - AC3: Existing `.lazyspec.toml` → refuse with an error naming `--force`. `--force` overwrites.
 - AC4: `--template starter` keeps working as a built-in name. `extends` is untouched; `--template` never sets `extends` or moves document storage. Passing `--template` skips the wizard, as `starter` does today.
 - AC5: README documents pack layout (`.lazyspec.toml`, `.lazyspec/templates/`, `README.md`, optional plugin manifest for skills) and `init --template`.
-- AC6: An `openspec` pack repo exists as first consumer: a `change` type with `change/{index,proposal,design,tasks}.md` directory template and a `delta` type for `create --parent`. `init --template <that url>` followed by `create change "x"` yields the four files.
+- AC6: An `openspec` pack repo exists as first consumer: a `spec` type for capability specs and a `change` type with a `change/{index,proposal,design,tasks}.md` directory template. Delta specs are frontmatter-less parts added to a change's folder, as in OpenSpec, not a type of their own. `init --template <that url>` followed by `create change "x"` yields the four files.
 
 ## Out of scope
 

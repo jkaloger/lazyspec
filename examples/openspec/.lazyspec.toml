@@ -22,6 +22,11 @@ lifecycle = { states = ["active"], edges = [] }
 # `openspec/changes/<name>/` layout, scaffolded by one `create change` call
 # (RFC-074). `subdirectory = true` is required alongside a directory template;
 # the loader refuses the pack otherwise.
+#
+# Delta specs (OpenSpec's `specs/<capability>/spec.md` per affected capability)
+# are further parts of the change, not documents of their own: drop a
+# frontmatter-less `<capability>.md` into the change's folder and it shares the
+# change's id, status and archive. See the pack README for the format.
 [[types]]
 name = "change"
 plural = "changes"
@@ -29,44 +34,8 @@ dir = "openspec/changes"
 prefix = "CHANGE"
 icon = "◇"
 subdirectory = true
-intent = "A proposed change to the project: why it's needed, what changes, which capabilities it touches, the design behind it, and the tasks that implement it. Lives as a folder of parts so each concern (proposal/design/tasks) can be read, reviewed and updated on its own."
+intent = "A proposed change to the project: why it's needed, what changes, which capabilities it touches, the design behind it, the tasks that implement it, and one delta spec per affected capability. Lives as a folder of parts so each concern can be read, reviewed and updated on its own."
 lifecycle = { states = ["draft", "approved", "archived"], edges = [
   { from = "draft", to = "approved" },
   { from = "approved", to = "archived" },
 ] }
-
-# A delta spec is OpenSpec's `changes/<name>/specs/<capability>/spec.md`: the
-# requirement-level diff for one capability a change affects. `create delta
-# <capability> --parent <CHANGE-id>` lands it as a sibling file inside that
-# change's own folder (RFC-074 rules out deeper nesting, so it sits beside
-# proposal.md rather than under specs/). One delta per affected capability.
-[[types]]
-name = "delta"
-plural = "deltas"
-dir = "openspec/changes"
-prefix = "DELTA"
-icon = "Δ"
-intent = "The requirement-level diff for one capability a change affects: ADDED, MODIFIED, REMOVED and RENAMED Requirements, each with its Scenarios. Created per capability named in the change's proposal with `create delta <capability> --parent <change-id>`; link it back with `implements: <change-id>` so `validate` stops flagging it as orphaned."
-lifecycle = { states = ["draft", "approved"], edges = [
-  { from = "draft", to = "approved" },
-] }
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-traversal = "chain"
-
-[[relationships]]
-name = "related-to"
-
-# Soft nudge, not a hard requirement: a delta with no `implements` link back to
-# its change is still valid (it already lives inside the change's own folder),
-# but `validate` warns so a delta doesn't go untracked in `context` walks and
-# reports.
-[[edges]]
-name = "deltas-need-changes"
-from = "delta"
-to = "change"
-via = "implements"
-required = "warning"
-traversal = "chain"
