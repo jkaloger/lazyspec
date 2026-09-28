@@ -39,3 +39,6 @@ lifecycle = { states = ["draft", "approved", "archived"], edges = [
   { from = "draft", to = "approved" },
   { from = "approved", to = "archived" },
 ] }
+
+[[relationships]]
+name = "related-to"

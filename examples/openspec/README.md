@@ -6,7 +6,7 @@ A lazyspec workflow pack matching [OpenSpec](https://github.com/Fission-AI/OpenS
 
 | Path | Role |
 | --- | --- |
-| `.lazyspec.toml` | The pack's config: two types, `spec` and `change`. No relationships or edges. |
+| `.lazyspec.toml` | The pack's config: two types, `spec` and `change`, and the `related-to` relationship the loader requires. No edges. |
 | `.lazyspec/templates/spec.md` | The flat template for a capability `spec`: `# <capability> Specification`, `## Purpose`, `## Requirements`. |
 | `.lazyspec/templates/change/` | A directory template. `index.md` is the change document itself; `proposal.md`, `design.md` and `tasks.md` are its parts. |
 | `README.md` | This file. |
