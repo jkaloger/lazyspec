@@ -4,35 +4,49 @@ pattern = "{type}-{n:03}-{title}.md"
 [templates]
 dir = ".lazyspec/templates"
 
-# A change is a folder: index.md (the proposal's header, this document's own
-# frontmatter) plus proposal.md, design.md and tasks.md as parts -- one
-# `create change` call scaffolds all four (RFC-074). `subdirectory = true` is
-# required alongside a directory template; the loader refuses the pack
-# otherwise.
+# OpenSpec's source of truth: one spec per capability under `openspec/specs/`,
+# holding its Purpose and its current Requirements. In OpenSpec these are
+# written by `archive`, which folds a change's delta specs into them; here they
+# are created directly with `create spec <capability>`.
+[[types]]
+name = "spec"
+plural = "specs"
+dir = "openspec/specs"
+prefix = "SPEC"
+icon = "▣"
+intent = "The current, agreed behaviour of one capability: its Purpose and every Requirement with at least one Scenario. A spec is a behaviour contract, not an implementation plan -- if the implementation can change without changing externally visible behaviour, it does not belong here."
+lifecycle = { states = ["active"], edges = [] }
+
+# A change is a folder: index.md (this document's own frontmatter and summary)
+# plus proposal.md, design.md and tasks.md as parts -- OpenSpec's
+# `openspec/changes/<name>/` layout, scaffolded by one `create change` call
+# (RFC-074). `subdirectory = true` is required alongside a directory template;
+# the loader refuses the pack otherwise.
 [[types]]
 name = "change"
 plural = "changes"
-dir = "changes"
+dir = "openspec/changes"
 prefix = "CHANGE"
 icon = "◇"
 subdirectory = true
-intent = "A proposed change to the project: why it's needed, what it changes, the design behind it, and the tasks that implement it. Lives as a folder of parts rather than one file so each concern (proposal/design/tasks) can be read, reviewed and updated on its own."
+intent = "A proposed change to the project: why it's needed, what changes, which capabilities it touches, the design behind it, and the tasks that implement it. Lives as a folder of parts so each concern (proposal/design/tasks) can be read, reviewed and updated on its own."
 lifecycle = { states = ["draft", "approved", "archived"], edges = [
   { from = "draft", to = "approved" },
   { from = "approved", to = "archived" },
 ] }
 
-# A delta is an ad hoc child of one change: `create delta <title> --parent
-# <CHANGE-id>` lands it as a sibling file inside that change's own folder
-# (RFC-074 motivation #1), one delta per affected capability. It carries no
-# directory template of its own -- it is a single file, not a bundle.
+# A delta spec is OpenSpec's `changes/<name>/specs/<capability>/spec.md`: the
+# requirement-level diff for one capability a change affects. `create delta
+# <capability> --parent <CHANGE-id>` lands it as a sibling file inside that
+# change's own folder (RFC-074 rules out deeper nesting, so it sits beside
+# proposal.md rather than under specs/). One delta per affected capability.
 [[types]]
 name = "delta"
 plural = "deltas"
-dir = "deltas"
+dir = "openspec/changes"
 prefix = "DELTA"
 icon = "Δ"
-intent = "The detailed spec diff for one capability a change affects: what a capability gains, loses or has altered. Created per affected capability with `create delta <title> --parent <change-id>`; link it back with `implements: <change-id>` so `validate` stops flagging it as orphaned."
+intent = "The requirement-level diff for one capability a change affects: ADDED, MODIFIED, REMOVED and RENAMED Requirements, each with its Scenarios. Created per capability named in the change's proposal with `create delta <capability> --parent <change-id>`; link it back with `implements: <change-id>` so `validate` stops flagging it as orphaned."
 lifecycle = { states = ["draft", "approved"], edges = [
   { from = "draft", to = "approved" },
 ] }
