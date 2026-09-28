@@ -335,6 +335,9 @@ pub enum Commands {
     },
     /// Validate all documents
     Validate {
+        /// Scope findings to a single document (path or shorthand ID, e.g. STORY-292)
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        id: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,

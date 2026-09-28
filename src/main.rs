@@ -692,9 +692,10 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Validate { json, warnings }) => {
+        Some(Commands::Validate { id, json, warnings }) => {
             let store = load_store(&cwd, &config)?;
-            let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);
+            let exit_code =
+                lazyspec::cli::validate::run_full(&store, &config, id.as_deref(), json, warnings)?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }

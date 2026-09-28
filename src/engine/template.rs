@@ -76,6 +76,30 @@ pub fn directory_template_part_order(templates_dir: &Path, type_name: &str) -> V
     names
 }
 
+/// Every non-`index.md` file a directory template declares, as verbatim
+/// filenames rather than stems: declared parts (`.md`) and declared sidecars
+/// (anything else) together, sorted. What `validate`'s `missing-part` rule
+/// (RFC-074 AC1, src/engine/validation.rs) checks a document's folder
+/// against -- unlike [`directory_template_part_order`], which is restricted
+/// to `.md` stems for ordering a bundle's parts. Empty when the type's
+/// template is not a directory (or the directory cannot be read), same as
+/// [`directory_template_part_order`].
+pub fn directory_template_declared_files(templates_dir: &Path, type_name: &str) -> Vec<String> {
+    let dir_template = templates_dir.join(type_name);
+    let Ok(entries) = fs::read_dir(&dir_template) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(str::to_string))
+        .filter(|n| n != "index.md")
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn render_template(template_content: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template_content.to_string();
     for (key, value) in vars {
@@ -473,5 +497,30 @@ mod tests {
         let order = directory_template_part_order(dir.path(), "change");
 
         assert!(order.is_empty());
+    }
+
+    // RFC-074 AC1: declared files are parts and sidecars together, as full
+    // filenames, sorted, excluding index.md.
+    #[test]
+    fn directory_template_declared_files_includes_parts_and_sidecars() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        for name in ["index.md", "tasks.md", "design.md", "notes.yaml"] {
+            fs::write(dir.path().join("change").join(name), "x").unwrap();
+        }
+
+        let declared = directory_template_declared_files(dir.path(), "change");
+
+        assert_eq!(declared, vec!["design.md", "notes.yaml", "tasks.md"]);
+    }
+
+    // No directory template at all -> no declared files, not an error.
+    #[test]
+    fn directory_template_declared_files_is_empty_when_no_directory_template() {
+        let dir = TempDir::new().unwrap();
+
+        let declared = directory_template_declared_files(dir.path(), "change");
+
+        assert!(declared.is_empty());
     }
 }

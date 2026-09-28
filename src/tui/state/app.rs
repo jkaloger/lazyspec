@@ -4761,6 +4761,47 @@ mod tests {
         assert_eq!(app.validation_errors, messages);
     }
 
+    // RFC-074 AC5: the TUI warnings panel is the generic `validation_warnings`
+    // list `fold_validation` already builds off `validate_without_stale`, so a
+    // bundle missing a declared part surfaces there with no TUI-specific code.
+    #[test]
+    fn refresh_validation_lists_a_missing_part_warning_for_an_incomplete_bundle() {
+        use crate::engine::config::{Config, StoreBackend, TypeDef};
+        use crate::engine::store::test_support::store_from_with_config;
+
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        });
+
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (
+                    "docs/change/CHANGE-001-alpha/index.md",
+                    "---\ntitle: \"Alpha\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n",
+                ),
+                // design.md is declared but absent.
+            ],
+            &config,
+        );
+
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.refresh_validation(&config);
+
+        assert!(
+            app.validation_warnings
+                .iter()
+                .any(|w| w.contains("design.md")
+                    && w.contains("docs/change/CHANGE-001-alpha/index.md")),
+            "expected a missing-part warning, got: {:?}",
+            app.validation_warnings
+        );
+    }
+
     /// A rotted document, banded by its own date under the default `age` driver,
     /// so no git is in play.
     fn store_with_a_rotted_document(

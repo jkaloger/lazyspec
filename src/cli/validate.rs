@@ -1,9 +1,11 @@
+use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
 use crate::engine::store::Store;
-use crate::engine::validation::ValidationResult;
+use crate::engine::validation::{ValidationIssue, ValidationResult};
 use console::{colors_enabled, Style};
+use std::path::Path;
 
 fn success_message() -> String {
     if colors_enabled() {
@@ -34,8 +36,26 @@ pub fn gh_auth_warnings(gh: &dyn GhAuth) -> Vec<String> {
     }
 }
 
-pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i32 {
-    let result = store.validate_full(config);
+/// `validate --id <id>` (RFC-074 AC2): every finding `validate` would raise
+/// over the whole store, scoped down to the one document `id` resolves to.
+/// A rule with nothing to say about a single document (a type-level finding
+/// like `singleton-violation`, or `governs-unowned`, about a source file
+/// rather than a document) drops out rather than firing on every id; a rule
+/// whose finding names several documents (`duplicate-id`) survives when the
+/// target is any one of them.
+pub fn run_full(
+    store: &Store,
+    config: &Config,
+    id: Option<&str>,
+    json: bool,
+    warnings: bool,
+) -> anyhow::Result<i32> {
+    let scope = id.map(|id| resolve_scope_path(store, id)).transpose()?;
+
+    let mut result = store.validate_full(config);
+    if let Some(target) = &scope {
+        scope_to_path(&mut result, target);
+    }
 
     let gh_warnings = if config.documents.has_github_issues_types() {
         let gh = GhCli::new();
@@ -56,7 +76,41 @@ pub fn run_full(store: &Store, config: &Config, json: bool, warnings: bool) -> i
         }
     }
 
-    exit_code(store, &result)
+    Ok(exit_code(store, &result))
+}
+
+/// The path `--id` names, from a shorthand ID or a literal path. Mirrors
+/// `show`'s own resolution (`src/cli/show.rs`): an ambiguous prefix is a hard
+/// error here, since (unlike `show`) there is no reasonable output to fall
+/// back to for the scoping half of the command.
+fn resolve_scope_path(store: &Store, id: &str) -> anyhow::Result<std::path::PathBuf> {
+    resolve_shorthand_or_path(store, id)
+        .map(|doc| doc.path.clone())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Whether `issue`'s rendered finding names `target` at all: its `path`
+/// field equals it, or its `paths` field contains it. Read off the same
+/// JSON [`ValidationIssue::to_json`] emits, rather than a match over every
+/// variant, so a rule added later is scoped by `--id` with no change here.
+fn issue_names_path(issue: &ValidationIssue, target: &str) -> bool {
+    let json = issue.to_json();
+    if json.get("path").and_then(|v| v.as_str()) == Some(target) {
+        return true;
+    }
+    json.get("paths")
+        .and_then(|v| v.as_array())
+        .is_some_and(|paths| paths.iter().any(|p| p.as_str() == Some(target)))
+}
+
+fn scope_to_path(result: &mut ValidationResult, target: &Path) {
+    let target = target.display().to_string();
+    result
+        .errors
+        .retain(|issue| issue_names_path(issue, &target));
+    result
+        .warnings
+        .retain(|issue| issue_names_path(issue, &target));
 }
 
 /// The process exit code a validated store yields: anything that made it into
@@ -372,5 +426,114 @@ mod tests {
             unowned[0]["message"],
             "src/cli/show.rs is in [governs] scope but no document governs it"
         );
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn story_path() -> PathBuf {
+        PathBuf::from("docs/stories/STORY-001-a.md")
+    }
+
+    fn other_path() -> PathBuf {
+        PathBuf::from("docs/stories/STORY-002-b.md")
+    }
+
+    // AC2: `--id` resolves a shorthand ID to the document's own path, the
+    // same resolution `show` uses.
+    #[test]
+    fn resolve_scope_path_resolves_a_shorthand_id() {
+        let tmp = crate::engine::store::test_support::write_docs(&[(
+            "docs/stories/STORY-001-a.md",
+            "---\ntitle: \"A\"\ntype: story\nstatus: draft\nauthor: t\ndate: 2026-09-01\ntags: []\nrelated: []\n---\n\nbody\n",
+        )]);
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        let path = resolve_scope_path(&store, "STORY-001").unwrap();
+
+        assert_eq!(path, story_path());
+    }
+
+    #[test]
+    fn resolve_scope_path_errors_on_an_unknown_id() {
+        let tmp = crate::engine::store::test_support::write_docs(&[]);
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        let err = resolve_scope_path(&store, "STORY-999").unwrap_err();
+
+        assert!(err.to_string().contains("STORY-999"), "got: {err}");
+    }
+
+    // AC2: a finding whose `path` names the target document is scoped in.
+    #[test]
+    fn issue_names_path_matches_a_path_field() {
+        let issue = ValidationIssue::InvalidAcSlug {
+            path: story_path(),
+            slug: "Bad Slug".to_string(),
+            reason: "empty AC slug".to_string(),
+        };
+
+        assert!(issue_names_path(&issue, "docs/stories/STORY-001-a.md"));
+        assert!(!issue_names_path(&issue, "docs/stories/STORY-002-b.md"));
+    }
+
+    // AC2: `duplicate-id` names several documents; the target matching any
+    // one of them scopes the finding in.
+    #[test]
+    fn issue_names_path_matches_any_entry_in_a_paths_field() {
+        let issue = ValidationIssue::DuplicateId {
+            id: "STORY-001".to_string(),
+            paths: vec![story_path(), other_path()],
+        };
+
+        assert!(issue_names_path(&issue, "docs/stories/STORY-002-b.md"));
+        assert!(!issue_names_path(&issue, "docs/stories/STORY-003-c.md"));
+    }
+
+    // A finding with no document at all (`governs-unowned` names a source
+    // file, not a document) never matches any `--id`.
+    #[test]
+    fn issue_names_path_never_matches_a_finding_naming_no_document() {
+        let issue = ValidationIssue::GovernsUnowned {
+            file: PathBuf::from("src/engine/orphan.rs"),
+        };
+
+        assert!(!issue_names_path(&issue, "src/engine/orphan.rs"));
+    }
+
+    // AC2: scoping a `ValidationResult` drops every finding that does not
+    // name the target, from both `errors` and `warnings`.
+    #[test]
+    fn scope_to_path_keeps_only_findings_naming_the_target() {
+        let mut result = ValidationResult {
+            errors: vec![ValidationIssue::DuplicateId {
+                id: "STORY-001".to_string(),
+                paths: vec![story_path(), other_path()],
+            }],
+            warnings: vec![
+                ValidationIssue::InvalidAcSlug {
+                    path: story_path(),
+                    slug: "Bad Slug".to_string(),
+                    reason: "empty AC slug".to_string(),
+                },
+                ValidationIssue::InvalidAcSlug {
+                    path: other_path(),
+                    slug: "Other Slug".to_string(),
+                    reason: "empty AC slug".to_string(),
+                },
+            ],
+        };
+
+        scope_to_path(&mut result, &story_path());
+
+        assert_eq!(result.errors.len(), 1, "got {:?}", result.errors);
+        assert_eq!(result.warnings.len(), 1, "got {:?}", result.warnings);
+        assert!(matches!(
+            &result.warnings[0],
+            ValidationIssue::InvalidAcSlug { path, .. } if path == &story_path()
+        ));
     }
 }

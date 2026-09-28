@@ -159,6 +159,18 @@ pub enum ValidationIssue {
         path: PathBuf,
         staleness: Staleness,
     },
+    /// A file a document's type directory template declares (other than
+    /// `index.md`) that the document's own folder lacks (RFC-074 AC1): a
+    /// part or a sidecar the bundle is missing. `part` is the declared file's
+    /// name, e.g. `"design.md"` or `"notes.yaml"`. Always a warning (AC3);
+    /// there is no per-part severity to read instead. Fires for a document
+    /// whose type's template only later became a directory just as it does
+    /// for one scaffolded against today's template -- there is no migration
+    /// step and nothing to ignore (AC4).
+    MissingPart {
+        path: PathBuf,
+        part: String,
+    },
 }
 
 impl ValidationIssue {
@@ -194,6 +206,7 @@ impl ValidationIssue {
             ValidationIssue::GovernsNoMatch { .. } => "governs-no-match",
             ValidationIssue::GovernsUnowned { .. } => "governs-unowned",
             ValidationIssue::Stale { .. } => "stale",
+            ValidationIssue::MissingPart { .. } => "missing-part",
         }
     }
 
@@ -497,6 +510,14 @@ impl std::fmt::Display for ValidationIssue {
             }
             ValidationIssue::Stale { path, staleness } => {
                 write!(f, "{} is {}", path.display(), staleness)
+            }
+            ValidationIssue::MissingPart { path, part } => {
+                write!(
+                    f,
+                    "{} is missing declared part \"{}\"",
+                    path.display(),
+                    part
+                )
             }
         }
     }
@@ -1429,6 +1450,78 @@ fn declared_lifecycle_cannot_be_the_boards(
         .is_some_and(|board| board.states != type_def.lifecycle.states)
 }
 
+/// `missing-part` (RFC-074 AC1): every document of a type whose template is a
+/// directory, checked against every file that directory declares other than
+/// `index.md`. A declared part or sidecar absent from the document's own
+/// folder is a warning; nothing about the check depends on when the document
+/// was created (AC4) or on the document's own frontmatter -- `parts` and
+/// `sidecars` are exactly what the loader already scanned its folder into.
+///
+/// A misconfigured directory template (no `index.md`, `subdirectory = false`)
+/// is [`resolve_template_kind`]'s error to raise, on `create` and `config
+/// --json`; this rule reads it as "not a directory template" and finds
+/// nothing for that type, rather than surfacing the config error a second
+/// time here.
+pub struct MissingPartRule;
+
+impl Checker for MissingPartRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+        let templates_dir = config
+            .docs_root(store.root())
+            .join(&config.filesystem.templates.dir);
+
+        for type_def in &config.documents.types {
+            let Ok(super::template::TemplateKind::Directory) =
+                super::template::resolve_template_kind(&templates_dir, type_def)
+            else {
+                continue;
+            };
+
+            let declared =
+                super::template::directory_template_declared_files(&templates_dir, &type_def.name);
+            if declared.is_empty() {
+                continue;
+            }
+
+            let mut docs = store.list(&super::store::Filter {
+                doc_type: Some(DocType::new(&type_def.name)),
+                ..Default::default()
+            });
+            docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+            for doc in docs {
+                if doc.validate_ignore {
+                    continue;
+                }
+                for file_name in &declared {
+                    let present = match file_name.strip_suffix(".md") {
+                        Some(stem) => doc.parts.iter().any(|p| p.name == stem),
+                        None => doc.sidecars.iter().any(|s| {
+                            s.file_name().and_then(|f| f.to_str()) == Some(file_name.as_str())
+                        }),
+                    };
+                    if !present {
+                        issues.push((
+                            Severity::Warning,
+                            ValidationIssue::MissingPart {
+                                path: doc.path.clone(),
+                                part: file_name.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 pub struct UnknownRelationshipRule;
 
 impl Checker for UnknownRelationshipRule {
@@ -1665,6 +1758,7 @@ fn checkers_without_stale() -> Vec<Box<dyn Checker>> {
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
+        Box::new(MissingPartRule),
     ]
 }
 
@@ -3635,6 +3729,154 @@ mod governs_unowned_tests {
 }
 
 #[cfg(test)]
+mod missing_part_tests {
+    use super::*;
+    use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::store::test_support::store_from_with_config;
+
+    /// A `change` type whose template is a directory declaring `design.md`
+    /// (a part) and `notes.yaml` (a sidecar) beside `index.md`.
+    fn config_with_directory_template_type() -> Config {
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        });
+        config
+    }
+
+    fn change_bundle(title: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\n{title} body\n"
+        )
+    }
+
+    fn missing_part_findings(
+        store: &super::super::store::Store,
+        config: &Config,
+    ) -> Vec<(String, String)> {
+        MissingPartRule
+            .check(store, config)
+            .into_iter()
+            .map(|(severity, issue)| {
+                assert_eq!(severity, Severity::Warning, "got {issue:?}");
+                match issue {
+                    ValidationIssue::MissingPart { path, part } => {
+                        (path.display().to_string(), part)
+                    }
+                    other => panic!("unexpected finding {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    // AC1: a declared part (`design.md`) or sidecar (`notes.yaml`) absent
+    // from the document's own folder is a warning naming the file.
+    #[test]
+    fn a_declared_part_or_sidecar_missing_from_the_folder_is_reported() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-001-alpha/index.md",
+                    &change_bundle("Alpha"),
+                ),
+                ("docs/change/CHANGE-001-alpha/design.md", "design body"),
+                // notes.yaml is declared but absent.
+            ],
+            &config,
+        );
+
+        let findings = missing_part_findings(&store, &config);
+
+        assert_eq!(
+            findings,
+            vec![(
+                "docs/change/CHANGE-001-alpha/index.md".to_string(),
+                "notes.yaml".to_string()
+            )]
+        );
+    }
+
+    // AC3: a bundle carrying every declared part and sidecar, plus an extra
+    // undeclared part, produces no finding at all.
+    #[test]
+    fn a_complete_bundle_with_an_extra_part_produces_no_finding() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-002-beta/index.md",
+                    &change_bundle("Beta"),
+                ),
+                ("docs/change/CHANGE-002-beta/design.md", "design body"),
+                ("docs/change/CHANGE-002-beta/notes.yaml", "note: 2"),
+                ("docs/change/CHANGE-002-beta/extra.md", "extra body"),
+            ],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
+    }
+
+    // AC4: a document predating the type's directory template -- a flat
+    // `.md` file with no folder at all -- is checked against every declared
+    // file just the same, with no migration and nothing to ignore.
+    #[test]
+    fn a_flat_document_predating_the_directory_template_is_reported_for_every_declared_file() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                ("docs/change/CHANGE-003-old.md", &change_bundle("Old")),
+            ],
+            &config,
+        );
+
+        let mut findings = missing_part_findings(&store, &config);
+        findings.sort();
+
+        assert_eq!(
+            findings,
+            vec![
+                (
+                    "docs/change/CHANGE-003-old.md".to_string(),
+                    "design.md".to_string()
+                ),
+                (
+                    "docs/change/CHANGE-003-old.md".to_string(),
+                    "notes.yaml".to_string()
+                ),
+            ]
+        );
+    }
+
+    // AC3: a type with no directory template (a flat-file template) never
+    // produces a finding, however incomplete its documents look.
+    #[test]
+    fn a_flat_file_template_type_never_produces_a_finding() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[(
+                "docs/rfcs/RFC-001-plain.md",
+                "---\ntitle: \"Plain\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n",
+            )],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod stale_tests {
     use super::*;
     use crate::engine::config::{StalenessConfig, StalenessDriver, StalenessFinding};
@@ -3997,6 +4239,10 @@ mod finding_shape_tests {
                         deletions: 85,
                     },
                 },
+            },
+            ValidationIssue::MissingPart {
+                path: path(),
+                part: "design.md".to_string(),
             },
         ]
     }
