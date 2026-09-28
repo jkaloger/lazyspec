@@ -114,6 +114,13 @@ pub fn tag_color(tag: &str) -> Color {
     hash_palette_color(tag)
 }
 
+/// A bundle part row's style (RFC-074/STORY-294 AC2): dimmed grey, matching
+/// the tree connector colour, since a part carries no status of its own to
+/// colour by. Not user-configurable, like [`band_color`].
+pub fn bundle_part_row_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
 /// The staleness band's colour (RFC-069). Not user-configurable: three fixed
 /// values whose whole point is that they read the same everywhere.
 pub fn band_color(band: crate::engine::staleness::Band) -> Color {
@@ -142,6 +149,16 @@ pub fn frame_style(colour: crate::spinners::FrameColour) -> Style {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // STORY-294 AC2: a named, non-configurable style, not a hardcoded value
+    // in the view module (DICTUM-007).
+    #[test]
+    fn bundle_part_row_style_is_dimmed() {
+        assert_eq!(
+            bundle_part_row_style(),
+            Style::default().fg(Color::DarkGray)
+        );
+    }
 
     #[test]
     fn frame_style_maps_colours() {

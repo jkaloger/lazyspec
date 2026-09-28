@@ -621,11 +621,16 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         // absolute path as the cache/store key.
                         let key = path.strip_prefix(root).unwrap_or(path);
                         let _ = app.store.reload_file(root, key, &*app.fs);
-                        // A part or sidecar has no cache entry of its own
-                        // (STORY-291 AC6/AC8 fold it into the index's cached
-                        // body); invalidate whichever path actually holds it.
+                        // The concatenated preview lives under the index's own
+                        // path (STORY-291 AC6/AC8); a part's own path also
+                        // caches its standalone preview now that a part row
+                        // can be selected on its own (STORY-294 AC3) -- both
+                        // need invalidating on a change to either file.
                         let cache_key = app.store.bundle_root(key);
                         app.invalidate_expansion(&cache_key);
+                        if cache_key != key {
+                            app.invalidate_expansion(key);
+                        }
                     } else {
                         has_non_md = true;
                         // The root `.lazyspec.toml` (or the extended project's,
@@ -1183,6 +1188,12 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
                 let cache_key = app.store.bundle_root(relative);
                 app.invalidate_expansion(&cache_key);
+                // STORY-294 AC3/AC4: `e` on a part row edits the part's own
+                // file, which caches its own preview -- invalidate that too,
+                // not just the parent's concatenated one.
+                if cache_key != relative {
+                    app.invalidate_expansion(relative);
+                }
                 if let Some(ref shared_store) = shared_gh_store {
                     let push_root = root.clone();
                     let push_relative = relative.to_path_buf();
@@ -1806,6 +1817,110 @@ mod tests {
         assert!(design_heading < design_body);
         assert!(design_body < tasks_heading);
         assert!(tasks_heading < tasks_body);
+    }
+
+    // STORY-294 AC3: a selected `Part` row expands to that part's own body
+    // alone -- concatenation with the index and other parts stays reserved
+    // for the parent `Doc` row (the test above).
+    #[test]
+    fn request_expansion_on_a_part_row_expands_only_that_parts_body() {
+        use crate::tui::state::DocRowKind;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        std::fs::write(dir.join("tasks.md"), "Tasks content.\n").unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let design_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::Part { name, .. } if name == "design"))
+            .expect("the design part row");
+        app.selected_doc = design_idx;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.request_expansion(&tx);
+
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expansion worker must send a result");
+        let AppEvent::ExpansionResult { path, body, .. } = event else {
+            panic!("expected ExpansionResult");
+        };
+
+        assert_eq!(path, app.doc_tree[design_idx].path);
+        assert_eq!(body.trim(), "Design content.");
+        assert!(
+            !body.contains("Parent body."),
+            "must not include the index body: {body:?}"
+        );
+        assert!(
+            !body.contains("Tasks content."),
+            "must not include another part: {body:?}"
+        );
+    }
+
+    // STORY-294 AC5: a `MissingPart` ghost row has nothing to read -- request
+    // must not dispatch a worker for it.
+    #[test]
+    fn request_expansion_on_a_missing_part_row_dispatches_nothing() {
+        use crate::engine::config::StoreBackend;
+        use crate::tui::state::DocRowKind;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(root.join(".lazyspec/templates/type0")).unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/index.md"), "index").unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/arch.md"), "arch").unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/design.md"), "design").unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        // arch.md is declared but absent.
+
+        let mut config = Config::default();
+        config.documents.types = vec![{
+            let mut t = TypeDef::test_fixture("type0", StoreBackend::Filesystem);
+            t.subdirectory = true;
+            t
+        }];
+
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let missing_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::MissingPart { name, .. } if name == "arch"))
+            .expect("the missing arch ghost row");
+        app.selected_doc = missing_idx;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.request_expansion(&tx);
+
+        assert!(
+            app.expansion_in_flight.is_none(),
+            "a missing part row has nothing to expand"
+        );
     }
 
     // AC6 negative: an md-only FileChange must NOT request a reload, otherwise

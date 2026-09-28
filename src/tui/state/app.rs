@@ -496,8 +496,35 @@ pub(crate) fn flat_to_anchor(flat: usize, nt: usize, ntags: usize) -> GraphAncho
     }
 }
 
+/// What a `DocListNode` row is (STORY-294): the document itself, or a
+/// depth-1 row for one of its RFC-074 bundle parts. Kept as an enum rather
+/// than an `is_part: bool` + optional fields so a doc-row consumer (the
+/// existing table renderer, `selected_doc_meta`) cannot forget to check it --
+/// matching is exhaustive at every call site that cares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRowKind {
+    Doc,
+    /// A part the document's folder has (RFC-074 `Part`), rendered `§ <name>`.
+    Part {
+        parent: PathBuf,
+        name: String,
+    },
+    /// A part the type's directory template declares that the folder lacks
+    /// (AC5 ghost row), rendered `§ <name> (missing)`.
+    MissingPart {
+        parent: PathBuf,
+        name: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct DocListNode {
+    /// The row's own file path: the document's path for `Doc`, the part's
+    /// file path for `Part`, and a synthetic (non-existent) path for
+    /// `MissingPart` -- stable and unique for row identity, but never read
+    /// from disk. Use [`DocListNode::doc_path`] to resolve to the document
+    /// this row belongs to, for anything keyed off "the selected document"
+    /// (status, relations, delete, etc.) rather than the row itself.
     pub path: PathBuf,
     pub id: String,
     pub title: String,
@@ -507,6 +534,21 @@ pub struct DocListNode {
     pub is_parent: bool,
     pub is_virtual: bool,
     pub has_duplicate_id: bool,
+    pub kind: DocRowKind,
+}
+
+impl DocListNode {
+    /// The path of the document this row belongs to: `path` itself for a
+    /// `Doc` row, the parent's path for a `Part`/`MissingPart` row. What
+    /// `selected_doc_meta` and every action keyed off "the selected
+    /// document" (delete, status, relations, `open`) resolve through, so a
+    /// part row selected acts on its parent (STORY-294).
+    pub fn doc_path(&self) -> &Path {
+        match &self.kind {
+            DocRowKind::Doc => &self.path,
+            DocRowKind::Part { parent, .. } | DocRowKind::MissingPart { parent, .. } => parent,
+        }
+    }
 }
 
 /// The relation tab's three sections, derived from one engine `resolve_chain`:
@@ -692,6 +734,12 @@ pub struct App {
     pub available_statuses: Vec<String>,
     pub type_icons: HashMap<String, String>,
     pub type_plurals: HashMap<String, String>,
+    /// Declared part stems in template order, per type whose template is a
+    /// directory (RFC-074), keyed by type name. Refreshed in `apply_config`
+    /// from the real config -- never from `settings_buffer`, which can hold
+    /// unsaved edits -- so `build_doc_tree`'s bundle rows (STORY-294) always
+    /// reflect what is on disk, not a pending settings edit.
+    pub bundle_part_order: HashMap<String, Vec<String>>,
     pub expanded_parents: HashSet<PathBuf>,
     pub wrap_mode: bool,
     pub doc_tree: Vec<DocListNode>,
@@ -876,6 +924,7 @@ impl App {
             available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
+            bundle_part_order: HashMap::new(),
             expanded_parents: HashSet::new(),
             wrap_mode: false,
             doc_tree: Vec::new(),
@@ -979,6 +1028,33 @@ impl App {
         self.status_bar_enabled = config.ui.statusbar.enabled;
         self.ascii_diagrams = config.ui.ascii_diagrams;
         self.rel_types = config.relationship_keywords();
+
+        // RFC-074/STORY-294: declared part order per directory-templated type,
+        // read off disk once here rather than per `build_doc_tree` call. Only
+        // types whose template actually resolves to a directory qualify --
+        // same gate `MissingPartRule` uses -- so a misconfigured directory
+        // template (no `index.md`, `subdirectory = false`) shows no ghost rows
+        // instead of a second, TUI-only copy of that config error.
+        let templates_dir = config
+            .docs_root(self.store.root())
+            .join(&config.filesystem.templates.dir);
+        self.bundle_part_order = config
+            .documents
+            .types
+            .iter()
+            .filter(|t| {
+                matches!(
+                    crate::engine::template::resolve_template_kind(&templates_dir, t),
+                    Ok(crate::engine::template::TemplateKind::Directory)
+                )
+            })
+            .map(|t| {
+                (
+                    t.name.clone(),
+                    crate::engine::template::directory_template_part_order(&templates_dir, &t.name),
+                )
+            })
+            .collect();
 
         // A clean buffer follows external/session config reloads; a dirty buffer
         // (pending edits) is preserved.
@@ -2163,6 +2239,12 @@ impl App {
             }
         }
 
+        let declared_parts = self
+            .bundle_part_order
+            .get(self.current_type().as_str())
+            .cloned()
+            .unwrap_or_default();
+
         let mut tree = Vec::new();
 
         for doc in &sorted {
@@ -2171,7 +2253,8 @@ impl App {
             }
 
             let children = self.store.children_of(&doc.path);
-            let is_parent = !children.is_empty();
+            let part_rows = crate::engine::template::part_rows(&declared_parts, &doc.parts);
+            let is_parent = !children.is_empty() || !part_rows.is_empty();
             let has_duplicate_id = id_counts.get(&doc.id).copied().unwrap_or(0) > 1;
 
             tree.push(DocListNode {
@@ -2184,28 +2267,78 @@ impl App {
                 is_parent,
                 is_virtual: doc.virtual_doc,
                 has_duplicate_id,
+                kind: DocRowKind::Doc,
             });
 
-            if is_parent && self.is_expanded(&doc.path) {
-                let mut child_docs: Vec<&DocMeta> = children
-                    .iter()
-                    .filter_map(|cp| self.store.get(cp))
-                    .collect();
-                child_docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
+            if !is_parent || !self.is_expanded(&doc.path) {
+                continue;
+            }
 
-                for child in child_docs {
-                    tree.push(DocListNode {
-                        path: child.path.clone(),
-                        id: child.id.clone(),
-                        title: child.title.clone(),
-                        doc_type: child.doc_type.clone(),
-                        status: child.status.clone(),
-                        depth: 1,
-                        is_parent: false,
-                        is_virtual: child.virtual_doc,
-                        has_duplicate_id: false,
-                    });
-                }
+            let mut child_docs: Vec<&DocMeta> = children
+                .iter()
+                .filter_map(|cp| self.store.get(cp))
+                .collect();
+            child_docs.sort_by(|a, b| DocMeta::sort_by_date(a, b));
+
+            for child in child_docs {
+                tree.push(DocListNode {
+                    path: child.path.clone(),
+                    id: child.id.clone(),
+                    title: child.title.clone(),
+                    doc_type: child.doc_type.clone(),
+                    status: child.status.clone(),
+                    depth: 1,
+                    is_parent: false,
+                    is_virtual: child.virtual_doc,
+                    has_duplicate_id: false,
+                    kind: DocRowKind::Doc,
+                });
+            }
+
+            // STORY-294 AC1: one depth-1 row per part, in `show --parts`
+            // order, after the child docs.
+            for row in part_rows {
+                let (kind, title, row_path) = match row {
+                    crate::engine::template::PartRow::Present(part) => (
+                        DocRowKind::Part {
+                            parent: doc.path.clone(),
+                            name: part.name.clone(),
+                        },
+                        part.name,
+                        part.path,
+                    ),
+                    crate::engine::template::PartRow::Missing(name) => {
+                        // No file backs a missing part; a synthetic path
+                        // under the bundle's own folder keeps the row's
+                        // identity unique and stable without ever being
+                        // read from disk.
+                        let synthetic_path = doc
+                            .path
+                            .parent()
+                            .map(|dir| dir.join(format!("{name}.md")))
+                            .unwrap_or_else(|| doc.path.clone());
+                        (
+                            DocRowKind::MissingPart {
+                                parent: doc.path.clone(),
+                                name: name.clone(),
+                            },
+                            name,
+                            synthetic_path,
+                        )
+                    }
+                };
+                tree.push(DocListNode {
+                    path: row_path,
+                    id: String::new(),
+                    title,
+                    doc_type: doc.doc_type.clone(),
+                    status: doc.status.clone(),
+                    depth: 1,
+                    is_parent: false,
+                    is_virtual: false,
+                    has_duplicate_id: false,
+                    kind,
+                });
             }
         }
 
@@ -2463,7 +2596,7 @@ impl App {
     pub fn selected_doc_meta(&self) -> Option<&DocMeta> {
         self.doc_tree
             .get(self.selected_doc)
-            .and_then(|node| self.store.get(&node.path))
+            .and_then(|node| self.store.get(node.doc_path()))
     }
 
     /// Decide how an [`OpenTarget`] opens: a web URL hands off to the browser; a
@@ -3981,6 +4114,7 @@ pub(crate) mod parity_seed {
             available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
+            bundle_part_order: HashMap::new(),
             expanded_parents: HashSet::new(),
             wrap_mode: false,
             doc_tree: Vec::new(),
@@ -4331,6 +4465,7 @@ mod tests {
             is_parent: false,
             is_virtual: false,
             has_duplicate_id: false,
+            kind: DocRowKind::Doc,
         }
     }
 
@@ -4408,6 +4543,7 @@ mod tests {
             available_statuses: Vec::new(),
             type_icons: HashMap::new(),
             type_plurals: HashMap::new(),
+            bundle_part_order: HashMap::new(),
             expanded_parents: HashSet::new(),
             wrap_mode: false,
             doc_tree: (0..doc_count).map(make_dummy_node).collect(),
@@ -4799,6 +4935,395 @@ mod tests {
                     && w.contains("docs/change/CHANGE-001-alpha/index.md")),
             "expected a missing-part warning, got: {:?}",
             app.validation_warnings
+        );
+    }
+
+    /// A `change` bundle type (directory template declaring `arch.md` and
+    /// `design.md`, in that alphabetical order) with one document,
+    /// `CHANGE-001-alpha`, built from `extra_files` beyond its `index.md`.
+    /// Runs the doc list's real setup path (`apply_config` then
+    /// `build_doc_tree`), selected onto the `change` type, so STORY-294 tests
+    /// exercise the same wiring the TUI does at startup.
+    fn bundle_test_app(extra_files: &[(&str, &str)]) -> (tempfile::TempDir, App, Config) {
+        use crate::engine::config::{StoreBackend, TypeDef};
+        use crate::engine::store::test_support::store_from_with_config;
+
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        });
+
+        let mut files = vec![
+            (".lazyspec/templates/change/index.md", "index"),
+            (".lazyspec/templates/change/arch.md", "arch"),
+            (".lazyspec/templates/change/design.md", "design"),
+            (
+                "docs/change/CHANGE-001-alpha/index.md",
+                "---\ntitle: \"Alpha\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n",
+            ),
+        ];
+        files.extend_from_slice(extra_files);
+
+        let (tmp, store) = store_from_with_config(&files, &config);
+
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.apply_config(&config);
+        let change_idx = app
+            .doc_types
+            .iter()
+            .position(|t| t.as_str() == "change")
+            .expect("change type registered");
+        app.selected_type = change_idx;
+        app.build_doc_tree();
+        (tmp, app, config)
+    }
+
+    // STORY-294 AC1: a bundle document with declared parts is expandable even
+    // with no children -- `is_parent` must not depend on `children_of` alone.
+    #[test]
+    fn a_bundle_doc_with_parts_is_a_parent_with_no_children() {
+        let (_tmp, app, _config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+
+        let doc_row = app
+            .doc_tree
+            .iter()
+            .find(|n| n.depth == 0)
+            .expect("the bundle doc row");
+        assert!(
+            doc_row.is_parent,
+            "a doc with parts is a parent even with no children"
+        );
+    }
+
+    // STORY-294 AC1/AC5: a bundle with zero present parts (both declared
+    // parts missing, no children) is still `is_parent` / expandable, and
+    // expands to ghost rows only.
+    #[test]
+    fn a_bundle_with_only_missing_parts_is_expandable_to_ghost_rows_only() {
+        let (_tmp, mut app, _config) = bundle_test_app(&[]);
+
+        let doc_row = app
+            .doc_tree
+            .iter()
+            .find(|n| n.depth == 0)
+            .expect("the bundle doc row");
+        assert!(
+            doc_row.is_parent,
+            "a doc with only missing declared parts is still a parent"
+        );
+
+        let doc_path = doc_row.path.clone();
+        app.toggle_expanded(&doc_path);
+
+        let rows: Vec<&DocListNode> = app.doc_tree.iter().filter(|n| n.depth == 1).collect();
+        assert_eq!(rows.len(), 2, "arch and design, both missing");
+        assert!(
+            rows.iter()
+                .all(|n| matches!(n.kind, DocRowKind::MissingPart { .. })),
+            "every row is a missing ghost, got: {:?}",
+            rows.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|n| match &n.kind {
+                DocRowKind::MissingPart { name, .. } => name.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(names, vec!["arch", "design"]);
+    }
+
+    // STORY-294 AC1: collapsed, a parent bundle doc shows no part rows --
+    // matching how a children-only parent already behaves.
+    #[test]
+    fn a_collapsed_bundle_doc_shows_no_part_rows() {
+        let (_tmp, app, _config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+
+        assert_eq!(app.doc_tree.len(), 1, "no rows besides the doc itself");
+    }
+
+    // STORY-294 AC1/AC5: expanded, the bundle doc's rows are its declared
+    // parts in template order (`arch` before `design`), each `Present` or a
+    // `Missing` ghost -- `design.md` exists, `arch.md` does not.
+    #[test]
+    fn an_expanded_bundle_doc_lists_parts_in_declared_order_with_a_missing_ghost() {
+        let (_tmp, mut app, _config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+
+        let rows: Vec<&DocListNode> = app.doc_tree.iter().filter(|n| n.depth == 1).collect();
+        assert_eq!(rows.len(), 2, "arch (missing) then design (present)");
+
+        assert_eq!(rows[0].title, "arch");
+        assert!(matches!(&rows[0].kind, DocRowKind::MissingPart { name, .. } if name == "arch"));
+
+        assert_eq!(rows[1].title, "design");
+        assert!(matches!(&rows[1].kind, DocRowKind::Part { name, .. } if name == "design"));
+        assert_eq!(
+            rows[1].path,
+            PathBuf::from("docs/change/CHANGE-001-alpha/design.md"),
+            "a present part row's path is its own file, for `e` (AC4) and preview"
+        );
+    }
+
+    // STORY-294 AC1: child docs (frontmatter of their own) come before part
+    // rows once expanded.
+    #[test]
+    fn expanded_bundle_doc_lists_child_docs_before_part_rows() {
+        let (_tmp, mut app, _config) = bundle_test_app(&[
+            ("docs/change/CHANGE-001-alpha/design.md", "the design\n"),
+            (
+                "docs/change/CHANGE-001-alpha/TASK-001-t.md",
+                "---\ntitle: \"Task\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\ntask body\n",
+            ),
+        ]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+
+        let kinds: Vec<&DocRowKind> = app.doc_tree[1..].iter().map(|n| &n.kind).collect();
+        assert_eq!(kinds[0], &DocRowKind::Doc, "the child doc row comes first");
+        assert!(
+            matches!(kinds[1], DocRowKind::MissingPart { .. }),
+            "then part rows, arch (missing) first"
+        );
+    }
+
+    // STORY-294 AC6: a non-`.md` sidecar in the bundle folder is never a row
+    // -- only `.md` parts (declared or extra) get one.
+    #[test]
+    fn expanded_bundle_doc_produces_no_row_for_a_sidecar() {
+        let (_tmp, mut app, _config) = bundle_test_app(&[
+            ("docs/change/CHANGE-001-alpha/design.md", "the design\n"),
+            ("docs/change/CHANGE-001-alpha/notes.yaml", "note: 1\n"),
+        ]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+
+        assert!(
+            app.doc_tree
+                .iter()
+                .all(|n| n.title != "notes" && !n.title.contains("notes.yaml")),
+            "a sidecar must not produce a row, got titles: {:?}",
+            app.doc_tree.iter().map(|n| &n.title).collect::<Vec<_>>()
+        );
+        // Only the two declared/found parts (arch missing, design present) --
+        // the sidecar adds no third row.
+        let part_row_count = app
+            .doc_tree
+            .iter()
+            .filter(|n| n.depth == 1 && !matches!(n.kind, DocRowKind::Doc))
+            .count();
+        assert_eq!(
+            part_row_count, 2,
+            "arch (missing) and design (present) only"
+        );
+    }
+
+    // STORY-294: everything keyed off "the selected document" resolves a
+    // selected part row to its parent -- `selected_doc_meta` is the seam
+    // every such action reads through (delete, status, relations, `open`).
+    #[test]
+    fn selected_doc_meta_resolves_a_part_row_to_its_parent_doc() {
+        let (_tmp, mut app, _config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let part_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::Part { name, .. } if name == "design"))
+            .expect("the present design part row");
+        app.selected_doc = part_idx;
+
+        let doc = app.selected_doc_meta().expect("resolves through the part");
+        assert_eq!(doc.path, doc_path);
+    }
+
+    // STORY-294 AC4: `e` on a present part row opens the part's own file, not
+    // the parent's index.
+    #[test]
+    fn key_e_on_a_part_row_opens_the_parts_own_file() {
+        let (tmp, mut app, config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let part_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::Part { name, .. } if name == "design"))
+            .expect("the present design part row");
+        app.selected_doc = part_idx;
+
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert_eq!(
+            app.editor_request,
+            Some(tmp.path().join("docs/change/CHANGE-001-alpha/design.md"))
+        );
+    }
+
+    // STORY-294 AC5: `e` on a missing-part ghost row is a no-op -- there is
+    // no file to open.
+    #[test]
+    fn key_e_on_a_missing_part_row_is_a_noop() {
+        let (tmp, mut app, config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let missing_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::MissingPart { name, .. } if name == "arch"))
+            .expect("the missing arch ghost row");
+        app.selected_doc = missing_idx;
+
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE, tmp.path(), &config);
+
+        assert!(
+            app.editor_request.is_none(),
+            "a missing part row has no file to open"
+        );
+    }
+
+    /// Render the doc list panel into a fresh TestBackend and flatten the
+    /// buffer to a single string, the `render_graph_to_string` pattern below
+    /// applied to `draw_doc_list`.
+    fn render_doc_list_to_string(app: &mut App, w: u16, h: u16, config: &Config) -> String {
+        use crate::tui::views::panels::draw_doc_list;
+        use crate::tui::views::StatusPalette;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = StatusPalette::default();
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| draw_doc_list(f, app, f.area(), config, &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .map(move |x| (x, y))
+                    .chain(std::iter::once((u16::MAX, y)))
+            })
+            .map(|(x, y)| {
+                if x == u16::MAX {
+                    "\n".to_string()
+                } else {
+                    buffer.cell((x, y)).unwrap().symbol().to_string()
+                }
+            })
+            .collect()
+    }
+
+    // STORY-294 AC2/AC5: a present part row renders `§ <name>`, a missing
+    // one `§ <name> (missing)`.
+    #[test]
+    fn expanded_bundle_part_rows_render_as_section_marks() {
+        let (_tmp, mut app, config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+
+        let text = render_doc_list_to_string(&mut app, 80, 10, &config);
+
+        assert!(
+            text.contains("§ arch (missing)"),
+            "expected a missing ghost row, got:\n{text}"
+        );
+        assert!(
+            text.contains("§ design"),
+            "expected the present design part row, got:\n{text}"
+        );
+        assert!(
+            !text.contains("§ design (missing)"),
+            "design is present, not missing, got:\n{text}"
+        );
+    }
+
+    /// Render the preview panel into a fresh TestBackend and flatten the
+    /// buffer to a single string, the same pattern as
+    /// `render_doc_list_to_string`/`render_graph_to_string`.
+    fn render_preview_to_string(app: &mut App, w: u16, h: u16) -> String {
+        use crate::tui::views::panels::draw_preview;
+        use crate::tui::views::StatusPalette;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = StatusPalette::default();
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| draw_preview(f, app, f.area(), &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .map(move |x| (x, y))
+                    .chain(std::iter::once((u16::MAX, y)))
+            })
+            .map(|(x, y)| {
+                if x == u16::MAX {
+                    "\n".to_string()
+                } else {
+                    buffer.cell((x, y)).unwrap().symbol().to_string()
+                }
+            })
+            .collect()
+    }
+
+    // STORY-294 AC3: selecting the parent row keeps the concatenated preview
+    // (cached under the parent's own path); selecting a part row previews
+    // only that part's body (cached under the part's own path).
+    #[test]
+    fn preview_body_follows_the_selected_row() {
+        let (_tmp, mut app, _config) =
+            bundle_test_app(&[("docs/change/CHANGE-001-alpha/design.md", "the design\n")]);
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let design_path = PathBuf::from("docs/change/CHANGE-001-alpha/design.md");
+
+        app.expanded_body_cache.insert(
+            doc_path.clone(),
+            "PARENT-BODY-MARKER\n\n## design\n\nDESIGN-BODY-MARKER".to_string(),
+        );
+        app.expanded_body_cache
+            .insert(design_path.clone(), "DESIGN-ONLY-MARKER".to_string());
+
+        // The parent doc row: the concatenated cache entry, in full.
+        app.selected_doc = 0;
+        let parent_text = render_preview_to_string(&mut app, 80, 20);
+        assert!(parent_text.contains("PARENT-BODY-MARKER"));
+        assert!(parent_text.contains("DESIGN-BODY-MARKER"));
+
+        // The present design part row: that part's own cache entry alone.
+        let design_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::Part { name, .. } if name == "design"))
+            .expect("the present design part row");
+        app.selected_doc = design_idx;
+        let part_text = render_preview_to_string(&mut app, 80, 20);
+        assert!(part_text.contains("DESIGN-ONLY-MARKER"));
+        assert!(
+            !part_text.contains("PARENT-BODY-MARKER"),
+            "a part row must not show the concatenated form, got:\n{part_text}"
+        );
+
+        // The missing arch ghost row: a fixed message, nothing from disk.
+        let missing_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::MissingPart { name, .. } if name == "arch"))
+            .expect("the missing arch ghost row");
+        app.selected_doc = missing_idx;
+        let missing_text = render_preview_to_string(&mut app, 80, 20);
+        assert!(
+            missing_text.contains("has not been created yet"),
+            "got:\n{missing_text}"
         );
     }
 
@@ -5373,6 +5898,7 @@ mod tests {
             is_parent: false,
             is_virtual: false,
             has_duplicate_id: false,
+            kind: DocRowKind::Doc,
         }];
         insert_doc(
             &mut app,
@@ -5428,6 +5954,7 @@ mod tests {
             is_parent: false,
             is_virtual: false,
             has_duplicate_id: false,
+            kind: DocRowKind::Doc,
         }];
         app.selected_doc = 0;
         app.view_mode = ViewMode::Types;
@@ -5458,6 +5985,7 @@ mod tests {
             is_parent: false,
             is_virtual: false,
             has_duplicate_id: false,
+            kind: DocRowKind::Doc,
         }];
         app.open_link_editor(&config);
         assert!(
@@ -5506,6 +6034,7 @@ mod tests {
                 is_parent: false,
                 is_virtual: false,
                 has_duplicate_id: false,
+                kind: DocRowKind::Doc,
             }];
             app.selected_doc = 0;
             app.view_mode = ViewMode::Types;
@@ -5568,6 +6097,7 @@ mod tests {
             is_parent: false,
             is_virtual: false,
             has_duplicate_id: false,
+            kind: DocRowKind::Doc,
         }];
         app.selected_doc = 0;
         app.view_mode = ViewMode::Types;

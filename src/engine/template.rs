@@ -100,6 +100,52 @@ pub fn directory_template_declared_files(templates_dir: &Path, type_name: &str) 
     names
 }
 
+/// One row STORY-294's TUI doc list renders for a bundle's parts: a part the
+/// document's folder actually has, or a declared part it lacks (a ghost row,
+/// AC5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartRow {
+    Present(crate::engine::document::Part),
+    Missing(String),
+}
+
+/// Merge a directory template's declared part order with a document's actual
+/// `parts` into the row sequence STORY-294 AC1/AC5 wants: declared parts in
+/// template order, each present or a `Missing` ghost, followed by any extra
+/// part the document has that the template does not declare (in `parts`'
+/// own order, which the loader already sorts alphabetically -- RFC-074 AC5).
+///
+/// Filtering the `Missing` rows back out of the result always yields `parts`
+/// unchanged: the declared prefix drops straight to the parts it found (same
+/// relative order), and the extra suffix is `parts` as-is. That is what makes
+/// this the same order as `show --parts` (AC1), which renders `parts`
+/// directly and never sees the ghosts.
+pub fn part_rows(
+    declared_order: &[String],
+    parts: &[crate::engine::document::Part],
+) -> Vec<PartRow> {
+    let mut rows = Vec::with_capacity(declared_order.len().max(parts.len()));
+    let mut used: HashSet<&str> = HashSet::new();
+
+    for name in declared_order {
+        match parts.iter().find(|p| &p.name == name) {
+            Some(part) => {
+                rows.push(PartRow::Present(part.clone()));
+                used.insert(name.as_str());
+            }
+            None => rows.push(PartRow::Missing(name.clone())),
+        }
+    }
+
+    for part in parts {
+        if !used.contains(part.name.as_str()) {
+            rows.push(PartRow::Present(part.clone()));
+        }
+    }
+
+    rows
+}
+
 pub fn render_template(template_content: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template_content.to_string();
     for (key, value) in vars {
@@ -241,6 +287,7 @@ pub fn resolve_filename(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -522,5 +569,117 @@ mod tests {
         let declared = directory_template_declared_files(dir.path(), "change");
 
         assert!(declared.is_empty());
+    }
+
+    fn part(name: &str) -> crate::engine::document::Part {
+        crate::engine::document::Part {
+            name: name.to_string(),
+            path: PathBuf::from(format!("docs/change/CHANGE-001/{name}.md")),
+        }
+    }
+
+    // STORY-294 AC1: every declared part the document has becomes a
+    // `Present` row, in the template's declared order.
+    #[test]
+    fn part_rows_present_only_matches_declared_order() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("arch"), part("design"), part("tasks")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("arch")),
+                PartRow::Present(part("design")),
+                PartRow::Present(part("tasks")),
+            ]
+        );
+    }
+
+    // STORY-294 AC5: a declared part the folder lacks becomes a `Missing`
+    // ghost row in its declared slot, not dropped or moved to the end.
+    #[test]
+    fn part_rows_marks_a_declared_part_missing() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("arch"), part("design")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("arch")),
+                PartRow::Present(part("design")),
+                PartRow::Missing("tasks".to_string()),
+            ]
+        );
+    }
+
+    // STORY-294 AC1: a part the folder has that the template does not
+    // declare (RFC-074 allows extras) is appended after the declared rows,
+    // in `parts`' own order.
+    #[test]
+    fn part_rows_appends_extra_parts_after_declared() {
+        let declared = vec!["design".to_string()];
+        let parts = vec![part("design"), part("zz-extra")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("design")),
+                PartRow::Present(part("zz-extra")),
+            ]
+        );
+    }
+
+    // A type with no directory template declares nothing, so every found
+    // part is an extra: all `Present`, in `parts`' own order.
+    #[test]
+    fn part_rows_is_all_present_when_no_declared_order() {
+        let parts = vec![part("design"), part("notes")];
+
+        let rows = part_rows(&[], &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("design")),
+                PartRow::Present(part("notes"))
+            ]
+        );
+    }
+
+    // Filtering `Missing` rows back out reproduces `parts` verbatim -- the
+    // invariant `show --parts` (present-only) relies on.
+    #[test]
+    fn part_rows_present_subsequence_matches_parts_verbatim() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("design"), part("zz-extra")];
+
+        let rows = part_rows(&declared, &parts);
+        let present: Vec<crate::engine::document::Part> = rows
+            .into_iter()
+            .filter_map(|row| match row {
+                PartRow::Present(p) => Some(p),
+                PartRow::Missing(_) => None,
+            })
+            .collect();
+
+        assert_eq!(present, parts);
     }
 }

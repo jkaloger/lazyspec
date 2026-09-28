@@ -1,13 +1,25 @@
 use crate::engine::cache::DiskCache;
 use crate::engine::config::Config;
-use crate::engine::document::DocMeta;
+use crate::engine::document::{DocMeta, Part};
 use crate::engine::refs::RefExpander;
 use crate::engine::staleness::{Staleness, StalenessTerms};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::{App, AppEvent, StaleFindingsRequest, StalenessRequest};
+use super::{App, AppEvent, DocRowKind, StaleFindingsRequest, StalenessRequest};
+
+/// What [`App::request_expansion`] dispatches, keyed by [`App::expansion_source`]
+/// off the selected row (STORY-294): the parent doc's own body plus every part
+/// to concatenate (a `Doc` row -- unchanged from before parts were
+/// selectable), or one part's file alone (a `Part` row, AC3). A `MissingPart`
+/// row has nothing to read, so [`App::expansion_source`] returns `None` for
+/// it rather than a third variant here.
+enum ExpansionSource {
+    Doc { parts: Vec<Part> },
+    Part { part_path: PathBuf },
+}
 
 /// `text` with `@ref` directives expanded, or `text` unchanged when it has
 /// none or expansion fails/cancels. The lenient fallback [`request_expansion`]
@@ -24,22 +36,51 @@ fn expand_or_plain(text: &str, expander: &RefExpander, cancel: &Arc<AtomicBool>)
 }
 
 impl App {
+    /// The selected row's expansion cache key and what to expand for it
+    /// (STORY-294): `None` for a `MissingPart` row (AC5 -- nothing to read),
+    /// a doc row's own path plus its parts for a `Doc` row, or a part's own
+    /// path for a `Part` row (AC3).
+    fn expansion_source(&self) -> Option<(PathBuf, ExpansionSource)> {
+        let node = self.doc_tree.get(self.selected_doc)?;
+        match &node.kind {
+            DocRowKind::MissingPart { .. } => None,
+            DocRowKind::Doc => {
+                let meta = self.store.get(&node.path)?;
+                Some((
+                    meta.path.clone(),
+                    ExpansionSource::Doc {
+                        parts: meta.parts.clone(),
+                    },
+                ))
+            }
+            DocRowKind::Part { parent, name } => {
+                let meta = self.store.get(parent)?;
+                let part = meta.parts.iter().find(|p| &p.name == name)?;
+                Some((
+                    node.path.clone(),
+                    ExpansionSource::Part {
+                        part_path: part.path.clone(),
+                    },
+                ))
+            }
+        }
+    }
+
     pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
-        let (doc_path, parts) = match self.selected_doc_meta() {
-            Some(meta) => (meta.path.clone(), meta.parts.clone()),
-            None => return,
+        let Some((cache_key, source)) = self.expansion_source() else {
+            return;
         };
 
-        if self.expanded_body_cache.contains_key(&doc_path)
-            && !self.expansion_stale.contains(&doc_path)
+        if self.expanded_body_cache.contains_key(&cache_key)
+            && !self.expansion_stale.contains(&cache_key)
         {
             return;
         }
 
-        if self.expansion_in_flight.as_ref() == Some(&doc_path) {
+        if self.expansion_in_flight.as_ref() == Some(&cache_key) {
             return;
         }
-        self.expansion_stale.remove(&doc_path);
+        self.expansion_stale.remove(&cache_key);
 
         if let Some(cancel) = &self.expansion_cancel {
             cancel.store(true, Ordering::Relaxed);
@@ -47,82 +88,101 @@ impl App {
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.expansion_cancel = Some(cancel.clone());
-        self.expansion_in_flight = Some(doc_path.clone());
+        self.expansion_in_flight = Some(cache_key.clone());
 
         let root = self.store.root().to_path_buf();
         let tx = tx.clone();
         let disk_cache = self.disk_cache.clone();
-        std::thread::spawn(move || {
-            let full_path = root.join(&doc_path);
-            let content = match fs::read_to_string(&full_path) {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            let body = match DocMeta::extract_body(&content) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-
-            // RFC-074 AC6: a bundle's parts are expanded the same way as the
-            // index body, then concatenated after it under a `## <name>`
-            // heading -- the same shape `show --parts` renders. Bypasses the
-            // disk cache below, which is keyed on the index body alone.
-            if !parts.is_empty() {
-                let expander = RefExpander::new(root.clone());
-                let mut full = expand_or_plain(&body, &expander, &cancel);
-                for part in &parts {
-                    let Ok(part_content) = fs::read_to_string(root.join(&part.path)) else {
-                        continue;
-                    };
-                    let part_body = expand_or_plain(&part_content, &expander, &cancel);
-                    full.push_str(&format!("\n\n## {}\n\n{}", part.name, part_body));
-                }
-                let body_hash = DiskCache::body_hash(&full);
-                let _ = tx.send(AppEvent::ExpansionResult {
-                    path: doc_path,
-                    body: full,
-                    body_hash,
-                });
-                return;
-            }
-
-            if !body.contains("@ref ") {
+        std::thread::spawn(move || match source {
+            ExpansionSource::Part { part_path } => {
+                // A part carries no frontmatter (RFC-074), so there is no
+                // body to extract -- the whole file, expanded, is the body.
+                let Ok(content) = fs::read_to_string(root.join(&part_path)) else {
+                    return;
+                };
+                let expander = RefExpander::new(root);
+                let body = expand_or_plain(&content, &expander, &cancel);
                 let body_hash = DiskCache::body_hash(&body);
                 let _ = tx.send(AppEvent::ExpansionResult {
-                    path: doc_path,
+                    path: cache_key,
                     body,
                     body_hash,
                 });
-                return;
             }
+            ExpansionSource::Doc { parts } => {
+                let doc_path = cache_key;
+                let full_path = root.join(&doc_path);
+                let content = match fs::read_to_string(&full_path) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let body = match DocMeta::extract_body(&content) {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
 
-            let body_hash = DiskCache::body_hash(&body);
-
-            if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
-                let _ = tx.send(AppEvent::ExpansionResult {
-                    path: doc_path,
-                    body: cached,
-                    body_hash,
-                });
-                return;
-            }
-
-            let expander = RefExpander::new(root);
-            match expander.expand_cancellable(&body, &cancel) {
-                Ok(Some(expanded)) => {
+                // RFC-074 AC6: a bundle's parts are expanded the same way as
+                // the index body, then concatenated after it under a
+                // `## <name>` heading -- the same shape `show --parts`
+                // renders. Bypasses the disk cache below, which is keyed on
+                // the index body alone.
+                if !parts.is_empty() {
+                    let expander = RefExpander::new(root.clone());
+                    let mut full = expand_or_plain(&body, &expander, &cancel);
+                    for part in &parts {
+                        let Ok(part_content) = fs::read_to_string(root.join(&part.path)) else {
+                            continue;
+                        };
+                        let part_body = expand_or_plain(&part_content, &expander, &cancel);
+                        full.push_str(&format!("\n\n## {}\n\n{}", part.name, part_body));
+                    }
+                    let body_hash = DiskCache::body_hash(&full);
                     let _ = tx.send(AppEvent::ExpansionResult {
                         path: doc_path,
-                        body: expanded,
+                        body: full,
                         body_hash,
                     });
+                    return;
                 }
-                Ok(None) => {}
-                Err(_) => {
+
+                if !body.contains("@ref ") {
+                    let body_hash = DiskCache::body_hash(&body);
                     let _ = tx.send(AppEvent::ExpansionResult {
                         path: doc_path,
                         body,
                         body_hash,
                     });
+                    return;
+                }
+
+                let body_hash = DiskCache::body_hash(&body);
+
+                if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
+                    let _ = tx.send(AppEvent::ExpansionResult {
+                        path: doc_path,
+                        body: cached,
+                        body_hash,
+                    });
+                    return;
+                }
+
+                let expander = RefExpander::new(root);
+                match expander.expand_cancellable(&body, &cancel) {
+                    Ok(Some(expanded)) => {
+                        let _ = tx.send(AppEvent::ExpansionResult {
+                            path: doc_path,
+                            body: expanded,
+                            body_hash,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::ExpansionResult {
+                            path: doc_path,
+                            body,
+                            body_hash,
+                        });
+                    }
                 }
             }
         });
