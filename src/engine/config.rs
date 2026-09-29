@@ -4,7 +4,7 @@ use crate::engine::document::Status;
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 pub use extends::Extends;
@@ -1160,6 +1160,10 @@ pub struct Config {
     /// bands step at. Serialized into `config --json` but parsed via `RawConfig`.
     #[serde(default, skip_deserializing)]
     pub staleness: StalenessConfig,
+    /// The `[[hooks]]` table (RFC-075): external commands bound to lazyspec
+    /// events. Serialized into `config --json` but parsed via `RawConfig`.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<HookDef>,
     /// The extended location this config resolved from, when its
     /// `.lazyspec.toml` declared only `extends` (STORY-284). `None` for a
     /// config that declares its own `[[types]]`. Skipped on both directions:
@@ -1337,6 +1341,109 @@ pub struct StalenessConfig {
     pub finding: StalenessFinding,
 }
 
+/// The lazyspec event a `[[hooks]]` entry is bound to (RFC-075). The event is
+/// the whole contract: what the hook receives, what it may return, and whether
+/// an error finding blocks anything.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookEvent {
+    Validate,
+    PreTransition,
+}
+
+impl HookEvent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HookEvent::Validate => "validate",
+            HookEvent::PreTransition => "pre-transition",
+        }
+    }
+}
+
+impl std::fmt::Display for HookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+
+/// One `[[hooks]]` entry (RFC-075): an external command lazyspec feeds
+/// documents as JSON on stdin and reads findings (and, on `pre-transition`,
+/// body updates) back from on stdout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HookDef {
+    /// Names the hook in findings, `hook list`, and the validate cache.
+    pub name: String,
+    pub event: HookEvent,
+    /// The argv to spawn, resolved from the project root. No shell.
+    pub run: Vec<String>,
+    /// The document types the hook fires for. Empty is every type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
+    /// `pre-transition` only: the status the document is leaving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// `pre-transition` only: the status the document is moving to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Other types whose documents the hook reads, sent as `context`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_types: Vec<String>,
+    /// Seconds before the hook is killed. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+impl HookDef {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS))
+    }
+
+    pub fn applies_to_type(&self, type_name: &str) -> bool {
+        self.types.is_empty() || self.types.iter().any(|t| t == type_name)
+    }
+
+    pub fn applies_to_transition(&self, from: &str, to: &str) -> bool {
+        self.from.as_deref().is_none_or(|f| f == from) && self.to.as_deref().is_none_or(|t| t == to)
+    }
+}
+
+fn check_hooks(hooks: &[HookDef], types: &[TypeDef]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for hook in hooks {
+        if !seen.insert(hook.name.as_str()) {
+            bail!(
+                "hook \"{}\" is declared more than once; hook names must be unique",
+                hook.name
+            );
+        }
+        if hook.run.first().is_none_or(|program| program.is_empty()) {
+            bail!("hook \"{}\" has an empty `run`; name the program to spawn, e.g. run = [\".lazyspec/hooks/{}\"]", hook.name, hook.name);
+        }
+        if hook.event == HookEvent::Validate && (hook.from.is_some() || hook.to.is_some()) {
+            bail!("hook \"{}\" sets `from`/`to` on event = \"validate\"; they only apply to event = \"pre-transition\"", hook.name);
+        }
+        if hook.timeout == Some(0) {
+            bail!(
+                "hook \"{}\" sets timeout = 0; give it at least one second",
+                hook.name
+            );
+        }
+        for type_name in hook.types.iter().chain(&hook.context_types) {
+            if !types.iter().any(|t| &t.name == type_name) {
+                bail!(
+                    "hook \"{}\" names unknown type \"{}\" (not declared in [[types]])",
+                    hook.name,
+                    type_name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether `validate` reports stale documents, and how loudly (RFC-069).
 ///
 /// Three written values rather than `Option<Severity>`, because the default is
@@ -1503,6 +1610,11 @@ struct RawConfig {
     /// The `[staleness]` block: the age thresholds the staleness bands step at.
     #[serde(default)]
     staleness: Option<StalenessConfig>,
+    /// External commands bound to lazyspec events, one per `[[hooks]]` block:
+    /// `validate` hooks add findings, `pre-transition` hooks can block a status
+    /// change or return body updates saved with it.
+    #[serde(default)]
+    hooks: Option<Vec<HookDef>>,
     /// `extends`: point this config at another directory's `.lazyspec.toml`
     /// instead of declaring `[[types]]`/`[[relationships]]` locally -- the
     /// whole config, since STORY-284's exclusivity rule forbids any sibling
@@ -1750,6 +1862,7 @@ impl Default for Config {
             git_ref: GitRefConfig::default(),
             governs: GovernsConfig::default(),
             staleness: StalenessConfig::default(),
+            hooks: Vec::new(),
             extends: None,
         }
     }
@@ -2067,6 +2180,9 @@ impl Config {
             }
         }
 
+        let hooks = raw.hooks.unwrap_or_default();
+        check_hooks(&hooks, &types)?;
+
         let ref_count_ceiling = raw.ref_count_ceiling.unwrap_or(15);
 
         let staleness = raw.staleness.unwrap_or_default();
@@ -2104,6 +2220,7 @@ impl Config {
             git_ref: raw.git_ref.unwrap_or_default(),
             governs: raw.governs.unwrap_or_default(),
             staleness,
+            hooks,
             extends: None,
         })
     }
@@ -2501,6 +2618,66 @@ inverse = "implemented-by"
 [[relationships]]
 name = "related-to"
 "#;
+
+    fn parse_hooks(hooks: &str) -> Result<Config> {
+        Config::parse(&format!("{TYPES}\n{hooks}"))
+    }
+
+    #[test]
+    fn hooks_parse_with_defaults() {
+        let config = parse_hooks(
+            "[[hooks]]\nname = \"lint\"\nevent = \"validate\"\nrun = [\".lazyspec/hooks/lint\"]\n",
+        )
+        .unwrap();
+        let hook = &config.hooks[0];
+        assert_eq!(hook.event, HookEvent::Validate);
+        assert!(hook.applies_to_type("rfc"));
+        assert_eq!(hook.timeout(), std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn pre_transition_hooks_filter_on_from_and_to() {
+        let config = parse_hooks(
+            "[[hooks]]\nname = \"gate\"\nevent = \"pre-transition\"\ntypes = [\"rfc\"]\nto = \"accepted\"\nrun = [\"x\"]\n",
+        )
+        .unwrap();
+        let hook = &config.hooks[0];
+        assert!(hook.applies_to_transition("review", "accepted"));
+        assert!(!hook.applies_to_transition("draft", "review"));
+    }
+
+    #[test]
+    fn hooks_reject_bad_declarations() {
+        let cases = [
+            (
+                "name = \"a\"\nevent = \"validate\"\nrun = []",
+                "empty `run`",
+            ),
+            (
+                "name = \"a\"\nevent = \"validate\"\nto = \"x\"\nrun = [\"x\"]",
+                "from`/`to",
+            ),
+            (
+                "name = \"a\"\nevent = \"validate\"\ntypes = [\"nope\"]\nrun = [\"x\"]",
+                "unknown type",
+            ),
+            (
+                "name = \"a\"\nevent = \"post-create\"\nrun = [\"x\"]",
+                "post-create",
+            ),
+            (
+                "name = \"a\"\nevent = \"validate\"\nkind = \"x\"\nrun = [\"x\"]",
+                "kind",
+            ),
+        ];
+        for (body, needle) in cases {
+            let err = parse_hooks(&format!("[[hooks]]\n{body}\n")).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{body}: {err:#}");
+        }
+        let twice = "[[hooks]]\nname = \"a\"\nevent = \"validate\"\nrun = [\"x\"]\n";
+        let err = parse_hooks(&format!("{twice}{twice}")).unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
+    }
 
     #[test]
     fn config_schema_serializes_and_encodes_input_grammar() {

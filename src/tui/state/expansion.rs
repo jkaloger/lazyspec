@@ -247,9 +247,11 @@ impl App {
     pub fn request_stale_findings(&mut self, config: &Config) {
         self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
         let _ = self.stale_findings_tx.send(StaleFindingsRequest {
+            root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),
             docs: self.store.docs.values().cloned().collect(),
+            hook_env: self.hook_env.clone(),
             generation: self.stale_findings_generation,
         });
     }
@@ -339,6 +341,12 @@ impl App {
             cache,
         )
         .into();
+        crate::engine::hooks::refill_cache(
+            &self.hook_env,
+            self.store.root(),
+            &docs.iter().collect::<Vec<_>>(),
+            config,
+        );
         cache.flush();
         self.apply_stale_findings(self.stale_findings_generation, result, config);
     }

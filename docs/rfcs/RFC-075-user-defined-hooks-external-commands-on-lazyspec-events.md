@@ -1,7 +1,7 @@
 ---
 title: 'User-defined hooks: external commands on lazyspec events'
 type: rfc
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
@@ -9,6 +9,7 @@ related:
 - related-to: RFC-074
 - related-to: RFC-071
 - related-to: RFC-073
+reviewed: 43f9cc5e1315b187ba5d6bd9b53cec9a2121767e
 ---
 
 ## Summary

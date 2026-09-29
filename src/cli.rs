@@ -7,6 +7,7 @@ pub mod delete;
 pub mod fetch;
 pub mod fix;
 pub mod govern;
+pub mod hook;
 pub mod ignore;
 pub mod init;
 pub mod json;
@@ -32,6 +33,7 @@ pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
 use crate::cli::govern::GovernCommand;
+use crate::cli::hook::HookCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
 use crate::cli::setup::SetupCommand;
@@ -70,6 +72,10 @@ pub enum RenumberFormat {
 #[derive(Parser)]
 #[command(name = "lazyspec", version, about = "Manage project documentation")]
 pub struct Cli {
+    /// Skip every `[[hooks]]` entry for this run
+    #[arg(long, global = true)]
+    pub no_hooks: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -400,6 +406,11 @@ pub enum Commands {
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
+    },
+    /// Inspect and trust the hooks declared in .lazyspec.toml
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
     },
     /// Manage the source globs a document governs
     Govern {

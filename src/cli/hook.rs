@@ -1,0 +1,158 @@
+use crate::engine::config::{Config, HookDef};
+use crate::engine::hooks::TrustStore;
+use anyhow::{bail, Result};
+use clap::Subcommand;
+use serde_json::{json, Value};
+use std::path::Path;
+
+#[derive(Subcommand)]
+pub enum HookCommand {
+    /// List the configured hooks with their scope and trust state
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust the current `[[hooks]]` table and the in-repo files its `run` entries name
+    Trust {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn scope(hook: &HookDef) -> Value {
+    json!({
+        "types": hook.types,
+        "from": hook.from,
+        "to": hook.to,
+    })
+}
+
+fn scope_text(hook: &HookDef) -> String {
+    let mut parts = vec![if hook.types.is_empty() {
+        "all types".to_string()
+    } else {
+        hook.types.join(", ")
+    }];
+    if let Some(from) = &hook.from {
+        parts.push(format!("from {from}"));
+    }
+    if let Some(to) = &hook.to {
+        parts.push(format!("to {to}"));
+    }
+    parts.join("; ")
+}
+
+fn trust_label(trusted: bool) -> &'static str {
+    if trusted {
+        "trusted"
+    } else {
+        "untrusted"
+    }
+}
+
+pub fn run_list(root: &Path, config: &Config, trust: &TrustStore, json: bool) -> String {
+    let trusted = trust.is_trusted(root, &config.hooks);
+    if json {
+        let hooks: Vec<Value> = config
+            .hooks
+            .iter()
+            .map(|hook| {
+                json!({
+                    "name": hook.name,
+                    "event": hook.event.as_str(),
+                    "scope": scope(hook),
+                    "trust": trust_label(trusted),
+                })
+            })
+            .collect();
+        return serde_json::to_string_pretty(&hooks).expect("hooks serialise as JSON");
+    }
+    if config.hooks.is_empty() {
+        return "No hooks configured.".to_string();
+    }
+    config
+        .hooks
+        .iter()
+        .map(|hook| {
+            format!(
+                "{}\t{}\t{}\t{}",
+                hook.name,
+                hook.event,
+                scope_text(hook),
+                trust_label(trusted)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn run_trust(root: &Path, config: &Config, trust: &TrustStore, json: bool) -> Result<String> {
+    if config.hooks.is_empty() {
+        bail!("no [[hooks]] are configured, so there is nothing to trust");
+    }
+    trust.trust(root, &config.hooks)?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&json!({
+            "trusted": config.hooks.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+        }))?);
+    }
+    Ok(format!("Trusted {} hook(s).", config.hooks.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config::parse(
+            r#"
+[[types]]
+name = "rfc"
+plural = "rfcs"
+dir = "docs/rfcs"
+prefix = "RFC"
+
+[[relationships]]
+name = "implements"
+inverse = "implemented-by"
+
+[[hooks]]
+name = "lint"
+event = "validate"
+types = ["rfc"]
+run = ["x"]
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn list_shows_name_event_scope_and_trust_and_trust_flips_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trust = TrustStore::in_dir(&tmp.path().join("state"));
+        let config = config();
+
+        let before: Value =
+            serde_json::from_str(&run_list(tmp.path(), &config, &trust, true)).unwrap();
+        assert_eq!(before[0]["name"], "lint");
+        assert_eq!(before[0]["event"], "validate");
+        assert_eq!(before[0]["scope"]["types"], json!(["rfc"]));
+        assert_eq!(before[0]["trust"], "untrusted");
+        assert!(run_list(tmp.path(), &config, &trust, false).contains("untrusted"));
+
+        run_trust(tmp.path(), &config, &trust, false).unwrap();
+
+        let after: Value =
+            serde_json::from_str(&run_list(tmp.path(), &config, &trust, true)).unwrap();
+        assert_eq!(after[0]["trust"], "trusted");
+    }
+
+    #[test]
+    fn trusting_nothing_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trust = TrustStore::in_dir(tmp.path());
+        assert!(run_trust(tmp.path(), &Config::default(), &trust, false).is_err());
+    }
+}

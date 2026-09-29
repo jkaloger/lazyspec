@@ -944,6 +944,8 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 &git,
                 &staleness_cache,
             );
+            let docs: Vec<&crate::engine::document::DocMeta> = req.docs.iter().collect();
+            crate::engine::hooks::refill_cache(&req.hook_env, &req.root, &docs, &req.config);
             staleness_cache.flush();
             if stale_findings_result_tx
                 .send(AppEvent::StaleFindingsComputed {

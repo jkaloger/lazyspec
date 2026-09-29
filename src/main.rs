@@ -132,6 +132,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::load(&cwd, &fs)?;
+    if cli.no_hooks {
+        lazyspec::engine::hooks::disable_hooks();
+    }
 
     match cli.command {
         Some(Commands::Init { .. })
@@ -738,6 +741,24 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Commands::Hook { command }) => {
+            use lazyspec::cli::hook::HookCommand;
+            let trust = lazyspec::engine::hooks::TrustStore::user_local();
+            match command {
+                HookCommand::List { json } => {
+                    println!(
+                        "{}",
+                        lazyspec::cli::hook::run_list(&cwd, &config, &trust, json)
+                    );
+                }
+                HookCommand::Trust { json } => {
+                    println!(
+                        "{}",
+                        lazyspec::cli::hook::run_trust(&cwd, &config, &trust, json)?
+                    );
+                }
+            }
+        }
         Some(Commands::Config { command, json }) => {
             use lazyspec::cli::config::ConfigCommand;
             match command {

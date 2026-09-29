@@ -328,9 +328,11 @@ pub struct StalenessRequest {
 /// Owned, and a `Vec<DocMeta>` rather than the `Store` those documents came
 /// from, because that store lives on the UI thread.
 pub struct StaleFindingsRequest {
+    pub root: PathBuf,
     pub governs_root: PathBuf,
     pub config: Config,
     pub docs: Vec<DocMeta>,
+    pub hook_env: crate::engine::hooks::HookEnv,
     pub generation: u64,
 }
 
@@ -700,6 +702,9 @@ pub struct App {
     /// result is dropped, so a slow pass cannot overwrite a newer one.
     pub stale_findings_generation: u64,
     pub stale_findings_tx: crossbeam_channel::Sender<StaleFindingsRequest>,
+    /// Shared with the findings worker, so the cache a full pass fills is the one
+    /// the render-path refresh reads.
+    pub hook_env: crate::engine::hooks::HookEnv,
     pub show_help: bool,
     pub help_scroll: u16,
     /// Maximum legal `help_scroll` for the current help content + viewport,
@@ -899,6 +904,7 @@ impl App {
             stale_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
+            hook_env: crate::engine::hooks::HookEnv::process(),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -1097,7 +1103,8 @@ impl App {
         // STORY-276 AC2: `stale` is the one rule that shells out to git per
         // document, and this runs on the render path. It is skipped here and
         // answered by a worker instead, whose last result is folded in below.
-        let result = crate::engine::validation::validate_without_stale(&self.store, config);
+        let result =
+            crate::engine::validation::validate_without_stale(&self.store, config, &self.hook_env);
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
         self.validation_errors
@@ -4089,6 +4096,7 @@ pub(crate) mod parity_seed {
             stale_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
+            hook_env: crate::engine::hooks::HookEnv::process(),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4518,6 +4526,7 @@ mod tests {
             stale_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
+            hook_env: crate::engine::hooks::HookEnv::process(),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -5396,6 +5405,75 @@ mod tests {
             "the worker's answer folds into the same panel: {:?}",
             app.validation_warnings
         );
+    }
+
+    /// STORY-295 AC2 and AC6: a hook's finding reaches the panel's errors, and
+    /// only a full pass spawns the hook. The worker's pass fills the cache the
+    /// render-path refresh then reads, so the refresh surfaces the finding with
+    /// no further spawn.
+    #[test]
+    fn a_hook_finding_reaches_the_panel_from_the_cache_without_spawning() {
+        use crate::engine::config::{HookDef, HookEvent};
+        use crate::engine::hooks::{HookCache, HookEnv, HookProcess, HookRunner, TrustStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingRunner(AtomicUsize);
+        impl HookRunner for CountingRunner {
+            fn run(&self, _: &HookDef, _: &Path, _: &[u8]) -> anyhow::Result<HookProcess> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HookProcess {
+                    code: Some(0),
+                    stdout: r#"{"findings":[{"severity":"error","message":"needs a goal"}]}"#
+                        .to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let hook = HookDef {
+            name: "lint".to_string(),
+            event: HookEvent::Validate,
+            run: vec!["lint".to_string()],
+            types: Vec::new(),
+            from: None,
+            to: None,
+            context_types: Vec::new(),
+            timeout: None,
+        };
+        let config = Config {
+            hooks: vec![hook],
+            ..Config::default()
+        };
+        let (tmp, store) = store_with_a_rotted_document(&config);
+        let trust = TrustStore::in_dir(&tmp.path().join("state"));
+        trust.trust(store.root(), &config.hooks).unwrap();
+        let runner = Arc::new(CountingRunner(AtomicUsize::new(0)));
+
+        let mut app = make_test_app(0);
+        app.store = store;
+        app.hook_env = HookEnv {
+            runner: runner.clone(),
+            trust: Arc::new(trust),
+            cache: Arc::new(HookCache::default()),
+        };
+        let shown = |app: &App| {
+            app.validation_errors
+                .iter()
+                .any(|e| e.contains("needs a goal"))
+        };
+
+        app.refresh_validation(&config);
+        assert!(!shown(&app), "nothing has filled the cache yet");
+        assert_eq!(runner.0.load(Ordering::SeqCst), 0);
+
+        app.run_stale_findings_now(&config, &StalenessCache::off());
+        assert_eq!(runner.0.load(Ordering::SeqCst), 1);
+        assert!(shown(&app), "got: {:?}", app.validation_errors);
+
+        app.refresh_validation(&config);
+        assert!(shown(&app), "got: {:?}", app.validation_errors);
+        assert_eq!(runner.0.load(Ordering::SeqCst), 1, "the refresh spawned");
     }
 
     /// A findings pass a newer one has superseded is dropped, the way a stale

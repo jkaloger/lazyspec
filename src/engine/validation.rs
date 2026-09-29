@@ -3,6 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
+use crate::engine::hooks::{self, HookEnv, Pass};
 use crate::engine::staleness::{cannot_be_stale, compute, Band, Staleness, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
@@ -171,6 +172,21 @@ pub enum ValidationIssue {
         path: PathBuf,
         part: String,
     },
+    /// A finding a `validate` hook reported (RFC-075). `hook` names the hook that
+    /// raised it; `id`, `part` and `line` locate it when the hook could. Severity
+    /// is the hook's own, carried beside the issue like every other rule's.
+    Hook {
+        hook: String,
+        id: Option<String>,
+        part: Option<String>,
+        line: Option<u32>,
+        message: String,
+    },
+    /// `validate` hooks are configured but not trusted, so none ran (RFC-075
+    /// Trust). One warning per validation, naming the hooks it skipped.
+    HooksUntrusted {
+        hooks: Vec<String>,
+    },
 }
 
 impl ValidationIssue {
@@ -207,6 +223,8 @@ impl ValidationIssue {
             ValidationIssue::GovernsUnowned { .. } => "governs-unowned",
             ValidationIssue::Stale { .. } => "stale",
             ValidationIssue::MissingPart { .. } => "missing-part",
+            ValidationIssue::Hook { .. } => "hook",
+            ValidationIssue::HooksUntrusted { .. } => "hooks-untrusted",
         }
     }
 
@@ -517,6 +535,33 @@ impl std::fmt::Display for ValidationIssue {
                     "{} is missing declared part \"{}\"",
                     path.display(),
                     part
+                )
+            }
+            ValidationIssue::Hook {
+                hook,
+                id,
+                part,
+                line,
+                message,
+            } => {
+                write!(f, "hook {hook}: ")?;
+                if let Some(id) = id {
+                    write!(f, "{id}")?;
+                    if let Some(part) = part {
+                        write!(f, " {part}")?;
+                    }
+                    if let Some(line) = line {
+                        write!(f, ":{line}")?;
+                    }
+                    write!(f, ": ")?;
+                }
+                write!(f, "{message}")
+            }
+            ValidationIssue::HooksUntrusted { hooks } => {
+                write!(
+                    f,
+                    "hooks skipped until trusted ({}); run `lazyspec hook trust` to trust them",
+                    hooks.join(", ")
                 )
             }
         }
@@ -1774,6 +1819,41 @@ fn check_project_field(
     }
 }
 
+/// `validate` hooks (RFC-075): findings from the project's own commands.
+/// [`Pass::Full`] spawns them; [`Pass::Cached`] reads what a full pass left, so
+/// the TUI's render-path refresh spawns nothing (STORY-295 AC6).
+pub struct HookRule {
+    pass: Pass,
+    env: HookEnv,
+}
+
+impl HookRule {
+    pub fn full(env: HookEnv) -> Self {
+        Self {
+            pass: Pass::Full,
+            env,
+        }
+    }
+
+    pub fn cached(env: HookEnv) -> Self {
+        Self {
+            pass: Pass::Cached,
+            env,
+        }
+    }
+}
+
+impl Checker for HookRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let docs: Vec<&DocMeta> = store.docs.values().collect();
+        hooks::validate_issues(&self.env, self.pass, store.root(), &docs, config)
+    }
+}
+
 /// Every rule but [`StaleRule`], the one that shells out to git per document.
 /// What a caller on a render path runs (STORY-276 AC2): it also reads no memo
 /// file, since only that rule has one.
@@ -1802,6 +1882,7 @@ fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
         Box::new(GitCli),
         StalenessCache::load(root),
     )));
+    checkers.push(Box::new(HookRule::full(HookEnv::process())));
     checkers
 }
 
@@ -1813,8 +1894,14 @@ pub fn validate_full(store: &super::store::Store, config: &Config) -> Validation
 /// git subprocess per document where it runs -- the TUI's validation refresh,
 /// which answers `stale` from a worker instead (STORY-276 AC2). A skipped rule,
 /// not a suppressed one: nothing is banded and no memo is read.
-pub fn validate_without_stale(store: &super::store::Store, config: &Config) -> ValidationResult {
-    run_checkers(checkers_without_stale(), store, config)
+pub fn validate_without_stale(
+    store: &super::store::Store,
+    config: &Config,
+    hooks: &HookEnv,
+) -> ValidationResult {
+    let mut checkers = checkers_without_stale();
+    checkers.push(Box::new(HookRule::cached(hooks.clone())));
+    run_checkers(checkers, store, config)
 }
 
 fn run_checkers(
@@ -4305,6 +4392,16 @@ mod finding_shape_tests {
             ValidationIssue::MissingPart {
                 path: path(),
                 part: "design.md".to_string(),
+            },
+            ValidationIssue::Hook {
+                hook: "required-sections".to_string(),
+                id: Some("STORY-001".to_string()),
+                part: None,
+                line: Some(14),
+                message: "missing ## Goals".to_string(),
+            },
+            ValidationIssue::HooksUntrusted {
+                hooks: vec!["required-sections".to_string()],
             },
         ]
     }

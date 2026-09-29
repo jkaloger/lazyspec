@@ -39,6 +39,7 @@ Most commands accept `--json`. `lazyspec help <command>` prints the complete opt
 | `validate`                               | Reports document, relationship, staleness, and source ownership findings. `--id <id>` limits document findings to one document.                                                                                               |
 | `fix`                                    | Repairs supported document findings. `--config`, `--governs`, and `--renumber` select other repair modes. `--dry-run` previews changes.                                                                                       |
 | `govern add/remove/list`                 | Manages source file globs on a document.                                                                                                                                                                                      |
+| `hook list` / `hook trust`               | Lists the `[[hooks]]` entries with their event, scope, and trust state / trusts the current hook table. `--no-hooks` (any command) skips every hook.                                                                  |
 | `pin <id>`                               | Records the current Git commit as the document's review anchor and pins `@ref` directives.                                                                                                                                    |
 | `provenance add/remove/list`             | Manages document citations.                                                                                                                                                                                                   |
 | `fetch` / `push`                         | Refreshes remote documents / publishes commits from `git` stores.                                                                                                                                                             |
@@ -58,6 +59,23 @@ Each type selects a store. The default `filesystem` store writes Markdown under 
 Templates are read from `.lazyspec/templates/` by default. A type may use a shared `template.md`, a `<type>.md` file, or a `<type>/` directory. A directory template requires `index.md` and creates a document bundle. Markdown files beside `index.md` without frontmatter are parts of that document. Files with frontmatter are child documents.
 
 The optional `[governs]` table defines a source root and an ownership check. Document `governs` globs identify source files covered by a document. `pin` sets the `reviewed` Git commit. Staleness can be based on age or changes under those globs. `show` reports the resulting `fresh`, `aging`, or `stale` band.
+
+### Hooks
+
+A `[[hooks]]` entry attaches an external command to a lazyspec event. `validate` is the event available now. The command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
+
+```toml
+[[hooks]]
+name = "required-sections"
+event = "validate"
+types = ["story", "rfc"]
+run = [".lazyspec/hooks/required-sections"]
+timeout = 30
+```
+
+`run` is an argv array resolved from the project root, with no shell. `types` defaults to every type. `timeout` is in seconds and defaults to 30. Findings appear in `validate`, `status`, and the terminal interface like built-in findings, and name the hook. A non-zero exit, invalid JSON, a timeout, or any `updates` in the output becomes one error finding that includes the hook's stderr.
+
+Hooks from a cloned repository do not run until you run `lazyspec hook trust`. Trust records a hash of the `[[hooks]]` table and of each `run` file inside the repository, in `~/.lazyspec/hook-trust.json` (or `$LAZYSPEC_STATE_DIR`). Editing either makes the hooks untrusted again, and validation warns until you trust them. The terminal interface reads results cached from the last full validation and never spawns a hook on refresh.
 
 ### Terminal interface
 

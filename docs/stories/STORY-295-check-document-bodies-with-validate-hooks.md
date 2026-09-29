@@ -1,12 +1,13 @@
 ---
 title: Check document bodies with validate hooks
 type: story
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
 related:
 - implements: RFC-075
+reviewed: 43f9cc5e1315b187ba5d6bd9b53cec9a2121767e
 ---
 
 ## Value
