@@ -130,9 +130,13 @@ pub fn run_from_template(
 ) -> Result<()> {
     let source = resolve_pack_source(root, template, git_ref_ops)?;
     let files = install_pack(root, &source, force)?;
+    let ships_hooks = files.iter().any(|f| f.starts_with(HOOKS_DIR));
 
     if json {
-        let payload = serde_json::json!({ "files": files });
+        let mut payload = serde_json::json!({ "files": files });
+        if ships_hooks {
+            payload["trust"] = serde_json::json!(HOOK_TRUST_COMMAND);
+        }
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!(
@@ -146,9 +150,17 @@ pub fn run_from_template(
         for file in &files {
             println!("  {}", file.display());
         }
+        if ships_hooks {
+            println!(
+                "This pack ships hooks, which stay untrusted until you review them. Run: {HOOK_TRUST_COMMAND}"
+            );
+        }
     }
     Ok(())
 }
+
+const HOOKS_DIR: &str = ".lazyspec/hooks";
+const HOOK_TRUST_COMMAND: &str = "lazyspec hook trust";
 
 /// Whether the clone at `clone_root` already came from `url`/`branch`, read
 /// straight off `.git/config` and `.git/HEAD` rather than asking git (this
@@ -225,7 +237,7 @@ fn resolve_pack_source(
     Ok(clone_root)
 }
 
-/// Copy `source`'s `.lazyspec.toml` and whole `.lazyspec/templates/` tree
+/// Copy `source`'s `.lazyspec.toml`, `.lazyspec/hooks/` and whole `.lazyspec/templates/` tree
 /// (flat and directory templates alike -- it is a byte copy, not a template
 /// interpreter) into `root`. Storage stays local: nothing here sets `extends`
 /// or otherwise moves where documents live (RFC-074 Decisions). Returns every
@@ -252,6 +264,11 @@ fn install_pack(root: &Path, source: &Path, force: bool) -> Result<Vec<PathBuf>>
     if source_templates.is_dir() {
         let dest_templates = root.join(".lazyspec/templates");
         copy_dir_recursive(root, &source_templates, &dest_templates, &mut written)?;
+    }
+
+    let source_hooks = source.join(HOOKS_DIR);
+    if source_hooks.is_dir() {
+        copy_dir_recursive(root, &source_hooks, &root.join(HOOKS_DIR), &mut written)?;
     }
 
     Ok(written)

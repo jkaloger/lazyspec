@@ -268,6 +268,113 @@ fn init_template_json_lists_the_files_written() {
     );
 }
 
+fn pack_with_hook() -> TempDir {
+    let pack = TempDir::new().unwrap();
+    fs_extra_copy(&openspec_pack(), pack.path());
+    let hooks = pack.path().join(".lazyspec/hooks");
+    std::fs::create_dir_all(hooks.join("lib")).unwrap();
+    let script = hooks.join("check");
+    std::fs::write(&script, "#!/bin/sh\necho '{\"findings\": []}'\n").unwrap();
+    std::fs::write(hooks.join("lib/helper"), "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let toml_path = pack.path().join(".lazyspec.toml");
+    let mut toml = std::fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        "\n[[hooks]]\nname = \"check\"\nevent = \"validate\"\nrun = [\".lazyspec/hooks/check\"]\n",
+    );
+    std::fs::write(&toml_path, toml).unwrap();
+    pack
+}
+
+// STORY-297 AC1 + AC2: the pack's `.lazyspec/hooks/` is copied (nested files,
+// exec bit kept) and listed under `--json`; the adopted hooks start untrusted
+// and `init` names the command that trusts them.
+#[test]
+fn init_template_copies_hooks_which_start_untrusted() {
+    let pack = pack_with_hook();
+    let dir = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let root = dir.path();
+    let bin = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+            .args(args)
+            .env("LAZYSPEC_STATE_DIR", state.path())
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+
+    let output = bin(&[
+        "init",
+        "--template",
+        pack.path().to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let files: Vec<&str> = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert!(files.contains(&".lazyspec/hooks/check"), "got: {files:?}");
+    assert!(
+        files.contains(&".lazyspec/hooks/lib/helper"),
+        "got: {files:?}"
+    );
+    assert_eq!(json["trust"], "lazyspec hook trust");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join(".lazyspec/hooks/check"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "hook script stays executable");
+    }
+
+    let listed = bin(&["hook", "list", "--json"]);
+    let hooks: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(hooks[0]["name"], "check");
+    assert_eq!(hooks[0]["trust"], "untrusted");
+
+    let plain_dir = TempDir::new().unwrap();
+    let plain = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args(["init", "--template", pack.path().to_str().unwrap()])
+        .current_dir(plain_dir.path())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("lazyspec hook trust"));
+}
+
+// A pack without hooks prints no trust hint.
+#[test]
+fn init_template_without_hooks_has_no_trust_hint() {
+    let dir = TempDir::new().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
+        .args([
+            "init",
+            "--template",
+            openspec_pack().to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json.get("trust").is_none());
+}
+
 /// Recursively copy `src` into `dst` (both already existing directories):
 /// this test's own fixture setup, standing in for `cp -r`.
 fn fs_extra_copy(src: &Path, dst: &Path) {

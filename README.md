@@ -24,7 +24,7 @@ Most commands accept `--json`. `lazyspec help <command>` prints the complete opt
 
 | Command                                  | Behaviour                                                                                                                                                                                                                     |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init`                                   | Creates `.lazyspec.toml` and templates. On a terminal, it runs the configuration wizard. `--non-interactive`, `--json`, or a non-terminal writes the starter configuration. `--template <dir-or-url>` copies a workflow pack. |
+| `init`                                   | Creates `.lazyspec.toml` and templates. On a terminal, it runs the configuration wizard. `--non-interactive`, `--json`, or a non-terminal writes the starter configuration. `--template <dir-or-url>` copies a workflow pack: its config, templates, and hooks. |
 | `create <type> <title>`                  | Creates a document from a template. `--parent <id>` creates a nested document when the parent and child use the same store.                                                                                                   |
 | `list [type]`                            | Lists documents, optionally filtered by type or status.                                                                                                                                                                       |
 | `show <id>`                              | Displays a document. `-e` expands `@ref` directives. `--parts` includes bundle parts. `--open` opens a browser or configured viewer.                                                                                          |
@@ -62,7 +62,7 @@ The optional `[governs]` table defines a source root and an ownership check. Doc
 
 ### Hooks
 
-A `[[hooks]]` entry attaches an external command to a lazyspec event. `validate` is the event available now. The command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
+A `[[hooks]]` entry attaches an external command to a lazyspec event. There are two events: `validate` and `pre-transition` (below). For `validate`, the command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
 
 ```toml
 [[hooks]]
@@ -76,6 +76,10 @@ timeout = 30
 `run` is an argv array resolved from the project root, with no shell. `types` defaults to every type. `timeout` is in seconds and defaults to 30. Findings appear in `validate`, `status`, and the terminal interface like built-in findings, and name the hook. A non-zero exit, invalid JSON, a timeout, or any `updates` in the output becomes one error finding that includes the hook's stderr.
 
 Hooks from a cloned repository do not run until you run `lazyspec hook trust`. Trust records a hash of the `[[hooks]]` table and of each `run` file inside the repository, in `~/.lazyspec/hook-trust.json` (or `$LAZYSPEC_STATE_DIR`). Editing either makes the hooks untrusted again, and validation warns until you trust them. The terminal interface reads results cached from the last full validation and never spawns a hook on refresh.
+
+#### Hooks in a workflow pack
+
+A pack can ship its hook scripts in `.lazyspec/hooks/`, next to its `.lazyspec.toml` (which carries the `[[hooks]]` entries) and `.lazyspec/templates/`. `lazyspec init --template <dir-or-url>` copies the whole directory, keeping file modes, and `--json` lists the copied files and adds `"trust": "lazyspec hook trust"` when the pack ships hooks. The adopted hooks are untrusted, so none run. Read them, then run `lazyspec hook trust`; `init` prints that command.
 
 #### pre-transition
 
