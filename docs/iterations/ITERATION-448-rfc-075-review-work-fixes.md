@@ -1,12 +1,13 @@
 ---
 title: RFC-075 review-work fixes
 type: iteration
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-09-29
 tags: []
 related:
 - implements: STORY-296
+reviewed: 6ca2e75ee7cda34236bcaed9b923ba2238f567fb
 ---
 
 ## Context
