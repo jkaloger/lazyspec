@@ -1,13 +1,13 @@
 ---
 title: Run hooks on status changes
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
 related:
 - implements: RFC-075
-reviewed: 60fd8146b64170c0417039632f977dd7007b9d1d
+reviewed: 85e41fa2ed48129833247457cbdc2a43f23c3e50
 ---
 
 ## Value
