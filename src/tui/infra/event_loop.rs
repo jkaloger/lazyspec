@@ -734,8 +734,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         } => {
             app.apply_staleness(generation, staleness);
         }
-        AppEvent::StaleFindingsComputed { generation, result } => {
-            app.apply_stale_findings(generation, result, config);
+        AppEvent::StaleFindingsComputed {
+            generation,
+            result,
+            hook_findings,
+        } => {
+            app.apply_stale_findings(generation, result, hook_findings, config);
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
@@ -793,7 +797,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
     needs_validation
 }
 
-pub fn run(store: Store, config: &Config) -> Result<()> {
+pub fn run(store: Store, config: &Config, no_hooks: bool) -> Result<()> {
     // Owned, reassignable session config: `reload_session` re-parses
     // `.lazyspec.toml` and rebinds this so subsequent reads see it.
     let mut config: Config = config.clone();
@@ -831,6 +835,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     );
     app.terminal_image_protocol = protocol;
     app.tool_availability = tool_availability;
+    app.hook_env.disabled = no_hooks;
     app.refresh_validation(&config);
     // Seeds the header's unpushed count from whatever shared clones already
     // exist on disk (BUG-032 AC7), without a poll: `unpushed` never fetches,
@@ -945,12 +950,18 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
                 &staleness_cache,
             );
             let docs: Vec<&crate::engine::document::DocMeta> = req.docs.iter().collect();
-            crate::engine::hooks::refill_cache(&req.hook_env, &req.root, &docs, &req.config);
+            let hook_findings = crate::engine::validation::hook_findings(
+                &req.hook_env,
+                &req.root,
+                &docs,
+                &req.config,
+            );
             staleness_cache.flush();
             if stale_findings_result_tx
                 .send(AppEvent::StaleFindingsComputed {
                     generation: req.generation,
                     result: result.into(),
+                    hook_findings,
                 })
                 .is_err()
             {

@@ -121,6 +121,11 @@ pub fn bundle_part_row_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// An error message's colour. Not user-configurable, like [`band_color`].
+pub fn error() -> Color {
+    Color::Red
+}
+
 /// The staleness band's colour (RFC-069). Not user-configurable: three fixed
 /// values whose whole point is that they read the same everywhere.
 pub fn band_color(band: crate::engine::staleness::Band) -> Color {

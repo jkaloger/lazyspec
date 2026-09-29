@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use super::colors;
 use super::colors::StatusPalette;
 use crate::engine::document::Status;
 use crate::engine::git_status::GitFileStatus;
@@ -571,8 +572,7 @@ pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
         .status_picker
         .error
         .as_ref()
-        .map(|m| (m, Color::Red))
-        .or_else(|| app.status_picker.notice.as_ref().map(|m| (m, Color::Green)));
+        .map(|m| (m, colors::error()));
     let popup_width = if message.is_some() { 72 } else { 25 }.min(area.width.saturating_sub(4));
     let message_height =
         message.map_or(0, |(m, _)| wrapped_height(m, popup_width.saturating_sub(4)));
@@ -613,7 +613,7 @@ pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "[j/k] [Enter] [h: run hooks] [Esc]",
+        "[j/k] [Enter] [Esc]",
         Style::default().fg(Color::DarkGray),
     )));
 

@@ -1,3 +1,5 @@
+use crate::cli::resolve::resolve_shorthand_or_path;
+use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::config::HookEvent;
 use crate::engine::config::{Config, HookDef};
 use crate::engine::git_ref::GitRefOps;
@@ -25,11 +27,11 @@ pub enum HookCommand {
     },
     /// Fire an event's hooks for one document without changing its status
     Run {
-        /// The event to fire (`pre-transition`)
+        /// The event to fire (`pre-transition` or `validate`)
         event: String,
         /// Document to run the hooks against
         id: String,
-        /// Report what the hooks would update without saving it
+        /// Report what the hooks would update without saving it (`validate` hooks update nothing)
         #[arg(long)]
         dry_run: bool,
         /// Output as JSON
@@ -70,7 +72,7 @@ fn trust_label(trusted: bool) -> &'static str {
 }
 
 pub fn run_list(root: &Path, config: &Config, trust: &TrustStore, json: bool) -> String {
-    let trusted = trust.is_trusted(root, &config.hooks);
+    let trusted = trust.is_trusted(root, config);
     if json {
         let hooks: Vec<Value> = config
             .hooks
@@ -109,7 +111,7 @@ pub fn run_trust(root: &Path, config: &Config, trust: &TrustStore, json: bool) -
     if config.hooks.is_empty() {
         bail!("no [[hooks]] are configured, so there is nothing to trust");
     }
-    trust.trust(root, &config.hooks)?;
+    trust.trust(root, config)?;
     if json {
         return Ok(serde_json::to_string_pretty(&json!({
             "trusted": config.hooks.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
@@ -152,23 +154,30 @@ pub fn run_hook(
     dry_run: bool,
     git: &dyn GitRefOps,
     json: bool,
-) -> Result<String> {
+) -> Result<(String, i32)> {
+    if event == HookEvent::Validate.as_str() {
+        return run_validate_hooks(env, root, config, store, id, json);
+    }
     if event != HookEvent::PreTransition.as_str() {
         bail!(
-            "`hook run` fires `{}` hooks; `{event}` runs with `validate`",
-            HookEvent::PreTransition
+            "unknown event `{event}`; `hook run` fires `{}` or `{}`",
+            HookEvent::PreTransition,
+            HookEvent::Validate
         );
     }
     let outcome =
         crate::engine::ops::update::run_hooks_by_hand(env, root, store, id, dry_run, config, git)?;
     if json {
-        return Ok(serde_json::to_string_pretty(&json!({
-            "event": event,
-            "id": id,
-            "dry_run": dry_run,
-            "findings": findings_json(&outcome.warnings),
-            "updates": outcome.updates.iter().map(|u| u.to_json()).collect::<Vec<_>>(),
-        }))?);
+        return Ok((
+            serde_json::to_string_pretty(&json!({
+                "event": event,
+                "id": id,
+                "dry_run": dry_run,
+                "findings": findings_json(&outcome.warnings),
+                "updates": outcome.updates.iter().map(|u| u.to_json()).collect::<Vec<_>>(),
+            }))?,
+            0,
+        ));
     }
     let mut lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
     let verb = if dry_run { "Would update" } else { "Updated" };
@@ -179,7 +188,49 @@ pub fn run_hook(
     if lines.is_empty() {
         lines.push(format!("No {event} hooks had anything to report for {id}."));
     }
-    Ok(lines.join("\n"))
+    Ok((lines.join("\n"), 0))
+}
+
+/// `hook run validate <id>`: a full pass of the `validate` hooks over the one
+/// document, reported the way `validate` reports it. Nothing is saved, so
+/// `--dry-run` has no effect.
+fn run_validate_hooks(
+    env: &HookEnv,
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    id: &str,
+    json: bool,
+) -> Result<(String, i32)> {
+    let doc = resolve_shorthand_or_path(store, id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let result = crate::engine::validation::hook_findings(env, root, &[doc], config);
+    let exit_code = if result.errors.is_empty() { 0 } else { 2 };
+    if json {
+        let body = json!({
+            "event": HookEvent::Validate.as_str(),
+            "id": id,
+            "errors": result.errors.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
+            "warnings": result.warnings.iter().map(|w| w.to_json()).collect::<Vec<_>>(),
+        });
+        return Ok((serde_json::to_string_pretty(&body)?, exit_code));
+    }
+    let mut lines: Vec<String> = result
+        .errors
+        .iter()
+        .map(|e| format!("  {} {e}", error_prefix()))
+        .collect();
+    lines.extend(
+        result
+            .warnings
+            .iter()
+            .map(|w| format!("  {} {w}", warning_prefix())),
+    );
+    if lines.is_empty() {
+        lines.push(format!(
+            "No validate hooks had anything to report for {id}."
+        ));
+    }
+    Ok((lines.join("\n"), exit_code))
 }
 
 #[cfg(test)]

@@ -2,8 +2,9 @@ use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{error_prefix, warning_prefix};
 use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
+use crate::engine::hooks::HookEnv;
 use crate::engine::store::Store;
-use crate::engine::validation::{ValidationIssue, ValidationResult};
+use crate::engine::validation::{validate_full_with, ValidationIssue, ValidationResult};
 use console::{colors_enabled, Style};
 use std::path::Path;
 
@@ -46,13 +47,14 @@ pub fn gh_auth_warnings(gh: &dyn GhAuth) -> Vec<String> {
 pub fn run_full(
     store: &Store,
     config: &Config,
+    hooks: &HookEnv,
     id: Option<&str>,
     json: bool,
     warnings: bool,
 ) -> anyhow::Result<i32> {
     let scope = id.map(|id| resolve_scope_path(store, id)).transpose()?;
 
-    let mut result = store.validate_full(config);
+    let mut result = validate_full_with(store, config, hooks);
     if let Some(target) = &scope {
         scope_to_path(&mut result, target);
     }

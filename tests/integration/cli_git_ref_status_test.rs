@@ -36,6 +36,7 @@ fn status_json_includes_git_ref_documents() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &config,
+        &lazyspec::engine::hooks::HookEnv::process(false),
         _fixture.root(),
         &crate::common::NoopGh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),

@@ -3,7 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
-use crate::engine::hooks::{self, HookEnv, Pass};
+use crate::engine::hooks::{self, HookEnv};
 use crate::engine::staleness::{cannot_be_stale, compute, Band, Staleness, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 /// Where a file a rotted `governs` glob used to match went, as
 /// `validate --json` publishes it (RFC-068): named fields, not a positional
 /// pair, so a consumer reads `from`/`to` rather than array indices.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Rename {
     pub from: String,
     pub to: String,
@@ -30,7 +30,7 @@ impl From<(String, String)> for Rename {
 /// The derived `Serialize` is the variant's own fields and nothing else; the
 /// finding an agent consumes is [`ValidationIssue::to_json`], which adds the
 /// [`rule`](ValidationIssue::rule) slug and the rendered `message`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(strum::EnumCount))]
 #[serde(untagged)]
 pub enum ValidationIssue {
@@ -239,7 +239,7 @@ impl ValidationIssue {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ValidationResult {
     pub errors: Vec<ValidationIssue>,
     pub warnings: Vec<ValidationIssue>,
@@ -1820,26 +1820,13 @@ fn check_project_field(
 }
 
 /// `validate` hooks (RFC-075): findings from the project's own commands.
-/// [`Pass::Full`] spawns them; [`Pass::Cached`] reads what a full pass left, so
-/// the TUI's render-path refresh spawns nothing (STORY-295 AC6).
 pub struct HookRule {
-    pass: Pass,
     env: HookEnv,
 }
 
 impl HookRule {
-    pub fn full(env: HookEnv) -> Self {
-        Self {
-            pass: Pass::Full,
-            env,
-        }
-    }
-
-    pub fn cached(env: HookEnv) -> Self {
-        Self {
-            pass: Pass::Cached,
-            env,
-        }
+    pub fn new(env: HookEnv) -> Self {
+        Self { env }
     }
 }
 
@@ -1850,7 +1837,7 @@ impl Checker for HookRule {
         config: &Config,
     ) -> Vec<(Severity, ValidationIssue)> {
         let docs: Vec<&DocMeta> = store.docs.values().collect();
-        hooks::validate_issues(&self.env, self.pass, store.root(), &docs, config)
+        hooks::validate_issues(&self.env, store.root(), &docs, config)
     }
 }
 
@@ -1876,32 +1863,56 @@ fn checkers_without_stale() -> Vec<Box<dyn Checker>> {
 
 /// `root` is the docs root, which only [`StaleRule`] needs: its `(reviewed,
 /// HEAD)` memo is filed under it.
-fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
+fn default_checkers(root: &Path, hooks: &HookEnv) -> Vec<Box<dyn Checker>> {
     let mut checkers = checkers_without_stale();
     checkers.push(Box::new(StaleRule::new(
         Box::new(GitCli),
         StalenessCache::load(root),
     )));
-    checkers.push(Box::new(HookRule::full(HookEnv::process())));
+    checkers.push(Box::new(HookRule::new(hooks.clone())));
     checkers
 }
 
 pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
-    run_checkers(default_checkers(store.root()), store, config)
+    validate_full_with(store, config, &HookEnv::process(false))
 }
 
-/// [`validate_full`] without [`StaleRule`], for a caller that cannot afford a
-/// git subprocess per document where it runs -- the TUI's validation refresh,
-/// which answers `stale` from a worker instead (STORY-276 AC2). A skipped rule,
-/// not a suppressed one: nothing is banded and no memo is read.
-pub fn validate_without_stale(
+/// [`validate_full`] with the hooks' env supplied, so `--no-hooks` and a test's
+/// fake runner reach the `validate` hooks.
+pub fn validate_full_with(
     store: &super::store::Store,
     config: &Config,
     hooks: &HookEnv,
 ) -> ValidationResult {
-    let mut checkers = checkers_without_stale();
-    checkers.push(Box::new(HookRule::cached(hooks.clone())));
-    run_checkers(checkers, store, config)
+    run_checkers(default_checkers(store.root(), hooks), store, config)
+}
+
+/// [`validate_full`] without [`StaleRule`], for a caller that cannot afford a
+/// git subprocess per document where it runs -- the TUI's validation refresh,
+/// which answers `stale` and the `validate` hooks from a worker instead
+/// (STORY-276 AC2, STORY-295 AC6). A skipped rule, not a suppressed one: nothing
+/// is banded, no memo is read and no hook is touched: `hook_findings` is what the
+/// last full pass found.
+pub fn validate_without_stale(
+    store: &super::store::Store,
+    config: &Config,
+    hook_findings: &ValidationResult,
+) -> ValidationResult {
+    let mut result = run_checkers(checkers_without_stale(), store, config);
+    result.merge(hook_findings.clone());
+    result
+}
+
+/// The `validate` hooks' findings over `docs`: one full pass that spawns each
+/// trusted hook. What a worker or `hook run validate` calls, and what feeds
+/// [`validate_without_stale`] afterwards.
+pub fn hook_findings(
+    env: &HookEnv,
+    root: &Path,
+    docs: &[&DocMeta],
+    config: &Config,
+) -> ValidationResult {
+    hooks::validate_issues(env, root, docs, config).into()
 }
 
 fn run_checkers(

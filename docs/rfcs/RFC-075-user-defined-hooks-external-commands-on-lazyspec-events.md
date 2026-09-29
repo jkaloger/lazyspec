@@ -122,21 +122,20 @@ What the hook prints on stdout:
 
 - A `HookRunner` trait is the I/O boundary: a real implementation that spawns the process (building on `subprocess::output_with_timeout`), and a fake for tests.
 - A `HookRule` implements `Checker` and turns `validate` hook findings into a new `ValidationIssue::Hook { hook, id, part, line, message }`. It is added in `default_checkers`.
-- Transitions go through one engine function that runs the matching hooks, merges their updates, checks hashes, then saves the updates and the status together. The CLI and TUI both call it; neither re-implements it.
+- Transitions go through one engine function that runs the matching hooks, merges their updates, checks hashes, then saves the updates and the status together. The CLI and TUI both call it; neither re-implements it. Hooks are enforced in the engine: no status write skips them; only `--no-hooks` does.
 
 ### Surfaces
 
 - **CLI:**
   - `validate` and `status` include hook findings.
   - `update --status` runs `pre-transition` hooks.
-  - `hook run <event> <id> [--dry-run]` fires an event by hand. `--dry-run` prints the updates without saving them.
+  - `hook run <event> <id> [--dry-run]` fires `validate` or `pre-transition` by hand. `--dry-run` prints the updates without saving them; `validate` hooks update nothing, so it has no effect there. `validate` findings print as `validate` does and exit non-zero on an error.
   - `hook list` shows each hook's event, scope and trust state.
   - `hook trust` trusts the current hook config.
   - Every command takes `--json`.
 - **TUI:**
   - Hook findings show in the validation display.
   - A blocked status change shows its findings instead of moving.
-  - The command palette (RFC-073) lists `hook run` for the selected document.
 - **Web view:** the same findings and blocked transitions, read from the engine. There is no separate code path.
 
 ### Trust
@@ -145,7 +144,7 @@ A cloned repo's `.lazyspec.toml` is someone else's code. `lazyspec hook trust` r
 
 ### Performance
 
-The TUI refreshes validation often. `validate` hook results are cached by hook name plus the hash of their input, the same way `StalenessCache` caches staleness. The TUI's quick refresh (`validate_without_stale`) reads the cache and leaves it alone. The full validate refills it.
+The TUI refreshes validation often, so its quick refresh (`validate_without_stale`) does no hook I/O: it folds in the hook findings from the last full pass. The background worker that answers `stale` runs the full hook pass and sends the findings back; a full validate refreshes them.
 
 ## Alternatives
 

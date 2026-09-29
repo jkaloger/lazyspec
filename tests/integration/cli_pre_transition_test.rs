@@ -60,7 +60,12 @@ fn an_error_finding_blocks_the_move_and_reports_in_json() {
     assert!(!output.status.success());
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(body["findings"][0]["hook"], "gate");
-    assert_eq!(body["findings"][0]["message"], "nope");
+    assert_eq!(body["findings"][0]["rule"], "hook");
+    assert_eq!(body["findings"][0]["severity"], "error");
+    assert!(body["findings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("nope"));
     assert_eq!(project.doc()["status"], "draft");
 }
 
@@ -71,7 +76,7 @@ fn an_error_finding_blocks_the_move_and_prints_findings_in_text() {
     let output = project.run(&["update", "RFC-001", "--status", "review"]);
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("error [gate]: nope"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error: hook gate: nope"));
 }
 
 #[test]
@@ -83,7 +88,11 @@ fn a_warning_is_reported_and_the_move_happens() {
     assert!(output.status.success());
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(body["status"], "review");
-    assert_eq!(body["hook_findings"][0]["message"], "heads up");
+    assert_eq!(body["hook_findings"][0]["severity"], "warning");
+    assert!(body["hook_findings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("heads up"));
 }
 
 #[test]

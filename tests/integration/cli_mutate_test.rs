@@ -187,11 +187,12 @@ fn update_github_milestones_type_routes_to_milestone_branch() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
 
     let err = lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::process(true),
         fixture.root(),
         &store,
         "MILESTONE-1",
         &[("title", "v2.0")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap_err()

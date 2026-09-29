@@ -367,6 +367,7 @@ pub enum AppEvent {
     StaleFindingsComputed {
         generation: u64,
         result: crate::engine::validation::ValidationResult,
+        hook_findings: crate::engine::validation::ValidationResult,
     },
     CacheRefresh {
         warnings: Vec<String>,
@@ -698,6 +699,10 @@ pub struct App {
     /// Unlike `staleness`, this one is a cache: it holds the previous answer
     /// while the next is being computed, so the panel does not flicker.
     pub stale_findings: crate::engine::validation::ValidationResult,
+    /// The `validate` hooks' findings from the last worker pass. The quick
+    /// refresh folds these in and touches no hook, so the render path does no
+    /// hook I/O (STORY-295 AC6).
+    pub hook_findings: crate::engine::validation::ValidationResult,
     /// Monotonic id stamped onto each dispatched findings pass; an older
     /// result is dropped, so a slow pass cannot overwrite a newer one.
     pub stale_findings_generation: u64,
@@ -902,9 +907,10 @@ impl App {
             staleness_key: None,
             staleness_tx,
             stale_findings: Default::default(),
+            hook_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
-            hook_env: crate::engine::hooks::HookEnv::process(),
+            hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -1103,8 +1109,11 @@ impl App {
         // STORY-276 AC2: `stale` is the one rule that shells out to git per
         // document, and this runs on the render path. It is skipped here and
         // answered by a worker instead, whose last result is folded in below.
-        let result =
-            crate::engine::validation::validate_without_stale(&self.store, config, &self.hook_env);
+        let result = crate::engine::validation::validate_without_stale(
+            &self.store,
+            config,
+            &self.hook_findings,
+        );
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
         self.validation_errors
@@ -3507,50 +3516,11 @@ impl App {
         self.status_picker.active = true;
     }
 
-    /// `hook run pre-transition` for the document the status picker is open on
-    /// (STORY-296 AC4): saves what the hooks update, leaves the status.
-    pub fn run_hooks_for_picker_doc(&mut self, root: &Path, config: &Config) {
-        let doc_path = self.status_picker.doc_path.to_string_lossy().to_string();
-        self.status_picker.error = None;
-        self.status_picker.notice = None;
-        let outcome = crate::engine::ops::update::run_hooks_by_hand(
-            &self.hook_env,
-            root,
-            &self.store,
-            &doc_path,
-            false,
-            config,
-            &*self.git,
-        );
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                self.status_picker.error = Some(e.to_string());
-                return;
-            }
-        };
-        for path in &outcome.touched {
-            if let Err(e) = self.store.reload_file(root, path, &*self.fs) {
-                self.status_picker.error = Some(e.to_string());
-                self.filtered_docs_cache = None;
-                return;
-            }
-        }
-        self.filtered_docs_cache = None;
-        let mut lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
-        lines.extend(outcome.updates.iter().map(|u| format!("updated {}", u.id)));
-        if lines.is_empty() {
-            lines.push("hooks ran; nothing to report".to_string());
-        }
-        self.status_picker.notice = Some(lines.join("\n"));
-    }
-
     pub fn close_status_picker(&mut self) {
         self.status_picker.active = false;
         self.status_picker.selected = 0;
         self.status_picker.doc_path = PathBuf::new();
         self.status_picker.error = None;
-        self.status_picker.notice = None;
     }
 
     pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
@@ -3561,7 +3531,7 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        let outcome = match crate::engine::ops::update::run_with_hooks(
+        let outcome = match crate::engine::ops::update::run_with_config(
             &self.hook_env,
             root,
             &self.store,
@@ -3993,7 +3963,7 @@ impl App {
                 "create_form.author={} create_form.tags={} create_form.related={} ",
                 "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
                 "settings_delete_confirm.active={} settings_impact_confirm.active={} ",
-                "status_picker.active={} status_picker.selected={} status_picker.notice={:?} ",
+                "status_picker.active={} status_picker.selected={} ",
                 "link_editor.active={} link_editor.selected={} link_editor.query_len={} ",
                 "link_editor.rel_type_index={} link_editor.results_len={} ",
                 "provenance_editor.active={} provenance_buf_len={} ",
@@ -4043,7 +4013,6 @@ impl App {
             self.settings_impact_confirm.active,
             self.status_picker.active,
             self.status_picker.selected,
-            self.status_picker.notice,
             self.link_editor.active,
             self.link_editor.selected,
             self.link_editor.query.len(),
@@ -4144,9 +4113,10 @@ pub(crate) mod parity_seed {
             staleness_key: None,
             staleness_tx,
             stale_findings: Default::default(),
+            hook_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
-            hook_env: crate::engine::hooks::HookEnv::process(),
+            hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -4574,9 +4544,10 @@ mod tests {
             staleness_key: None,
             staleness_tx,
             stale_findings: Default::default(),
+            hook_findings: Default::default(),
             stale_findings_generation: 0,
             stale_findings_tx,
-            hook_env: crate::engine::hooks::HookEnv::process(),
+            hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
             help_max_scroll: 0,
@@ -5457,56 +5428,26 @@ mod tests {
         );
     }
 
-    /// STORY-295 AC2 and AC6: a hook's finding reaches the panel's errors, and
-    /// only a full pass spawns the hook. The worker's pass fills the cache the
-    /// render-path refresh then reads, so the refresh surfaces the finding with
-    /// no further spawn.
+    /// STORY-295 AC2 and AC6: the quick refresh spawns no hook; the worker's
+    /// full pass brings the finding to the panel, and the next quick refresh
+    /// still shows it from what the app kept.
     #[test]
-    fn a_hook_finding_reaches_the_panel_from_the_cache_without_spawning() {
-        use crate::engine::config::{HookDef, HookEvent};
-        use crate::engine::hooks::{HookCache, HookEnv, HookProcess, HookRunner, TrustStore};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+    fn a_hook_finding_arrives_with_the_worker_pass_and_survives_a_quick_refresh() {
+        use crate::engine::config::HookEvent;
+        use crate::engine::hooks::test_support::{fixture_hook, trusted_env, ScriptedRunner};
 
-        struct CountingRunner(AtomicUsize);
-        impl HookRunner for CountingRunner {
-            fn run(&self, _: &HookDef, _: &Path, _: &[u8]) -> anyhow::Result<HookProcess> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(HookProcess {
-                    code: Some(0),
-                    stdout: r#"{"findings":[{"severity":"error","message":"needs a goal"}]}"#
-                        .to_string(),
-                    stderr: String::new(),
-                })
-            }
-        }
-
-        let hook = HookDef {
-            name: "lint".to_string(),
-            event: HookEvent::Validate,
-            run: vec!["lint".to_string()],
-            types: Vec::new(),
-            from: None,
-            to: None,
-            context_types: Vec::new(),
-            timeout: None,
-        };
         let config = Config {
-            hooks: vec![hook],
+            hooks: vec![fixture_hook("lint", HookEvent::Validate)],
             ..Config::default()
         };
-        let (tmp, store) = store_with_a_rotted_document(&config);
-        let trust = TrustStore::in_dir(&tmp.path().join("state"));
-        trust.trust(store.root(), &config.hooks).unwrap();
-        let runner = Arc::new(CountingRunner(AtomicUsize::new(0)));
+        let (_tmp, store) = store_with_a_rotted_document(&config);
+        let runner = ScriptedRunner::replying(
+            r#"{"findings":[{"severity":"error","message":"needs a goal"}]}"#,
+        );
 
         let mut app = make_test_app(0);
+        app.hook_env = trusted_env(runner.clone(), store.root(), &config);
         app.store = store;
-        app.hook_env = HookEnv {
-            runner: runner.clone(),
-            trust: Arc::new(trust),
-            cache: Arc::new(HookCache::default()),
-        };
         let shown = |app: &App| {
             app.validation_errors
                 .iter()
@@ -5514,16 +5455,16 @@ mod tests {
         };
 
         app.refresh_validation(&config);
-        assert!(!shown(&app), "nothing has filled the cache yet");
-        assert_eq!(runner.0.load(Ordering::SeqCst), 0);
+        assert!(!shown(&app), "no worker pass has run yet");
+        assert_eq!(runner.calls(), 0, "the quick refresh spawned");
 
         app.run_stale_findings_now(&config, &StalenessCache::off());
-        assert_eq!(runner.0.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.calls(), 1);
         assert!(shown(&app), "got: {:?}", app.validation_errors);
 
         app.refresh_validation(&config);
         assert!(shown(&app), "got: {:?}", app.validation_errors);
-        assert_eq!(runner.0.load(Ordering::SeqCst), 1, "the refresh spawned");
+        assert_eq!(runner.calls(), 1, "the second quick refresh spawned");
     }
 
     /// A findings pass a newer one has superseded is dropped, the way a stale
@@ -5542,6 +5483,7 @@ mod tests {
         app.apply_stale_findings(
             superseded,
             crate::engine::validation::validate_full(&app.store, &config),
+            Default::default(),
             &config,
         );
 
@@ -5848,39 +5790,6 @@ mod tests {
         assert!(shown.contains("consider a goal"), "{shown}");
         let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
         assert!(content.contains("status: review"), "{content}");
-    }
-
-    // STORY-296 AC4: `h` in the picker runs the hooks, saves what they update,
-    // leaves the status, and reports what it did.
-    #[test]
-    fn h_in_the_picker_saves_the_hooks_updates_and_keeps_the_status() {
-        let (_tmp, mut app) = bare_app();
-        populate_docs(&mut app);
-        let root = app.store.root.clone();
-        let config = hook_config();
-        let hash = crate::engine::hooks::hook_document(
-            app.store.resolve_shorthand("RFC-002").unwrap(),
-            &root,
-            &crate::engine::fs::RealFileSystem,
-        )["content_hash"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let reply = serde_json::json!({
-            "updates": [{"id": "RFC-002", "hash": hash, "body": "rewritten by hook"}]
-        })
-        .to_string();
-        picker_on_rfc_001(&mut app, &root, &config, reply);
-
-        app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, &root, &config);
-
-        let updated = std::fs::read_to_string(root.join("docs/rfcs/RFC-002-a.md")).unwrap();
-        assert!(updated.contains("rewritten by hook"), "{updated}");
-        let unchanged = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
-        assert!(unchanged.contains("status: draft"), "{unchanged}");
-        assert!(app.status_picker.active);
-        let notice = app.status_picker.notice.clone().unwrap();
-        assert!(notice.contains("updated RFC-002"), "{notice}");
     }
 
     // STORY-274 AC2: a status change from the TUI resets the staleness clock the

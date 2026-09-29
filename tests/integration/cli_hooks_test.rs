@@ -143,3 +143,65 @@ fn hook_list_shows_name_event_scope_and_trust_state() {
         "trusted"
     );
 }
+
+#[test]
+fn hook_run_validate_reports_the_hooks_findings_in_validate_shape_and_exits_non_zero() {
+    let project = HookProject::new();
+    project.run(&["hook", "trust"]);
+
+    let output = project.run(&["hook", "run", "validate", "RFC-001", "--json"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["event"], "validate");
+    assert_eq!(out["id"], "RFC-001");
+    let finding = &out["errors"][0];
+    assert_eq!(finding["rule"], "hook");
+    assert_eq!(finding["hook"], "required-sections");
+    assert_eq!(finding["line"], 3);
+    assert!(out["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn hook_run_validate_prints_findings_for_humans_and_accepts_dry_run() {
+    let project = HookProject::new();
+    project.run(&["hook", "trust"]);
+
+    let output = project.run(&["hook", "run", "validate", "RFC-001", "--dry-run"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("missing ## Goals"), "{stdout}");
+}
+
+#[test]
+fn hook_run_validate_warns_when_the_hooks_are_untrusted_and_exits_zero() {
+    let project = HookProject::new();
+
+    let output = project.run(&["hook", "run", "validate", "RFC-001", "--json"]);
+
+    assert!(output.status.success());
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(out["errors"].as_array().unwrap().is_empty());
+    assert_eq!(rules(&out["warnings"]), ["hooks-untrusted"]);
+}
+
+#[test]
+fn hook_run_validate_with_no_hooks_reports_nothing() {
+    let project = HookProject::new();
+    project.run(&["hook", "trust"]);
+
+    let output = project.run(&["--no-hooks", "hook", "run", "validate", "RFC-001", "--json"]);
+
+    assert!(output.status.success());
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(out["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn hook_run_rejects_an_unknown_event() {
+    let project = HookProject::new();
+    let output = project.run(&["hook", "run", "post-commit", "RFC-001"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown event"));
+}

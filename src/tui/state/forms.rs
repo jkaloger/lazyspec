@@ -246,8 +246,6 @@ pub struct StatusPicker {
     /// picker lists and writes back from this rather than a hardcoded set.
     pub states: Vec<String>,
     pub error: Option<String>,
-    /// What `h` (run hooks) reported when nothing blocked.
-    pub notice: Option<String>,
 }
 
 impl Default for StatusPicker {
@@ -264,7 +262,6 @@ impl StatusPicker {
             doc_path: PathBuf::new(),
             states: Vec::new(),
             error: None,
-            notice: None,
         }
     }
 }

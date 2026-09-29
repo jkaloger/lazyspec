@@ -1,10 +1,25 @@
+//! The single integration point for content hashing, with two hashers:
+//!
+//! - [`hash_bytes`] / [`hash_file`] are git blob hashes, for anything compared
+//!   with git's own object ids (refs, pins, `reviewed` anchors).
+//! - [`sha256_hex`] is a plain SHA-256 digest, for values git never sees and
+//!   that must not shell out: hook inputs, hook trust fingerprints and the
+//!   `content_hash` a hook echoes back (RFC-075).
+
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Pipes the given bytes to `git hash-object --stdin` and returns the 40-char hex SHA.
-/// This is the single integration point for all content hashing.
 pub fn hash_bytes(bytes: &[u8]) -> Result<String> {
     let mut child = Command::new("git")
         .args(["hash-object", "--stdin"])

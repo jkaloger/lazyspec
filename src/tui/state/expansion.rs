@@ -262,12 +262,14 @@ impl App {
         &mut self,
         generation: u64,
         result: crate::engine::validation::ValidationResult,
+        hook_findings: crate::engine::validation::ValidationResult,
         config: &Config,
     ) {
         if generation != self.stale_findings_generation {
             return;
         }
         self.stale_findings = result;
+        self.hook_findings = hook_findings;
         self.fold_validation(config);
     }
 
@@ -341,14 +343,19 @@ impl App {
             cache,
         )
         .into();
-        crate::engine::hooks::refill_cache(
+        let hook_findings = crate::engine::validation::hook_findings(
             &self.hook_env,
             self.store.root(),
             &docs.iter().collect::<Vec<_>>(),
             config,
         );
         cache.flush();
-        self.apply_stale_findings(self.stale_findings_generation, result, config);
+        self.apply_stale_findings(
+            self.stale_findings_generation,
+            result,
+            hook_findings,
+            config,
+        );
     }
 
     pub fn request_diagram_render(

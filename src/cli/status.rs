@@ -6,14 +6,17 @@ use crate::engine::config::Config;
 use crate::engine::document::{DocMeta, DocType};
 use crate::engine::gh::GhIssueReader;
 use crate::engine::git_ref::GitRefOps;
+use crate::engine::hooks::HookEnv;
 use crate::engine::ops::push::{self, CloneGroup};
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
+use crate::engine::validation::validate_full_with;
 use std::path::Path;
 
 pub fn run_json(
     store: &Store,
     config: &Config,
+    hooks: &HookEnv,
     root: &Path,
     gh: &dyn GhIssueReader,
     git_ops: &dyn GitRefOps,
@@ -29,7 +32,7 @@ pub fn run_json(
         })
         .collect();
 
-    let result = store.validate_full(config);
+    let result = validate_full_with(store, config, hooks);
     let errors: Vec<_> = result.errors.iter().map(|e| e.to_json()).collect();
     let warnings: Vec<_> = result.warnings.iter().map(|w| w.to_json()).collect();
 
@@ -222,6 +225,7 @@ mod tests {
         let out = run_json(
             &store,
             &config,
+            &HookEnv::process(false),
             root,
             &gh,
             &crate::engine::git_ref::test_support::MockGitRefClient::new(),
@@ -260,6 +264,7 @@ mod tests {
         let out = run_json(
             &store,
             &config,
+            &HookEnv::process(false),
             root,
             &gh,
             &crate::engine::git_ref::test_support::MockGitRefClient::new(),

@@ -7,70 +7,52 @@
 
 use crate::engine::config::{Config, HookDef, HookEvent, Severity};
 use crate::engine::document::DocMeta;
-use crate::engine::fs::RealFileSystem;
-use crate::engine::hooks::{hook_document, hooks_disabled, parse_reply, HookEnv, HookFinding};
+use crate::engine::fs::FileSystem;
+use crate::engine::hooks::{hook_document, parse_reply, HookEnv, HookFinding};
 use crate::engine::store::Store;
+use crate::engine::validation::ValidationIssue;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// A finding bound to the hook that raised it.
-#[derive(Debug, Clone, PartialEq)]
+/// A finding bound to the hook that raised it, as the validation report carries
+/// it: the same [`ValidationIssue`] `validate` reports, so `update --json` and
+/// `validate --json` share one shape, plus the severity a flat list needs.
+#[derive(Debug)]
 pub struct ReportedFinding {
-    pub hook: String,
-    pub finding: HookFinding,
+    pub severity: Severity,
+    pub issue: ValidationIssue,
 }
 
 impl ReportedFinding {
     fn new(hook: &str, finding: HookFinding) -> Self {
-        Self {
-            hook: hook.to_string(),
-            finding,
-        }
+        let (severity, issue) = finding.into_issue(hook);
+        Self { severity, issue }
     }
 
     fn error(hook: &str, message: String) -> Self {
         Self::new(hook, HookFinding::error(message))
     }
 
+    fn untrusted(hooks: Vec<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            issue: ValidationIssue::HooksUntrusted { hooks },
+        }
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({
-            "hook": self.hook,
-            "severity": self.finding.severity,
-            "id": self.finding.id,
-            "part": self.finding.part,
-            "line": self.finding.line,
-            "message": self.finding.message,
-        })
+        let mut value = self.issue.to_json();
+        value["severity"] = json!(self.severity);
+        value
     }
 }
 
 impl fmt::Display for ReportedFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let finding = &self.finding;
-        let mut place = String::new();
-        if let Some(id) = &finding.id {
-            place.push_str(&format!(" {id}"));
-            if let Some(part) = &finding.part {
-                place.push_str(&format!("/{part}"));
-            }
-            if let Some(line) = finding.line {
-                place.push_str(&format!(":{line}"));
-            }
-        }
-        write!(
-            f,
-            "{} [{}]{}: {}",
-            match finding.severity {
-                Severity::Error => "error",
-                Severity::Warning => "warning",
-            },
-            self.hook,
-            place,
-            finding.message
-        )
+        write!(f, "{}: {}", self.severity.as_str(), self.issue)
     }
 }
 
@@ -139,11 +121,16 @@ fn matching_hooks<'a>(config: &'a Config, doc: &DocMeta, from: &str, to: &str) -
         .collect()
 }
 
-fn context_documents(hook: &HookDef, store: &Store, root: &Path, doc: &DocMeta) -> Vec<Value> {
+fn context_documents(
+    hook: &HookDef,
+    store: &Store,
+    root: &Path,
+    doc: &DocMeta,
+    fs: &dyn FileSystem,
+) -> Vec<Value> {
     if hook.context_types.is_empty() {
         return Vec::new();
     }
-    let fs = RealFileSystem;
     let mut docs: Vec<&DocMeta> = store
         .all_docs()
         .into_iter()
@@ -152,7 +139,7 @@ fn context_documents(hook: &HookDef, store: &Store, root: &Path, doc: &DocMeta) 
         .collect();
     docs.sort_by(|a, b| a.path.cmp(&b.path));
     docs.into_iter()
-        .map(|d| hook_document(d, root, &fs))
+        .map(|d| hook_document(d, root, fs))
         .collect()
 }
 
@@ -164,8 +151,8 @@ struct Snapshot {
     parts: Vec<(String, String)>,
 }
 
-fn snapshot(doc: &DocMeta, root: &Path) -> Snapshot {
-    let json = hook_document(doc, root, &RealFileSystem);
+fn snapshot(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> Snapshot {
+    let json = hook_document(doc, root, fs);
     let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
     Snapshot {
         hash: text(&json["content_hash"]),
@@ -187,8 +174,14 @@ fn check_update(
     raw: Value,
     store: &Store,
     root: &Path,
-) -> Result<PlannedUpdate, ReportedFinding> {
-    let refuse = |why: String| ReportedFinding::error(&hook.name, format!("invalid update: {why}"));
+    fs: &dyn FileSystem,
+) -> Result<PlannedUpdate, Box<ReportedFinding>> {
+    let refuse = |why: String| {
+        Box::new(ReportedFinding::error(
+            &hook.name,
+            format!("invalid update: {why}"),
+        ))
+    };
     let raw: RawUpdate = serde_json::from_value(raw).map_err(|e| {
         refuse(format!(
             "{e}; an update is `id`, `part`, `hash` and `body` only"
@@ -197,7 +190,7 @@ fn check_update(
     let target = store
         .resolve_shorthand(&raw.id)
         .map_err(|_| refuse(format!("no document {}", raw.id)))?;
-    let current = snapshot(target, root);
+    let current = snapshot(target, root, fs);
     if current.hash != raw.hash {
         return Err(refuse(format!(
             "{} changed since the hook was called (hash mismatch)",
@@ -225,11 +218,16 @@ fn check_update(
 
 /// Whether every update still describes the document as it is now. Called
 /// again right before saving, because a hook can run for seconds.
-pub fn updates_are_current(updates: &[PlannedUpdate], store: &Store, root: &Path) -> bool {
+pub fn updates_are_current(
+    updates: &[PlannedUpdate],
+    store: &Store,
+    root: &Path,
+    fs: &dyn FileSystem,
+) -> bool {
     updates.iter().all(|u| {
         store
             .resolve_shorthand(&u.id)
-            .is_ok_and(|doc| snapshot(doc, root).hash == u.hash)
+            .is_ok_and(|doc| snapshot(doc, root, fs).hash == u.hash)
     })
 }
 
@@ -246,34 +244,20 @@ pub fn check(
     to: &str,
 ) -> Result<Cleared, TransitionBlocked> {
     let hooks = matching_hooks(config, doc, from, to);
-    if hooks.is_empty() || hooks_disabled() {
+    if hooks.is_empty() || env.disabled {
         return Ok(Cleared::default());
     }
-    if !env.trust.is_trusted(root, &config.hooks) {
-        let warnings = hooks
-            .iter()
-            .map(|hook| {
-                ReportedFinding::new(
-                    &hook.name,
-                    HookFinding {
-                        severity: Severity::Warning,
-                        id: None,
-                        part: None,
-                        line: None,
-                        message:
-                            "skipped until trusted; run `lazyspec hook trust` to trust the hooks"
-                                .to_string(),
-                    },
-                )
-            })
-            .collect();
+    if !env.trust.is_trusted(root, config) {
+        let names = hooks.iter().map(|hook| hook.name.clone()).collect();
         return Ok(Cleared {
             updates: Vec::new(),
-            warnings,
+            warnings: vec![ReportedFinding::untrusted(names)],
         });
     }
 
-    let document = hook_document(doc, root, &RealFileSystem);
+    let fs = &*env.fs;
+    let scripts_root = config.docs_root(root);
+    let document = hook_document(doc, root, fs);
     let mut cleared = Cleared::default();
     let mut targeted: HashSet<(String, Option<String>)> = HashSet::new();
     for hook in hooks {
@@ -282,10 +266,10 @@ pub fn check(
             "hook": hook.name,
             "transition": { "from": from, "to": to },
             "documents": [document],
-            "context": context_documents(hook, store, root, doc),
+            "context": context_documents(hook, store, root, doc, fs),
         });
         let bytes = serde_json::to_vec(&payload).expect("a hook payload serialises as JSON");
-        let reply = match parse_reply(hook, env.runner.run(hook, root, &bytes)) {
+        let reply = match parse_reply(hook, env.runner.run(hook, root, &scripts_root, &bytes)) {
             Ok(reply) => reply,
             Err(finding) => {
                 cleared
@@ -304,10 +288,10 @@ pub fn check(
             return Err(blocked(cleared.warnings));
         }
         for raw in reply.updates {
-            let planned = match check_update(hook, raw, store, root) {
+            let planned = match check_update(hook, raw, store, root, fs) {
                 Ok(planned) => planned,
                 Err(finding) => {
-                    cleared.warnings.push(finding);
+                    cleared.warnings.push(*finding);
                     return Err(blocked(cleared.warnings));
                 }
             };
@@ -328,9 +312,7 @@ pub fn check(
 }
 
 fn has_error(findings: &[ReportedFinding]) -> bool {
-    findings
-        .iter()
-        .any(|f| f.finding.severity == Severity::Error)
+    findings.iter().any(|f| f.severity == Severity::Error)
 }
 
 fn blocked(findings: Vec<ReportedFinding>) -> TransitionBlocked {
@@ -387,7 +369,12 @@ mod tests {
     }
 
     fn hash_of(w: &World, id: &str) -> String {
-        snapshot(w.store.resolve_shorthand(id).unwrap(), w.tmp.path()).hash
+        snapshot(
+            w.store.resolve_shorthand(id).unwrap(),
+            w.tmp.path(),
+            &crate::engine::fs::RealFileSystem,
+        )
+        .hash
     }
 
     #[test]
@@ -404,7 +391,7 @@ mod tests {
         let err = run(&w, &env(runner.clone(), &w)).unwrap_err();
         assert_eq!(runner.hooks_called(), ["first", "second"]);
         assert_eq!(err.findings.len(), 2, "the earlier warning is reported too");
-        assert!(err.to_string().contains("error [second]: no"));
+        assert!(err.to_string().contains("error: hook second: no"));
     }
 
     #[test]
@@ -441,7 +428,22 @@ mod tests {
         let untrusted = crate::engine::hooks::test_support::untrusted_env(runner.clone(), &w.tmp);
         let cleared = run(&w, &untrusted).unwrap();
         assert!(runner.hooks_called().is_empty());
-        assert!(cleared.warnings[0].finding.message.contains("hook trust"));
+        assert!(cleared.warnings[0].to_string().contains("hook trust"));
+    }
+
+    #[test]
+    fn untrusted_hooks_raise_one_warning_naming_all_of_them() {
+        let w = world(vec![
+            fixture_hook("a", HookEvent::PreTransition),
+            fixture_hook("b", HookEvent::PreTransition),
+        ]);
+        let runner = ScriptedRunner::new(|_, _| unreachable!());
+        let untrusted = crate::engine::hooks::test_support::untrusted_env(runner, &w.tmp);
+        let cleared = run(&w, &untrusted).unwrap();
+        assert_eq!(cleared.warnings.len(), 1);
+        assert_eq!(cleared.warnings[0].issue.rule(), "hooks-untrusted");
+        let text = cleared.warnings[0].to_string();
+        assert!(text.contains("a, b"), "{text}");
     }
 
     #[test]

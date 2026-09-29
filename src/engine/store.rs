@@ -111,6 +111,18 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
         .map(|(entry, _)| entry.as_str())
 }
 
+/// A document's body under `root`, past its frontmatter. What
+/// [`Store::get_body_raw`] reads, for a caller that holds a root but no store
+/// (the TUI's hook worker).
+pub fn read_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+    DocMeta::extract_body(&fs.read_to_string(&root.join(path))?)
+}
+
+/// A part's whole file content under `root`; see [`Store::get_part_body_raw`].
+pub fn read_part_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+    fs.read_to_string(&root.join(path))
+}
+
 /// Where a type's documents live, as an absolute path with no `..` (RFC-072
 /// "Resolution, not a second store"). `root` is absolute, and `Path::join`
 /// discards it for an absolute `dir`, so every `filesystem` spelling resolves
@@ -411,9 +423,7 @@ impl Store {
     }
 
     pub fn get_body_raw(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
-        let full_path = self.root.join(path);
-        let content = fs.read_to_string(&full_path)?;
-        DocMeta::extract_body(&content)
+        read_body(&self.root, path, fs)
     }
 
     pub fn get_body_expanded(
@@ -435,8 +445,7 @@ impl Store {
     /// carries no frontmatter of its own to split off (unlike
     /// [`Store::get_body_raw`], which reads past a document's frontmatter).
     pub fn get_part_body_raw(&self, path: &Path, fs: &dyn FileSystem) -> Result<String> {
-        let full_path = self.root.join(path);
-        fs.read_to_string(&full_path)
+        read_part_body(&self.root, path, fs)
     }
 
     /// [`Store::get_part_body_raw`] with `@ref` directives expanded, mirroring

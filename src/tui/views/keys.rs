@@ -146,7 +146,6 @@ impl App {
             KeyCode::Enter => {
                 let _ = self.confirm_status_change(root, config);
             }
-            KeyCode::Char('h') => self.run_hooks_for_picker_doc(root, config),
             KeyCode::Esc => self.close_status_picker(),
             _ => {}
         }

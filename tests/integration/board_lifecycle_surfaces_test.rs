@@ -1222,11 +1222,12 @@ fn update_status_rejects_a_value_the_authority_board_has_no_column_for() {
     let store = Store::load(tmp.path(), &config).unwrap();
 
     let err = lazyspec::engine::ops::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::process(true),
         tmp.path(),
         &store,
         "TICKET-42",
         &[("status", "Blocked")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap_err()

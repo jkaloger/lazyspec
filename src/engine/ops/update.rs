@@ -1,6 +1,7 @@
 use crate::engine::clickup::ClickupHttpClient;
 use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
+use crate::engine::fs::FileSystem;
 use crate::engine::fs_ops;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::hooks::HookEnv;
@@ -87,12 +88,13 @@ pub fn run(
     updates: &[(&str, &str)],
     git: &dyn GitRefOps,
 ) -> Result<PushOutcome> {
-    run_with_config(root, store, doc_path, updates, None, git)
+    write_doc(root, store, doc_path, updates, None, git)
 }
 
 /// What a move that ran hooks did: the outcome of saving it, the findings that
 /// did not block it, and every file it wrote, so a surface holding the store
 /// can reload them.
+#[derive(Debug)]
 pub struct TransitionOutcome {
     pub push: PushOutcome,
     pub warnings: Vec<ReportedFinding>,
@@ -147,7 +149,7 @@ fn write_update(
 ) -> Result<()> {
     match &update.part {
         Some(part) => run_part(root, config, store, &update.id, part, body, git).map(|_| ()),
-        None => run_with_config(
+        None => write_doc(
             root,
             store,
             &update.id,
@@ -168,8 +170,9 @@ fn save_together(
     store: &Store,
     config: &Config,
     git: &dyn GitRefOps,
+    fs: &dyn FileSystem,
 ) -> Result<PushOutcome> {
-    if !updates_are_current(updates, store, root) {
+    if !updates_are_current(updates, store, root, fs) {
         bail!("a document a hook updated changed while the hooks ran; nothing was saved");
     }
     let mut saved: Vec<&PlannedUpdate> = Vec::new();
@@ -184,7 +187,7 @@ fn save_together(
     let Some((doc_path, status)) = status else {
         return Ok(PushOutcome::Synced);
     };
-    run_with_config(root, store, doc_path, status, Some(config), git).map_err(|e| {
+    write_doc(root, store, doc_path, status, Some(config), git).map_err(|e| {
         let unrestored = roll_back(&saved, root, store, config, git);
         if unrestored.is_empty() {
             return e;
@@ -203,10 +206,12 @@ fn touched(doc_path: &Path, updates: &[PlannedUpdate]) -> Vec<PathBuf> {
     paths
 }
 
-/// `update` with `pre-transition` hooks (STORY-296): when `updates` moves the
-/// status, run the hooks that match the move, and save what they ask to update
-/// together with the status. An error finding surfaces as [`TransitionBlocked`].
-pub fn run_with_hooks(
+/// `update` (STORY-296): when `updates` moves the status, run the `pre-transition`
+/// hooks that match the move, and save what they ask to update together with the
+/// status. An error finding surfaces as [`TransitionBlocked`]. Every status
+/// change reaches the store through here, so a caller cannot skip the hooks:
+/// only `env.disabled` (`--no-hooks`) does.
+pub fn run_with_config(
     env: &HookEnv,
     root: &Path,
     store: &Store,
@@ -222,7 +227,7 @@ pub fn run_with_hooks(
         .map(|(_, target)| *target)
         .filter(|target| *target != doc.status.as_str());
     let Some(target) = target else {
-        let push = run_with_config(root, store, doc_path, updates, Some(config), git)?;
+        let push = write_doc(root, store, doc_path, updates, Some(config), git)?;
         return Ok(TransitionOutcome {
             push,
             warnings: Vec::new(),
@@ -242,6 +247,7 @@ pub fn run_with_hooks(
         store,
         config,
         git,
+        &*env.fs,
     )?;
     Ok(TransitionOutcome {
         push,
@@ -269,7 +275,7 @@ pub fn run_hooks_by_hand(
     let mut push = PushOutcome::Synced;
     let mut touched_paths = Vec::new();
     if !dry_run {
-        push = save_together(&cleared.updates, None, root, store, config, git)?;
+        push = save_together(&cleared.updates, None, root, store, config, git, &*env.fs)?;
         touched_paths = touched(&doc.path, &cleared.updates);
     }
     Ok(TransitionOutcome {
@@ -323,7 +329,7 @@ fn check_status_gate(root: &Path, type_def: &TypeDef, current: &str, target: &st
     gate_status_transition(type_def, current, board_state.as_deref().unwrap_or(target))
 }
 
-pub fn run_with_config(
+fn write_doc(
     root: &Path,
     store: &Store,
     doc_path: &str,
@@ -446,11 +452,12 @@ mod tests {
         let git = MockGitRefClient::new();
 
         run_with_config(
+            &HookEnv::process(true),
             tmp.path(),
             &store,
             "RFC-001",
             &[("status", "review")],
-            Some(&config),
+            &config,
             &git,
         )
         .unwrap();
@@ -475,11 +482,12 @@ mod tests {
         let git = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
 
         run_with_config(
+            &HookEnv::process(true),
             tmp.path(),
             &store,
             "RFC-001",
             &[("status", "review")],
-            Some(&config),
+            &config,
             &git,
         )
         .unwrap();
@@ -502,11 +510,12 @@ mod tests {
         let git = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
 
         run_with_config(
+            &HookEnv::process(true),
             tmp.path(),
             &store,
             "RFC-001",
             &[("status", "review")],
-            Some(&config),
+            &config,
             &git,
         )
         .unwrap();
@@ -528,11 +537,12 @@ mod tests {
         let git = MockGitRefClient::new();
 
         run_with_config(
+            &HookEnv::process(true),
             tmp.path(),
             &store,
             "RFC-001",
             &[("title", "Renamed"), ("assignee", "alice")],
-            Some(&config),
+            &config,
             &git,
         )
         .unwrap();
@@ -740,6 +750,7 @@ mod tests {
             &store,
             &config,
             &git,
+            &crate::engine::fs::RealFileSystem,
         )
         .unwrap_err();
 
@@ -765,6 +776,7 @@ mod tests {
             &store,
             &config,
             &git,
+            &crate::engine::fs::RealFileSystem,
         );
 
         assert!(result.is_err());
@@ -790,7 +802,15 @@ mod tests {
             original: String::new(),
         };
 
-        let err = save_together(&[first, second], None, tmp.path(), &store, &config, &git);
+        let err = save_together(
+            &[first, second],
+            None,
+            tmp.path(),
+            &store,
+            &config,
+            &git,
+            &crate::engine::fs::RealFileSystem,
+        );
 
         let message = format!("{:#}", err.unwrap_err());
         assert!(message.contains("nothing was saved"), "{message}");

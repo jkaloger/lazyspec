@@ -6,37 +6,27 @@
 //! surface (`validate`, `status`, the TUI) reaches hooks through
 //! [`validate_issues`] so none of them re-implements the protocol.
 
+mod trust;
+
+pub use trust::TrustStore;
+
 use crate::engine::config::{Config, HookDef, HookEvent, Severity};
 use crate::engine::doc_json::doc_to_json;
 use crate::engine::document::DocMeta;
 use crate::engine::fs::{FileSystem, RealFileSystem};
+use crate::engine::hashing::sha256_hex;
+use crate::engine::store::{read_body, read_part_body};
 use crate::engine::subprocess::{output_with_timeout_and_input, TimedOut};
 use crate::engine::validation::ValidationIssue;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-
-static HOOKS_DISABLED: AtomicBool = AtomicBool::new(false);
-
-/// `--no-hooks`: every hook is skipped for the rest of the process, on every
-/// surface.
-pub fn disable_hooks() {
-    HOOKS_DISABLED.store(true, Ordering::Relaxed);
-}
-
-pub fn hooks_disabled() -> bool {
-    HOOKS_DISABLED.load(Ordering::Relaxed)
-}
+use std::sync::Arc;
 
 /// One finding a hook reported, before it is bound to the hook that raised it.
-/// Owned and cloneable because the cache keeps it.
-#[derive(Debug, Clone, PartialEq)]
+/// #[derive(Debug, Clone, PartialEq)]
 pub struct HookFinding {
     pub severity: Severity,
     pub id: Option<String>,
@@ -56,7 +46,7 @@ impl HookFinding {
         }
     }
 
-    fn into_issue(self, hook: &str) -> (Severity, ValidationIssue) {
+    pub(crate) fn into_issue(self, hook: &str) -> (Severity, ValidationIssue) {
         (
             self.severity,
             ValidationIssue::Hook {
@@ -77,18 +67,33 @@ pub struct HookProcess {
     pub stderr: String,
 }
 
+/// `root` is the project root, the hook's working directory; `scripts_root` is
+/// `config.docs_root(root)`, where a `run` path is resolved.
 pub trait HookRunner: Send + Sync {
-    fn run(&self, hook: &HookDef, root: &Path, input: &[u8]) -> Result<HookProcess>;
+    fn run(
+        &self,
+        hook: &HookDef,
+        root: &Path,
+        scripts_root: &Path,
+        input: &[u8],
+    ) -> Result<HookProcess>;
 }
 
-/// Spawns `hook.run` with the project root as its working directory. No shell.
+/// Spawns `hook.run` with the project root as its working directory and a path
+/// program resolved against the scripts root. No shell.
 pub struct ProcessRunner;
 
 impl HookRunner for ProcessRunner {
-    fn run(&self, hook: &HookDef, root: &Path, input: &[u8]) -> Result<HookProcess> {
+    fn run(
+        &self,
+        hook: &HookDef,
+        root: &Path,
+        scripts_root: &Path,
+        input: &[u8],
+    ) -> Result<HookProcess> {
         let program = &hook.run[0];
         let program = if program.contains('/') {
-            root.join(program)
+            scripts_root.join(program)
         } else {
             PathBuf::from(program)
         };
@@ -203,29 +208,16 @@ pub(crate) fn parse_reply(
     })
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// A document as a hook reads it: the `show --json` shape with `body`, each
 /// part with its `body`, and a `content_hash` over all of them -- the value a
 /// `pre-transition` update echoes back to prove the document did not move.
 pub(crate) fn hook_document(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> Value {
     let mut json = doc_to_json(doc);
-    let body = fs
-        .read_to_string(&root.join(&doc.path))
-        .ok()
-        .and_then(|content| DocMeta::extract_body(&content).ok())
-        .unwrap_or_default();
+    let body = read_body(root, &doc.path, fs).unwrap_or_default();
     let mut hashed = body.clone();
     if let Some(entries) = json.get_mut("parts").and_then(|p| p.as_array_mut()) {
         for (part, entry) in doc.parts.iter().zip(entries.iter_mut()) {
-            let part_body = fs
-                .read_to_string(&root.join(&part.path))
-                .unwrap_or_default();
+            let part_body = read_part_body(root, &part.path, fs).unwrap_or_default();
             hashed.push_str(&part.name);
             hashed.push_str(&part_body);
             if let Some(obj) = entry.as_object_mut() {
@@ -238,14 +230,12 @@ pub(crate) fn hook_document(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> 
     json
 }
 
-/// What a hook is called with and the key its result is cached under: the hook
-/// plus the hash of exactly these bytes.
-struct HookInput {
-    bytes: Vec<u8>,
-    hash: String,
-}
-
-fn validate_input(hook: &HookDef, root: &Path, docs: &[&DocMeta]) -> Option<HookInput> {
+fn validate_input(
+    hook: &HookDef,
+    root: &Path,
+    docs: &[&DocMeta],
+    fs: &dyn FileSystem,
+) -> Option<Vec<u8>> {
     let mut matching: Vec<&DocMeta> = docs
         .iter()
         .copied()
@@ -255,154 +245,41 @@ fn validate_input(hook: &HookDef, root: &Path, docs: &[&DocMeta]) -> Option<Hook
         return None;
     }
     matching.sort_by(|a, b| a.path.cmp(&b.path));
-    let fs = RealFileSystem;
     let documents: Vec<Value> = matching
         .into_iter()
-        .map(|doc| hook_document(doc, root, &fs))
+        .map(|doc| hook_document(doc, root, fs))
         .collect();
     let payload = serde_json::json!({
         "event": HookEvent::Validate.as_str(),
         "hook": hook.name,
         "documents": documents,
     });
-    let bytes = serde_json::to_vec(&payload).expect("a hook payload serialises as JSON");
-    let hash = sha256_hex(&bytes);
-    Some(HookInput { bytes, hash })
+    Some(serde_json::to_vec(&payload).expect("a hook payload serialises as JSON"))
 }
 
-/// Validate-hook results keyed by hook name plus the hash of the input they ran
-/// on. Only a full pass writes it; the TUI's quick refresh only reads it.
-#[derive(Default)]
-pub struct HookCache(Mutex<HashMap<String, (String, Vec<HookFinding>)>>);
-
-impl HookCache {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (String, Vec<HookFinding>)>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn get(&self, hook: &str, input_hash: &str) -> Option<Vec<HookFinding>> {
-        let entries = self.lock();
-        let (hash, findings) = entries.get(hook)?;
-        (hash == input_hash).then(|| findings.clone())
-    }
-
-    /// One entry per hook: a new input hash replaces the old, so the cache is
-    /// bounded by the number of hooks.
-    fn put(&self, hook: &str, input_hash: String, findings: Vec<HookFinding>) {
-        self.lock().insert(hook.to_string(), (input_hash, findings));
-    }
-}
-
-/// Which hooks are trusted, in user-local state outside the repo (RFC-075
-/// Trust): a fingerprint of the `[[hooks]]` table and of every in-repo file a
-/// `run` names, filed under the project root.
-pub struct TrustStore {
-    file: PathBuf,
-}
-
-impl TrustStore {
-    pub fn user_local() -> Self {
-        let dir = match std::env::var_os("LAZYSPEC_STATE_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".lazyspec")
-            }
-        };
-        Self::in_dir(&dir)
-    }
-
-    pub fn in_dir(dir: &Path) -> Self {
-        Self {
-            file: dir.join("hook-trust.json"),
-        }
-    }
-
-    fn key(root: &Path) -> String {
-        root.canonicalize()
-            .unwrap_or_else(|_| root.to_path_buf())
-            .display()
-            .to_string()
-    }
-
-    fn load(&self) -> HashMap<String, String> {
-        std::fs::read_to_string(&self.file)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    pub fn is_trusted(&self, root: &Path, hooks: &[HookDef]) -> bool {
-        self.load().get(&Self::key(root)) == Some(&fingerprint(root, hooks))
-    }
-
-    pub fn trust(&self, root: &Path, hooks: &[HookDef]) -> Result<()> {
-        let mut entries = self.load();
-        entries.insert(Self::key(root), fingerprint(root, hooks));
-        if let Some(dir) = self.file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&self.file, serde_json::to_string_pretty(&entries)?)?;
-        Ok(())
-    }
-}
-
-/// A hash of the `[[hooks]]` table plus the bytes of each file inside the repo
-/// that a `run` argv names. Editing a hook or the script it runs changes it.
-fn fingerprint(root: &Path, hooks: &[HookDef]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(hooks).expect("hooks serialise as JSON"));
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    for hook in hooks {
-        for arg in &hook.run {
-            let Ok(target) = root.join(arg).canonicalize() else {
-                continue;
-            };
-            if !target.starts_with(&root) || !target.is_file() {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&target) else {
-                continue;
-            };
-            hasher.update(arg.as_bytes());
-            hasher.update(Sha256::digest(&bytes));
-        }
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// What hooks run against: how a process is spawned, whose trust decides, and
-/// where results are cached. A surface that outlives one call (the TUI) owns one
-/// and hands clones to its worker, so both see the same cache; a test injects
-/// fakes.
+/// What hooks run against: how a process is spawned, whose trust decides, how documents are read, and whether `--no-hooks`
+/// turned them all off. A surface that outlives one call (the TUI) owns one
+/// and hands clones to its worker; a test injects fakes.
 #[derive(Clone)]
 pub struct HookEnv {
     pub runner: Arc<dyn HookRunner>,
     pub trust: Arc<TrustStore>,
-    pub cache: Arc<HookCache>,
+    pub fs: Arc<dyn FileSystem + Send + Sync>,
+    /// `--no-hooks`: every hook is skipped on every surface. Lives here, not in
+    /// a static, so a config reload cannot lose it.
+    pub disabled: bool,
 }
 
 impl HookEnv {
-    /// The real process runner and the user's trust store, with an empty cache.
-    pub fn process() -> Self {
+    /// The real process runner, file system and the user's trust store.
+    pub fn process(no_hooks: bool) -> Self {
         Self {
             runner: Arc::new(ProcessRunner),
             trust: Arc::new(TrustStore::user_local()),
-            cache: Arc::new(HookCache::default()),
+            fs: Arc::new(RealFileSystem),
+            disabled: no_hooks,
         }
     }
-}
-
-/// [`Pass::Full`] runs every hook and refills the cache. [`Pass::Cached`] only
-/// reads it, so it spawns nothing (STORY-295 AC6).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Pass {
-    Full,
-    Cached,
 }
 
 #[derive(Debug, PartialEq)]
@@ -422,10 +299,10 @@ fn validate_hooks(config: &Config) -> impl Iterator<Item = &HookDef> {
 
 fn gate(env: &HookEnv, root: &Path, config: &Config) -> Gate {
     let names: Vec<String> = validate_hooks(config).map(|h| h.name.clone()).collect();
-    if hooks_disabled() || names.is_empty() {
+    if env.disabled || names.is_empty() {
         return Gate::Inactive;
     }
-    if env.trust.is_trusted(root, &config.hooks) {
+    if env.trust.is_trusted(root, config) {
         return Gate::Trusted;
     }
     Gate::Untrusted(names)
@@ -433,26 +310,17 @@ fn gate(env: &HookEnv, root: &Path, config: &Config) -> Gate {
 
 fn run_validate_hooks(
     env: &HookEnv,
-    pass: Pass,
     root: &Path,
     docs: &[&DocMeta],
     config: &Config,
 ) -> Vec<(Severity, ValidationIssue)> {
     let mut issues = Vec::new();
     for hook in validate_hooks(config) {
-        let Some(input) = validate_input(hook, root, docs) else {
+        let Some(input) = validate_input(hook, root, docs, &*env.fs) else {
             continue;
         };
-        let findings = match env.cache.get(&hook.name, &input.hash) {
-            Some(cached) if pass == Pass::Cached => cached,
-            _ if pass == Pass::Cached => continue,
-            _ => {
-                let run = env.runner.run(hook, root, &input.bytes);
-                let findings = interpret(hook, run);
-                env.cache.put(&hook.name, input.hash, findings.clone());
-                findings
-            }
-        };
+        let run = env.runner.run(hook, root, &config.docs_root(root), &input);
+        let findings = interpret(hook, run);
         issues.extend(findings.into_iter().map(|f| f.into_issue(&hook.name)));
     }
     issues
@@ -460,9 +328,8 @@ fn run_validate_hooks(
 
 /// Every `validate` hook's findings as the validation report carries them, plus
 /// one warning naming `hook trust` when the hooks are not yet trusted.
-pub fn validate_issues(
+pub(crate) fn validate_issues(
     env: &HookEnv,
-    pass: Pass,
     root: &Path,
     docs: &[&DocMeta],
     config: &Config,
@@ -472,67 +339,16 @@ pub fn validate_issues(
         Gate::Untrusted(hooks) => {
             vec![(Severity::Warning, ValidationIssue::HooksUntrusted { hooks })]
         }
-        Gate::Trusted => run_validate_hooks(env, pass, root, docs, config),
-    }
-}
-
-/// Run the hooks for their side effect on the cache. The TUI's background
-/// worker calls this so the quick refresh has something to read.
-pub fn refill_cache(env: &HookEnv, root: &Path, docs: &[&DocMeta], config: &Config) {
-    if gate(env, root, config) == Gate::Trusted {
-        run_validate_hooks(env, Pass::Full, root, docs, config);
+        Gate::Trusted => run_validate_hooks(env, root, docs, config),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{exited, ScriptedRunner};
     use super::*;
     use crate::engine::document::{DocType, Status};
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
-
-    type Reply = Box<dyn Fn(&Value) -> Result<HookProcess> + Send + Sync>;
-
-    struct FakeRunner {
-        reply: Reply,
-        calls: AtomicUsize,
-        last_input: Mutex<Option<Value>>,
-    }
-
-    impl FakeRunner {
-        fn replying(stdout: &str) -> Arc<Self> {
-            let stdout = stdout.to_string();
-            Self::with(move |_| {
-                Ok(HookProcess {
-                    code: Some(0),
-                    stdout: stdout.clone(),
-                    stderr: String::new(),
-                })
-            })
-        }
-
-        fn with(f: impl Fn(&Value) -> Result<HookProcess> + Send + Sync + 'static) -> Arc<Self> {
-            Arc::new(Self {
-                reply: Box::new(f),
-                calls: AtomicUsize::new(0),
-                last_input: Mutex::new(None),
-            })
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl HookRunner for FakeRunner {
-        fn run(&self, _: &HookDef, _: &Path, input: &[u8]) -> Result<HookProcess> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let input: Value = serde_json::from_slice(input).unwrap();
-            let reply = (self.reply)(&input);
-            *self.last_input.lock().unwrap() = Some(input);
-            reply
-        }
-    }
 
     fn hook(name: &str, types: &[&str]) -> HookDef {
         HookDef {
@@ -573,7 +389,6 @@ mod tests {
     struct Fixture {
         tmp: tempfile::TempDir,
         trust: Arc<TrustStore>,
-        cache: Arc<HookCache>,
         config: Config,
     }
 
@@ -585,12 +400,7 @@ mod tests {
                 ..Config::default()
             };
             let trust = Arc::new(TrustStore::in_dir(&tmp.path().join("state")));
-            Self {
-                tmp,
-                trust,
-                cache: Arc::new(HookCache::default()),
-                config,
-            }
+            Self { tmp, trust, config }
         }
 
         fn root(&self) -> PathBuf {
@@ -599,26 +409,26 @@ mod tests {
 
         fn trusted(self) -> Self {
             std::fs::create_dir_all(self.root()).unwrap();
-            self.trust.trust(&self.root(), &self.config.hooks).unwrap();
+            self.trust.trust(&self.root(), &self.config).unwrap();
             self
         }
 
-        fn env(&self, runner: &Arc<FakeRunner>) -> HookEnv {
+        fn env(&self, runner: &Arc<ScriptedRunner>) -> HookEnv {
             HookEnv {
                 runner: runner.clone(),
                 trust: self.trust.clone(),
-                cache: self.cache.clone(),
+                fs: Arc::new(RealFileSystem),
+                disabled: false,
             }
         }
 
         fn issues(
             &self,
-            runner: &Arc<FakeRunner>,
-            pass: Pass,
+            runner: &Arc<ScriptedRunner>,
             docs: &[&DocMeta],
         ) -> Vec<(Severity, ValidationIssue)> {
             let env = self.env(runner);
-            validate_issues(&env, pass, &self.root(), docs, &self.config)
+            validate_issues(&env, &self.root(), docs, &self.config)
         }
     }
 
@@ -629,17 +439,17 @@ mod tests {
     #[test]
     fn a_hook_runs_once_with_every_matching_document() {
         let fx = Fixture::new(vec![hook("lint", &["story"])]).trusted();
-        let runner = FakeRunner::replying(r#"{"findings":[]}"#);
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
         let (a, b, rfc) = (
             doc("STORY-1", "story"),
             doc("STORY-2", "story"),
             doc("RFC-1", "rfc"),
         );
 
-        fx.issues(&runner, Pass::Full, &[&a, &b, &rfc]);
+        fx.issues(&runner, &[&a, &b, &rfc]);
 
         assert_eq!(runner.calls(), 1);
-        let input = runner.last_input.lock().unwrap().clone().unwrap();
+        let input = runner.last_input();
         assert_eq!(input["event"], "validate");
         assert_eq!(input["hook"], "lint");
         let ids: Vec<&str> = input["documents"]
@@ -657,12 +467,12 @@ mod tests {
     #[test]
     fn findings_carry_their_fields_and_name_the_hook() {
         let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        let runner = FakeRunner::replying(
+        let runner = ScriptedRunner::replying(
             r#"{"findings":[{"id":"STORY-1","part":"design.md","line":14,"severity":"warning","message":"missing ## Goals"}]}"#,
         );
         let a = doc("STORY-1", "story");
 
-        let issues = fx.issues(&runner, Pass::Full, &[&a]);
+        let issues = fx.issues(&runner, &[&a]);
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].0, Severity::Warning);
@@ -678,29 +488,17 @@ mod tests {
 
     #[test]
     fn a_misbehaving_hook_becomes_one_error_finding_naming_it() {
-        let cases: Vec<(Arc<FakeRunner>, &str)> = vec![
+        let cases: Vec<(Arc<ScriptedRunner>, &str)> = vec![
             (
-                FakeRunner::with(|_| {
-                    Ok(HookProcess {
-                        code: Some(3),
-                        stdout: String::new(),
-                        stderr: "boom".into(),
-                    })
-                }),
+                ScriptedRunner::with(|_, _| exited(3, "", "boom")),
                 "status 3; stderr: boom",
             ),
             (
-                FakeRunner::with(|_| {
-                    Ok(HookProcess {
-                        code: Some(0),
-                        stdout: "not json".into(),
-                        stderr: "oops".into(),
-                    })
-                }),
+                ScriptedRunner::with(|_, _| exited(0, "not json", "oops")),
                 "invalid JSON",
             ),
             (
-                FakeRunner::with(|_| {
+                ScriptedRunner::with(|_, _| {
                     Err(TimedOut {
                         timeout: Duration::from_secs(30),
                         stdout: Vec::new(),
@@ -711,14 +509,14 @@ mod tests {
                 "timed out after 30s; stderr: stuck on lock",
             ),
             (
-                FakeRunner::replying(r#"{"findings":[],"updates":[{"id":"STORY-1"}]}"#),
+                ScriptedRunner::replying(r#"{"findings":[],"updates":[{"id":"STORY-1"}]}"#),
                 "updates",
             ),
         ];
         for (runner, needle) in cases {
             let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
             let a = doc("STORY-1", "story");
-            let issues = fx.issues(&runner, Pass::Full, &[&a]);
+            let issues = fx.issues(&runner, &[&a]);
             assert_eq!(issues.len(), 1, "{needle}");
             assert_eq!(issues[0].0, Severity::Error);
             let message = issues[0].1.to_string();
@@ -732,25 +530,19 @@ mod tests {
     #[test]
     fn stderr_travels_with_an_invalid_json_finding() {
         let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        let runner = FakeRunner::with(|_| {
-            Ok(HookProcess {
-                code: Some(0),
-                stdout: "nope".into(),
-                stderr: "traceback".into(),
-            })
-        });
+        let runner = ScriptedRunner::with(|_, _| exited(0, "nope", "traceback"));
         let a = doc("STORY-1", "story");
-        let message = messages(&fx.issues(&runner, Pass::Full, &[&a])).remove(0);
+        let message = messages(&fx.issues(&runner, &[&a])).remove(0);
         assert!(message.contains("traceback"), "{message}");
     }
 
     #[test]
     fn untrusted_hooks_are_skipped_with_one_warning_naming_hook_trust() {
         let fx = Fixture::new(vec![hook("a", &[]), hook("b", &[])]);
-        let runner = FakeRunner::replying(r#"{"findings":[]}"#);
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
         let a = doc("STORY-1", "story");
 
-        let issues = fx.issues(&runner, Pass::Full, &[&a]);
+        let issues = fx.issues(&runner, &[&a]);
 
         assert_eq!(runner.calls(), 0);
         assert_eq!(issues.len(), 1);
@@ -761,9 +553,9 @@ mod tests {
     #[test]
     fn editing_the_hooks_makes_them_untrusted_again() {
         let mut fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        assert!(fx.trust.is_trusted(&fx.root(), &fx.config.hooks));
+        assert!(fx.trust.is_trusted(&fx.root(), &fx.config));
         fx.config.hooks[0].timeout = Some(5);
-        assert!(!fx.trust.is_trusted(&fx.root(), &fx.config.hooks));
+        assert!(!fx.trust.is_trusted(&fx.root(), &fx.config));
     }
 
     #[test]
@@ -772,64 +564,12 @@ mod tests {
         let script = fx.root().join(".lazyspec/hooks/lint");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, "#!/bin/sh\n").unwrap();
-        fx.trust.trust(&fx.root(), &fx.config.hooks).unwrap();
-        assert!(fx.trust.is_trusted(&fx.root(), &fx.config.hooks));
+        fx.trust.trust(&fx.root(), &fx.config).unwrap();
+        assert!(fx.trust.is_trusted(&fx.root(), &fx.config));
 
         std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
 
-        assert!(!fx.trust.is_trusted(&fx.root(), &fx.config.hooks));
-    }
-
-    #[test]
-    fn a_cached_pass_spawns_nothing_and_a_full_pass_fills_it() {
-        let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        let runner = FakeRunner::replying(
-            r#"{"findings":[{"id":"STORY-1","severity":"error","message":"bad"}]}"#,
-        );
-        let a = doc("STORY-1", "story");
-
-        assert!(fx.issues(&runner, Pass::Cached, &[&a]).is_empty());
-        assert_eq!(runner.calls(), 0);
-
-        assert_eq!(fx.issues(&runner, Pass::Full, &[&a]).len(), 1);
-        assert_eq!(runner.calls(), 1);
-
-        assert_eq!(fx.issues(&runner, Pass::Cached, &[&a]).len(), 1);
-        assert_eq!(runner.calls(), 1);
-    }
-
-    #[test]
-    fn a_changed_input_misses_the_cache() {
-        let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        let runner = FakeRunner::replying(
-            r#"{"findings":[{"id":"STORY-1","severity":"error","message":"bad"}]}"#,
-        );
-        let a = doc("STORY-1", "story");
-        let b = doc("STORY-2", "story");
-        fx.issues(&runner, Pass::Full, &[&a]);
-
-        assert!(fx.issues(&runner, Pass::Cached, &[&a, &b]).is_empty());
-    }
-
-    #[test]
-    fn refill_cache_runs_hooks_without_returning_findings() {
-        let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
-        let runner = FakeRunner::replying(r#"{"findings":[]}"#);
-        let a = doc("STORY-1", "story");
-        let env = fx.env(&runner);
-
-        refill_cache(&env, &fx.root(), &[&a], &fx.config);
-
-        assert_eq!(runner.calls(), 1);
-        assert!(fx
-            .cache
-            .get(
-                "lint",
-                &validate_input(&fx.config.hooks[0], &fx.root(), &[&a])
-                    .unwrap()
-                    .hash
-            )
-            .is_some());
+        assert!(!fx.trust.is_trusted(&fx.root(), &fx.config));
     }
 
     #[test]
@@ -843,12 +583,85 @@ mod tests {
             ],
             ..hook("sh", &[])
         };
-        let process = ProcessRunner.run(&hook, tmp.path(), b"{}").unwrap();
+        let process = ProcessRunner
+            .run(&hook, tmp.path(), tmp.path(), b"{}")
+            .unwrap();
         let findings = interpret(&hook, Ok(process));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].message, "seen");
     }
 
+    #[test]
+    fn a_disabled_env_runs_nothing_and_warns_of_nothing() {
+        let fx = Fixture::new(vec![hook("lint", &[])]);
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
+        let mut env = fx.env(&runner);
+        env.disabled = true;
+        let a = doc("STORY-1", "story");
+
+        let issues = validate_issues(&env, &fx.root(), &[&a], &fx.config);
+
+        assert!(issues.is_empty());
+        assert_eq!(runner.calls(), 0);
+    }
+
+    fn extended_fixture() -> (Fixture, PathBuf) {
+        let mut fx = Fixture::new(vec![hook("lint", &[])]);
+        let pack = fx.tmp.path().join("pack");
+        let script = pack.join(".lazyspec/hooks/lint");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        fx.config.extends = Some(crate::engine::config::Extends {
+            root: pack,
+            ..Default::default()
+        });
+        (fx, script)
+    }
+
+    #[test]
+    fn an_extended_packs_hook_script_is_fingerprinted_and_run_from_the_pack() {
+        let (fx, script) = extended_fixture();
+        std::fs::create_dir_all(fx.root()).unwrap();
+        fx.trust.trust(&fx.root(), &fx.config).unwrap();
+        assert!(fx.trust.is_trusted(&fx.root(), &fx.config));
+
+        std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
+        assert!(
+            !fx.trust.is_trusted(&fx.root(), &fx.config),
+            "the pack's script is part of the fingerprint"
+        );
+
+        fx.trust.trust(&fx.root(), &fx.config).unwrap();
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
+        let a = doc("STORY-1", "story");
+        fx.issues(&runner, &[&a]);
+        assert_eq!(
+            runner.last_scripts_root(),
+            fx.config.docs_root(&fx.root()),
+            "run resolves against the pack, not the project root"
+        );
+    }
+
+    #[test]
+    fn the_process_runner_finds_a_script_in_the_scripts_root_and_not_the_project_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let (fx, script) = extended_fixture();
+        std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\necho '{\"findings\":[{\"severity\":\"warning\",\"message\":\"from the pack\"}]}'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(fx.root()).unwrap();
+
+        let process = ProcessRunner
+            .run(
+                &fx.config.hooks[0],
+                &fx.root(),
+                &fx.config.docs_root(&fx.root()),
+                b"{}",
+            )
+            .unwrap();
+
+        let findings = interpret(&fx.config.hooks[0], Ok(process));
+        assert_eq!(findings[0].message, "from the pack");
+    }
     #[test]
     fn the_process_runner_kills_a_hook_past_its_timeout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -857,7 +670,10 @@ mod tests {
             timeout: Some(1),
             ..hook("slow", &[])
         };
-        let findings = interpret(&hook, ProcessRunner.run(&hook, tmp.path(), b"{}"));
+        let findings = interpret(
+            &hook,
+            ProcessRunner.run(&hook, tmp.path(), tmp.path(), b"{}"),
+        );
         assert_eq!(findings[0].message, "timed out after 1s");
     }
 }
@@ -868,25 +684,51 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
-    type Answer = Box<dyn Fn(&str, &Value) -> String + Send + Sync>;
+    type Answer = Box<dyn Fn(&str, &Value) -> Result<HookProcess> + Send + Sync>;
 
     pub(crate) struct ScriptedRunner {
         answer: Answer,
         called: Mutex<Vec<(String, Value)>>,
-        pub(crate) count: AtomicUsize,
+        count: AtomicUsize,
+        scripts_roots: Mutex<Vec<PathBuf>>,
+    }
+
+    pub(crate) fn exited(code: i32, stdout: &str, stderr: &str) -> Result<HookProcess> {
+        Ok(HookProcess {
+            code: Some(code),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        })
     }
 
     impl ScriptedRunner {
         pub(crate) fn new(
             answer: impl Fn(&str, &Value) -> String + Send + Sync + 'static,
         ) -> Arc<Self> {
+            Self::with(move |hook, input| exited(0, &answer(hook, input), ""))
+        }
+
+        pub(crate) fn replying(stdout: &str) -> Arc<Self> {
+            let stdout = stdout.to_string();
+            Self::new(move |_, _| stdout.clone())
+        }
+
+        pub(crate) fn with(
+            answer: impl Fn(&str, &Value) -> Result<HookProcess> + Send + Sync + 'static,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 answer: Box::new(answer),
                 called: Mutex::new(Vec::new()),
                 count: AtomicUsize::new(0),
+                scripts_roots: Mutex::new(Vec::new()),
             })
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
         }
 
         pub(crate) fn hooks_called(&self) -> Vec<String> {
@@ -901,19 +743,29 @@ pub(crate) mod test_support {
         pub(crate) fn last_input(&self) -> Value {
             self.called.lock().unwrap().last().unwrap().1.clone()
         }
+
+        pub(crate) fn last_scripts_root(&self) -> PathBuf {
+            self.scripts_roots.lock().unwrap().last().unwrap().clone()
+        }
     }
 
     impl HookRunner for ScriptedRunner {
-        fn run(&self, hook: &HookDef, _: &Path, input: &[u8]) -> Result<HookProcess> {
+        fn run(
+            &self,
+            hook: &HookDef,
+            _: &Path,
+            scripts_root: &Path,
+            input: &[u8],
+        ) -> Result<HookProcess> {
             self.count.fetch_add(1, Ordering::SeqCst);
             let input: Value = serde_json::from_slice(input).unwrap();
-            let stdout = (self.answer)(&hook.name, &input);
+            let reply = (self.answer)(&hook.name, &input);
             self.called.lock().unwrap().push((hook.name.clone(), input));
-            Ok(HookProcess {
-                code: Some(0),
-                stdout,
-                stderr: String::new(),
-            })
+            self.scripts_roots
+                .lock()
+                .unwrap()
+                .push(scripts_root.to_path_buf());
+            reply
         }
     }
 
@@ -930,12 +782,17 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn untrusted_env(runner: Arc<ScriptedRunner>, tmp: &tempfile::TempDir) -> HookEnv {
+    pub(crate) fn env_with(runner: Arc<ScriptedRunner>, trust: TrustStore) -> HookEnv {
         HookEnv {
             runner,
-            trust: Arc::new(TrustStore::in_dir(&tmp.path().join(".hook-state"))),
-            cache: Arc::new(HookCache::default()),
+            trust: Arc::new(trust),
+            fs: Arc::new(RealFileSystem),
+            disabled: false,
         }
+    }
+
+    pub(crate) fn untrusted_env(runner: Arc<ScriptedRunner>, tmp: &tempfile::TempDir) -> HookEnv {
+        env_with(runner, TrustStore::in_dir(&tmp.path().join(".hook-state")))
     }
 
     pub(crate) fn trusted_env(
@@ -944,11 +801,7 @@ pub(crate) mod test_support {
         config: &Config,
     ) -> HookEnv {
         let trust = TrustStore::in_dir(&root.join(".hook-state"));
-        trust.trust(root, &config.hooks).unwrap();
-        HookEnv {
-            runner,
-            trust: Arc::new(trust),
-            cache: Arc::new(HookCache::default()),
-        }
+        trust.trust(root, config).unwrap();
+        env_with(runner, trust)
     }
 }
