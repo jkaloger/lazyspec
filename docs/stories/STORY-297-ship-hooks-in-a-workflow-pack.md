@@ -1,13 +1,13 @@
 ---
 title: Ship hooks in a workflow pack
 type: story
-status: in-progress
+status: complete
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
 related:
 - implements: RFC-075
-reviewed: fdc3ab8a1e613b6ae01da99e8e4775a43ceca2f6
+reviewed: fef7beae9890ebd5bfb3ab915f4a073ab673168d
 ---
 
 ## Value
