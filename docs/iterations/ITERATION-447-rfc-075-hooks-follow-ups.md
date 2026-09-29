@@ -6,7 +6,8 @@ author: Jack Kaloger
 date: 2026-09-29
 tags: []
 related:
-- implements: RFC-075
+- implements: STORY-296
+- related-to: STORY-295
 ---
 
 ## Context
