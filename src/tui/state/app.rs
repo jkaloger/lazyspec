@@ -319,15 +319,15 @@ pub struct StalenessRequest {
     pub generation: u64,
 }
 
-/// One validation refresh's worth of `stale` findings for the background worker
-/// (STORY-276). `StaleRule` is the one validation rule that shells out per
-/// document, and `refresh_validation` runs on the render path -- so the rule is
-/// gated out of the synchronous pass and answered from here instead, on the same
+/// One validation refresh's worth of work that shells out, for the background
+/// worker: the `stale` findings (STORY-276) and the `validate` hook findings
+/// (RFC-075). `refresh_validation` runs on the render path, so both are gated
+/// out of the synchronous pass and answered from here instead, on the same
 /// terms RFC-069 Decision 6 put the detail badge on.
 ///
 /// Owned, and a `Vec<DocMeta>` rather than the `Store` those documents came
 /// from, because that store lives on the UI thread.
-pub struct StaleFindingsRequest {
+pub struct BackgroundFindingsRequest {
     pub root: PathBuf,
     pub governs_root: PathBuf,
     pub config: Config,
@@ -706,7 +706,7 @@ pub struct App {
     /// Monotonic id stamped onto each dispatched findings pass; an older
     /// result is dropped, so a slow pass cannot overwrite a newer one.
     pub stale_findings_generation: u64,
-    pub stale_findings_tx: crossbeam_channel::Sender<StaleFindingsRequest>,
+    pub stale_findings_tx: crossbeam_channel::Sender<BackgroundFindingsRequest>,
     /// Shared with the findings worker, so the cache a full pass fills is the one
     /// the render-path refresh reads.
     pub hook_env: crate::engine::hooks::HookEnv,
@@ -3553,8 +3553,8 @@ impl App {
         self.build_doc_tree();
         self.status_picker.error = None;
         self.close_status_picker();
-        if !outcome.warnings.is_empty() {
-            let lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
+        if !outcome.findings.is_empty() {
+            let lines: Vec<String> = outcome.findings.iter().map(|f| f.to_string()).collect();
             self.open_message = Some(lines.join("\n"));
         }
         self.recompute_unpushed_count(config);

@@ -96,20 +96,18 @@ pub trait CredentialStore {
 }
 
 /// Plaintext-file credential store at a fixed path. The global constructor
-/// resolves `~/.lazyspec/credentials.toml`; [`FileCredentialStore::at_path`] is
+/// resolves `credentials.toml` in [`crate::engine::user_state_dir`]; [`FileCredentialStore::at_path`] is
 /// the injection seam tests use so they never touch the real home dir.
 pub struct FileCredentialStore {
     path: PathBuf,
 }
 
 impl FileCredentialStore {
-    /// The global credential file at `~/.lazyspec/credentials.toml`.
+    /// The global credential file in the user state dir.
     pub fn global() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home)
-            .join(".lazyspec")
-            .join("credentials.toml");
-        FileCredentialStore { path }
+        FileCredentialStore {
+            path: crate::engine::user_state_dir().join("credentials.toml"),
+        }
     }
 
     /// A store rooted at an explicit file path.

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::{App, AppEvent, DocRowKind, StaleFindingsRequest, StalenessRequest};
+use super::{App, AppEvent, BackgroundFindingsRequest, DocRowKind, StalenessRequest};
 
 /// What [`App::request_expansion`] dispatches, keyed by [`App::expansion_source`]
 /// off the selected row (STORY-294): the parent doc's own body plus every part
@@ -246,7 +246,7 @@ impl App {
     /// each of those events is a reason the previous answer may be wrong.
     pub fn request_stale_findings(&mut self, config: &Config) {
         self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
-        let _ = self.stale_findings_tx.send(StaleFindingsRequest {
+        let _ = self.stale_findings_tx.send(BackgroundFindingsRequest {
             root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),

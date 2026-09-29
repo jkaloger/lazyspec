@@ -933,7 +933,7 @@ pub fn run(store: Store, config: &Config, no_hooks: bool) -> Result<()> {
     // that can change what validation says, drained to the newest, results
     // carrying their generation, exactly as the two workers above.
     let (stale_findings_tx, stale_findings_rx) =
-        crossbeam_channel::unbounded::<crate::tui::state::StaleFindingsRequest>();
+        crossbeam_channel::unbounded::<crate::tui::state::BackgroundFindingsRequest>();
     app.stale_findings_tx = stale_findings_tx;
     let stale_findings_result_tx = tx.clone();
     std::thread::spawn(move || {

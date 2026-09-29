@@ -365,13 +365,7 @@ fn main() -> anyhow::Result<()> {
                 &hook_env, &cwd, &store, &path, &updates, &config, &GitCli,
             ) {
                 Ok(outcome) => outcome,
-                Err(e) => {
-                    if let Some((body, code)) = lazyspec::cli::hook::blocked_exit(&e, json) {
-                        println!("{body}");
-                        std::process::exit(code);
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(lazyspec::cli::hook::exit_if_blocked(e, json)),
             };
             let push_outcome = outcome.push;
             if json {
@@ -379,14 +373,14 @@ fn main() -> anyhow::Result<()> {
                 let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
                 let mut json_val = lazyspec::cli::json::doc_to_json(doc);
                 lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
-                if !outcome.warnings.is_empty() {
+                if !outcome.findings.is_empty() {
                     json_val["hook_findings"] =
-                        lazyspec::cli::hook::findings_json(&outcome.warnings);
+                        lazyspec::cli::hook::findings_json(&outcome.findings);
                 }
                 println!("{}", serde_json::to_string_pretty(&json_val)?);
             } else {
                 println!("Updated {}", resolved.display());
-                for finding in &outcome.warnings {
+                for finding in &outcome.findings {
                     eprintln!("{finding}");
                 }
                 if let Some(warning) = push_outcome.warning() {
@@ -781,8 +775,14 @@ fn main() -> anyhow::Result<()> {
                     json,
                 } => {
                     let store = load_store(&cwd, &config)?;
+                    let args = lazyspec::cli::hook::HookRunArgs {
+                        event: &event,
+                        id: &id,
+                        dry_run,
+                        json,
+                    };
                     match lazyspec::cli::hook::run_hook(
-                        &hook_env, &cwd, &config, &store, &event, &id, dry_run, &GitCli, json,
+                        &hook_env, &cwd, &config, &store, &GitCli, args,
                     ) {
                         Ok((out, code)) => {
                             println!("{out}");
@@ -790,14 +790,7 @@ fn main() -> anyhow::Result<()> {
                                 std::process::exit(code);
                             }
                         }
-                        Err(e) => {
-                            if let Some((body, code)) = lazyspec::cli::hook::blocked_exit(&e, json)
-                            {
-                                println!("{body}");
-                                std::process::exit(code);
-                            }
-                            return Err(e);
-                        }
+                        Err(e) => return Err(lazyspec::cli::hook::exit_if_blocked(e, json)),
                     }
                 }
                 HookCommand::Trust { json } => {

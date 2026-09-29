@@ -97,7 +97,7 @@ impl PlannedUpdate {
 #[derive(Debug, Default)]
 pub struct Cleared {
     pub updates: Vec<PlannedUpdate>,
-    pub warnings: Vec<ReportedFinding>,
+    pub findings: Vec<ReportedFinding>,
 }
 
 #[derive(Deserialize)]
@@ -251,7 +251,7 @@ pub fn check(
         let names = hooks.iter().map(|hook| hook.name.clone()).collect();
         return Ok(Cleared {
             updates: Vec::new(),
-            warnings: vec![ReportedFinding::untrusted(names)],
+            findings: vec![ReportedFinding::untrusted(names)],
         });
     }
 
@@ -273,37 +273,37 @@ pub fn check(
             Ok(reply) => reply,
             Err(finding) => {
                 cleared
-                    .warnings
+                    .findings
                     .push(ReportedFinding::new(&hook.name, finding));
-                return Err(blocked(cleared.warnings));
+                return Err(blocked(cleared.findings));
             }
         };
-        cleared.warnings.extend(
+        cleared.findings.extend(
             reply
                 .findings
                 .into_iter()
                 .map(|f| ReportedFinding::new(&hook.name, f)),
         );
-        if has_error(&cleared.warnings) {
-            return Err(blocked(cleared.warnings));
+        if has_error(&cleared.findings) {
+            return Err(blocked(cleared.findings));
         }
         for raw in reply.updates {
             let planned = match check_update(hook, raw, store, root, fs) {
                 Ok(planned) => planned,
                 Err(finding) => {
-                    cleared.warnings.push(*finding);
-                    return Err(blocked(cleared.warnings));
+                    cleared.findings.push(*finding);
+                    return Err(blocked(cleared.findings));
                 }
             };
             if !targeted.insert((planned.id.clone(), planned.part.clone())) {
-                cleared.warnings.push(ReportedFinding::error(
+                cleared.findings.push(ReportedFinding::error(
                     &hook.name,
                     format!(
                         "invalid update: {} is already updated by another hook in this move",
                         planned.id
                     ),
                 ));
-                return Err(blocked(cleared.warnings));
+                return Err(blocked(cleared.findings));
             }
             cleared.updates.push(planned);
         }
@@ -403,7 +403,7 @@ mod tests {
             r#"{"findings":[{"severity":"warning","message":"hm"}]}"#.to_string()
         });
         let cleared = run(&w, &env(runner.clone(), &w)).unwrap();
-        assert_eq!(cleared.warnings.len(), 1);
+        assert_eq!(cleared.findings.len(), 1);
         let input = runner.last_input();
         assert_eq!(input["transition"], json!({"from":"draft","to":"review"}));
         assert_eq!(input["documents"][0]["id"], "STORY-001");
@@ -428,7 +428,7 @@ mod tests {
         let untrusted = crate::engine::hooks::test_support::untrusted_env(runner.clone(), &w.tmp);
         let cleared = run(&w, &untrusted).unwrap();
         assert!(runner.hooks_called().is_empty());
-        assert!(cleared.warnings[0].to_string().contains("hook trust"));
+        assert!(cleared.findings[0].to_string().contains("hook trust"));
     }
 
     #[test]
@@ -440,9 +440,9 @@ mod tests {
         let runner = ScriptedRunner::new(|_, _| unreachable!());
         let untrusted = crate::engine::hooks::test_support::untrusted_env(runner, &w.tmp);
         let cleared = run(&w, &untrusted).unwrap();
-        assert_eq!(cleared.warnings.len(), 1);
-        assert_eq!(cleared.warnings[0].issue.rule(), "hooks-untrusted");
-        let text = cleared.warnings[0].to_string();
+        assert_eq!(cleared.findings.len(), 1);
+        assert_eq!(cleared.findings[0].issue.rule(), "hooks-untrusted");
+        let text = cleared.findings[0].to_string();
         assert!(text.contains("a, b"), "{text}");
     }
 

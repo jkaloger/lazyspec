@@ -1,7 +1,6 @@
 use crate::cli::resolve::resolve_shorthand_or_path;
 use crate::cli::style::{error_prefix, warning_prefix};
-use crate::engine::config::HookEvent;
-use crate::engine::config::{Config, HookDef};
+use crate::engine::config::{Config, HookDef, HookEvent};
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::hooks::{HookEnv, TrustStore};
 use crate::engine::pre_transition::{ReportedFinding, TransitionBlocked};
@@ -124,17 +123,20 @@ pub fn findings_json(findings: &[ReportedFinding]) -> Value {
     Value::Array(findings.iter().map(ReportedFinding::to_json).collect())
 }
 
-/// What to print and the exit code for a move a hook refused under `--json`,
-/// or `None` when `error` is something else (or the output is not JSON) and
-/// should propagate as an ordinary error.
-pub fn blocked_exit(error: &anyhow::Error, json: bool) -> Option<(String, i32)> {
+/// Under `--json`, a move a hook refused prints its findings and exits 1.
+/// Any other error, or a refusal without `--json`, comes back to propagate.
+pub fn exit_if_blocked(error: anyhow::Error, json: bool) -> anyhow::Error {
+    if let Some(body) = blocked_exit(&error, json) {
+        println!("{body}");
+        std::process::exit(1);
+    }
+    error
+}
+
+fn blocked_exit(error: &anyhow::Error, json: bool) -> Option<String> {
     if !json {
         return None;
     }
-    blocked_json(error).map(|body| (body, 1))
-}
-
-fn blocked_json(error: &anyhow::Error) -> Option<String> {
     let blocked = error.downcast_ref::<TransitionBlocked>()?;
     let body = json!({
         "error": "blocked by pre-transition hooks",
@@ -143,18 +145,28 @@ fn blocked_json(error: &anyhow::Error) -> Option<String> {
     Some(serde_json::to_string_pretty(&body).expect("findings serialise as JSON"))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The `hook run` arguments as the user gave them.
+pub struct HookRunArgs<'a> {
+    pub event: &'a str,
+    pub id: &'a str,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
 pub fn run_hook(
     env: &HookEnv,
     root: &Path,
     config: &Config,
     store: &Store,
-    event: &str,
-    id: &str,
-    dry_run: bool,
     git: &dyn GitRefOps,
-    json: bool,
+    args: HookRunArgs,
 ) -> Result<(String, i32)> {
+    let HookRunArgs {
+        event,
+        id,
+        dry_run,
+        json,
+    } = args;
     if event == HookEvent::Validate.as_str() {
         return run_validate_hooks(env, root, config, store, id, json);
     }
@@ -173,13 +185,13 @@ pub fn run_hook(
                 "event": event,
                 "id": id,
                 "dry_run": dry_run,
-                "findings": findings_json(&outcome.warnings),
+                "findings": findings_json(&outcome.findings),
                 "updates": outcome.updates.iter().map(|u| u.to_json()).collect::<Vec<_>>(),
             }))?,
             0,
         ));
     }
-    let mut lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
+    let mut lines: Vec<String> = outcome.findings.iter().map(|f| f.to_string()).collect();
     let verb = if dry_run { "Would update" } else { "Updated" };
     lines.extend(outcome.updates.iter().map(|u| match &u.part {
         Some(part) => format!("{verb} {}/{part}", u.id),
@@ -279,6 +291,27 @@ run = ["x"]
         let after: Value =
             serde_json::from_str(&run_list(tmp.path(), &config, &trust, true)).unwrap();
         assert_eq!(after[0]["trust"], "trusted");
+    }
+
+    fn blocked() -> anyhow::Error {
+        TransitionBlocked { findings: vec![] }.into()
+    }
+
+    #[test]
+    fn a_blocked_move_under_json_prints_its_findings() {
+        let body: Value = serde_json::from_str(&blocked_exit(&blocked(), true).unwrap()).unwrap();
+        assert_eq!(body["error"], "blocked by pre-transition hooks");
+        assert_eq!(body["findings"], json!([]));
+    }
+
+    #[test]
+    fn a_blocked_move_without_json_propagates() {
+        assert!(blocked_exit(&blocked(), false).is_none());
+    }
+
+    #[test]
+    fn an_unrelated_error_propagates_under_json() {
+        assert!(blocked_exit(&anyhow::anyhow!("disk full"), true).is_none());
     }
 
     #[test]

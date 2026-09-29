@@ -130,7 +130,7 @@ pub fn run_from_template(
 ) -> Result<()> {
     let source = resolve_pack_source(root, template, git_ref_ops)?;
     let files = install_pack(root, &source, force)?;
-    let ships_hooks = files.iter().any(|f| f.starts_with(HOOKS_DIR));
+    let ships_hooks = declares_hooks(&fs::read_to_string(root.join(".lazyspec.toml"))?);
 
     if json {
         let mut payload = serde_json::json!({ "files": files });
@@ -157,6 +157,21 @@ pub fn run_from_template(
         }
     }
     Ok(())
+}
+
+/// Whether the adopted config has a non-empty `[[hooks]]` table -- what trust
+/// covers, wherever each `run` lives. Read as raw TOML: a pack may `extends`,
+/// which `Config::parse` refuses.
+fn declares_hooks(config_text: &str) -> bool {
+    toml::from_str::<toml::Table>(config_text)
+        .ok()
+        .and_then(|table| {
+            table
+                .get("hooks")?
+                .as_array()
+                .map(|hooks| !hooks.is_empty())
+        })
+        .unwrap_or(false)
 }
 
 const HOOKS_DIR: &str = ".lazyspec/hooks";

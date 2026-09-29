@@ -13,14 +13,7 @@ pub struct TrustStore {
 
 impl TrustStore {
     pub fn user_local() -> Self {
-        let dir = match std::env::var_os("LAZYSPEC_STATE_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".lazyspec")
-            }
-        };
-        Self::in_dir(&dir)
+        Self::in_dir(&crate::engine::user_state_dir())
     }
 
     pub fn in_dir(dir: &Path) -> Self {

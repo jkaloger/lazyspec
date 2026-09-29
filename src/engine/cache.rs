@@ -18,8 +18,7 @@ impl Default for DiskCache {
 
 impl DiskCache {
     pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".lazyspec").join("cache");
+        let dir = crate::engine::user_state_dir().join("cache");
         let _ = fs::create_dir_all(&dir);
         DiskCache { dir }
     }

@@ -81,23 +81,13 @@ fn gate_status_transition(type_def: &TypeDef, current: &str, target: &str) -> Re
     Ok(())
 }
 
-pub fn run(
-    root: &Path,
-    store: &Store,
-    doc_path: &str,
-    updates: &[(&str, &str)],
-    git: &dyn GitRefOps,
-) -> Result<PushOutcome> {
-    write_doc(root, store, doc_path, updates, None, git)
-}
-
 /// What a move that ran hooks did: the outcome of saving it, the findings that
 /// did not block it, and every file it wrote, so a surface holding the store
 /// can reload them.
 #[derive(Debug)]
 pub struct TransitionOutcome {
     pub push: PushOutcome,
-    pub warnings: Vec<ReportedFinding>,
+    pub findings: Vec<ReportedFinding>,
     pub updates: Vec<PlannedUpdate>,
     pub touched: Vec<PathBuf>,
 }
@@ -161,11 +151,11 @@ fn write_update(
     }
 }
 
-/// Save `updates`, then `status`, through the `update --body` / `--part` path.
+/// Save `updates`, then `status_update`, through the `update --body` / `--part` path.
 /// A failure part-way puts back what was already written, so nothing is saved.
 fn save_together(
     updates: &[PlannedUpdate],
-    status: Option<(&str, &[(&str, &str)])>,
+    status_update: Option<(&str, &[(&str, &str)])>,
     root: &Path,
     store: &Store,
     config: &Config,
@@ -184,10 +174,10 @@ fn save_together(
         }
         saved.push(update);
     }
-    let Some((doc_path, status)) = status else {
+    let Some((doc_path, status_update)) = status_update else {
         return Ok(PushOutcome::Synced);
     };
-    write_doc(root, store, doc_path, status, Some(config), git).map_err(|e| {
+    write_doc(root, store, doc_path, status_update, Some(config), git).map_err(|e| {
         let unrestored = roll_back(&saved, root, store, config, git);
         if unrestored.is_empty() {
             return e;
@@ -230,7 +220,7 @@ pub fn run_with_config(
         let push = write_doc(root, store, doc_path, updates, Some(config), git)?;
         return Ok(TransitionOutcome {
             push,
-            warnings: Vec::new(),
+            findings: Vec::new(),
             updates: Vec::new(),
             touched: vec![doc.path.clone()],
         });
@@ -251,7 +241,7 @@ pub fn run_with_config(
     )?;
     Ok(TransitionOutcome {
         push,
-        warnings: cleared.warnings,
+        findings: cleared.findings,
         touched: touched(&doc.path, &cleared.updates),
         updates: cleared.updates,
     })
@@ -280,7 +270,7 @@ pub fn run_hooks_by_hand(
     }
     Ok(TransitionOutcome {
         push,
-        warnings: cleared.warnings,
+        findings: cleared.findings,
         updates: cleared.updates,
         touched: touched_paths,
     })

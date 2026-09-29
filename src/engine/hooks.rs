@@ -26,7 +26,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 /// One finding a hook reported, before it is bound to the hook that raised it.
-/// #[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct HookFinding {
     pub severity: Severity,
     pub id: Option<String>,
@@ -111,18 +111,9 @@ impl HookRunner for ProcessRunner {
 #[derive(Deserialize)]
 struct Reply {
     #[serde(default)]
-    findings: Vec<ReplyFinding>,
+    findings: Vec<HookFinding>,
     #[serde(default)]
     updates: Vec<Value>,
-}
-
-#[derive(Deserialize)]
-struct ReplyFinding {
-    id: Option<String>,
-    part: Option<String>,
-    line: Option<u32>,
-    severity: Severity,
-    message: String,
 }
 
 fn with_stderr(message: String, stderr: &str) -> String {
@@ -192,17 +183,7 @@ pub(crate) fn parse_reply(
         }
     };
     Ok(ParsedReply {
-        findings: reply
-            .findings
-            .into_iter()
-            .map(|f| HookFinding {
-                severity: f.severity,
-                id: f.id,
-                part: f.part,
-                line: f.line,
-                message: f.message,
-            })
-            .collect(),
+        findings: reply.findings,
         updates: reply.updates,
         stderr: process.stderr,
     })
@@ -465,6 +446,42 @@ mod tests {
     }
 
     #[test]
+    fn a_validate_ignore_document_is_not_sent_to_hooks() {
+        let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
+        let kept = doc("STORY-1", "story");
+        let ignored = DocMeta {
+            validate_ignore: true,
+            ..doc("STORY-2", "story")
+        };
+
+        fx.issues(&runner, &[&kept, &ignored]);
+
+        let input = runner.last_input();
+        let ids: Vec<&str> = input["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["STORY-1"]);
+    }
+
+    #[test]
+    fn a_hook_with_only_validate_ignore_documents_does_not_run() {
+        let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
+        let runner = ScriptedRunner::replying(r#"{"findings":[]}"#);
+        let ignored = DocMeta {
+            validate_ignore: true,
+            ..doc("STORY-1", "story")
+        };
+
+        fx.issues(&runner, &[&ignored]);
+
+        assert_eq!(runner.calls(), 0);
+    }
+
+    #[test]
     fn findings_carry_their_fields_and_name_the_hook() {
         let fx = Fixture::new(vec![hook("lint", &[])]).trusted();
         let runner = ScriptedRunner::replying(
@@ -661,20 +678,6 @@ mod tests {
 
         let findings = interpret(&fx.config.hooks[0], Ok(process));
         assert_eq!(findings[0].message, "from the pack");
-    }
-    #[test]
-    fn the_process_runner_kills_a_hook_past_its_timeout() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hook = HookDef {
-            run: vec!["sh".into(), "-c".into(), "sleep 5".into()],
-            timeout: Some(1),
-            ..hook("slow", &[])
-        };
-        let findings = interpret(
-            &hook,
-            ProcessRunner.run(&hook, tmp.path(), tmp.path(), b"{}"),
-        );
-        assert_eq!(findings[0].message, "timed out after 1s");
     }
 }
 

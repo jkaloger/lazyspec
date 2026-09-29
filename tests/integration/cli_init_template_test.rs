@@ -290,36 +290,65 @@ fn pack_with_hook() -> TempDir {
     pack
 }
 
-// STORY-297 AC1 + AC2: the pack's `.lazyspec/hooks/` is copied (nested files,
-// exec bit kept) and listed under `--json`; the adopted hooks start untrusted
-// and `init` names the command that trusts them.
-#[test]
-fn init_template_copies_hooks_which_start_untrusted() {
-    let pack = pack_with_hook();
-    let dir = TempDir::new().unwrap();
-    let state = TempDir::new().unwrap();
-    let root = dir.path();
-    let bin = |args: &[&str]| {
+/// A project that adopted `pack`, with its own hook-trust state, and the
+/// output of the `init` that adopted it.
+struct Adopted {
+    root: TempDir,
+    state: TempDir,
+    output: std::process::Output,
+}
+
+impl Adopted {
+    fn new(pack: &Path, json: bool) -> Self {
+        let root = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        let mut args = vec!["init", "--template", pack.to_str().unwrap()];
+        if json {
+            args.push("--json");
+        }
+        let adopted = Self {
+            output: Self::bin_in(root.path(), state.path(), &args),
+            root,
+            state,
+        };
+        assert!(
+            adopted.output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&adopted.output.stderr)
+        );
+        adopted
+    }
+
+    fn bin_in(root: &Path, state: &Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
             .args(args)
-            .env("LAZYSPEC_STATE_DIR", state.path())
+            .env("LAZYSPEC_STATE_DIR", state)
             .current_dir(root)
             .output()
             .unwrap()
-    };
+    }
 
-    let output = bin(&[
-        "init",
-        "--template",
-        pack.path().to_str().unwrap(),
-        "--json",
-    ]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    fn bin(&self, args: &[&str]) -> std::process::Output {
+        Self::bin_in(self.root.path(), self.state.path(), args)
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.output.stdout).unwrap()
+    }
+
+    fn stdout(&self) -> String {
+        String::from_utf8_lossy(&self.output.stdout).into_owned()
+    }
+}
+
+// STORY-297 AC1: the pack's `.lazyspec/hooks/` is copied, nested files
+// included, and listed under `--json`.
+#[test]
+fn init_template_copies_and_lists_nested_hook_files() {
+    let pack = pack_with_hook();
+    let adopted = Adopted::new(pack.path(), true);
+
+    let json = adopted.json();
     let files: Vec<&str> = json["files"]
         .as_array()
         .unwrap()
@@ -331,30 +360,74 @@ fn init_template_copies_hooks_which_start_untrusted() {
         files.contains(&".lazyspec/hooks/lib/helper"),
         "got: {files:?}"
     );
-    assert_eq!(json["trust"], "lazyspec hook trust");
+    assert!(adopted
+        .root
+        .path()
+        .join(".lazyspec/hooks/lib/helper")
+        .is_file());
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(root.join(".lazyspec/hooks/check"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert!(mode & 0o111 != 0, "hook script stays executable");
-    }
+// STORY-297 AC1: a copied hook script keeps its exec bit.
+#[cfg(unix)]
+#[test]
+fn init_template_keeps_a_hook_scripts_exec_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let pack = pack_with_hook();
+    let adopted = Adopted::new(pack.path(), true);
 
-    let listed = bin(&["hook", "list", "--json"]);
+    let mode = std::fs::metadata(adopted.root.path().join(".lazyspec/hooks/check"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert!(mode & 0o111 != 0, "hook script stays executable");
+}
+
+// STORY-297 AC2: the adopted hooks start untrusted.
+#[test]
+fn init_template_hooks_start_untrusted() {
+    let pack = pack_with_hook();
+    let adopted = Adopted::new(pack.path(), true);
+
+    let listed = adopted.bin(&["hook", "list", "--json"]);
     let hooks: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(hooks[0]["name"], "check");
     assert_eq!(hooks[0]["trust"], "untrusted");
+}
 
-    let plain_dir = TempDir::new().unwrap();
-    let plain = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
-        .args(["init", "--template", pack.path().to_str().unwrap()])
-        .current_dir(plain_dir.path())
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&plain.stdout).contains("lazyspec hook trust"));
+// STORY-297 AC2: `--json` names the command that trusts the hooks.
+#[test]
+fn init_template_json_names_the_trust_command() {
+    let pack = pack_with_hook();
+    let adopted = Adopted::new(pack.path(), true);
+
+    assert_eq!(adopted.json()["trust"], "lazyspec hook trust");
+}
+
+// STORY-297 AC2: plain output prints the trust command too.
+#[test]
+fn init_template_prints_the_trust_hint() {
+    let pack = pack_with_hook();
+    let adopted = Adopted::new(pack.path(), false);
+
+    assert!(adopted.stdout().contains("lazyspec hook trust"));
+}
+
+// A `[[hooks]]` entry whose `run` lives outside `.lazyspec/hooks/` still
+// gets the trust hint: it is the table that trust covers, not the directory.
+#[test]
+fn init_template_hints_trust_for_hooks_run_from_elsewhere() {
+    let pack = TempDir::new().unwrap();
+    fs_extra_copy(&openspec_pack(), pack.path());
+    let toml_path = pack.path().join(".lazyspec.toml");
+    let mut toml = std::fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        "\n[[hooks]]\nname = \"check\"\nevent = \"validate\"\nrun = [\"scripts/check\"]\n",
+    );
+    std::fs::write(&toml_path, toml).unwrap();
+
+    let adopted = Adopted::new(pack.path(), true);
+
+    assert_eq!(adopted.json()["trust"], "lazyspec hook trust");
 }
 
 // A pack without hooks prints no trust hint.

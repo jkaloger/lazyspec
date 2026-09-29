@@ -4,7 +4,7 @@ use crate::engine::store::Store;
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
-pub use crate::engine::ops::update::{run, run_part, run_with_config};
+pub use crate::engine::ops::update::{run_part, run_with_config};
 
 const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author", "reviewed", "governs"];
 

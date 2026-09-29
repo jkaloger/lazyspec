@@ -62,7 +62,7 @@ The optional `[governs]` table defines a source root and an ownership check. Doc
 
 ### Hooks
 
-A `[[hooks]]` entry attaches an external command to a lazyspec event. There are two events: `validate` and `pre-transition` (below). For `validate`, the command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
+A `[[hooks]]` entry attaches an external command to a lazyspec event. There are two events: `validate` and `pre-transition` (below). For `validate`, the command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`; documents with `validate_ignore` are left out), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
 
 ```toml
 [[hooks]]
@@ -79,15 +79,15 @@ Hooks from a cloned repository do not run until you run `lazyspec hook trust`. T
 
 #### Hooks in a workflow pack
 
-A pack can ship its hook scripts in `.lazyspec/hooks/`, next to its `.lazyspec.toml` (which carries the `[[hooks]]` entries) and `.lazyspec/templates/`. `lazyspec init --template <dir-or-url>` copies the whole directory, keeping file modes, and `--json` lists the copied files and adds `"trust": "lazyspec hook trust"` when the pack ships hooks. The adopted hooks are untrusted, so none run. Read them, then run `lazyspec hook trust`; `init` prints that command.
+A pack can ship its hook scripts in `.lazyspec/hooks/`, next to its `.lazyspec.toml` (which carries the `[[hooks]]` entries) and `.lazyspec/templates/`. `lazyspec init --template <dir-or-url>` copies the whole directory, keeping file modes, and `--json` lists the copied files and adds `"trust": "lazyspec hook trust"` when the adopted config declares `[[hooks]]`. The adopted hooks are untrusted, so none run. Read them, then run `lazyspec hook trust`; `init` prints that command.
 
 #### pre-transition
 
-`event = "pre-transition"` hooks run when `update --status` or the terminal interface moves a document's status. Scope them with `types`, `from` and `to`; hooks run in declaration order. The hook receives `{"event", "hook", "transition": {"from", "to"}, "documents": [<the document>], "context": [<documents of context_types>]}`, each document in the same shape as for `validate`.
+`event = "pre-transition"` hooks run when `update --status` or the terminal interface moves a document's status. Scope them with `types`, `from` and `to`; hooks run in declaration order. `context_types` lists the types whose documents are sent alongside as `context`. The hook receives `{"event", "hook", "transition": {"from", "to"}, "documents": [<the document>], "context": [<documents of context_types>]}`, each document in the same shape as for `validate`.
 
 An error finding blocks the move and stops the remaining hooks: `update` exits non-zero and prints the findings (with `--json`, `{"error", "findings"}`), and the terminal interface shows them on the status picker and leaves the status alone. Warnings are reported and the move goes ahead (`hook_findings` in `update --json`). Findings in `update --json` and `hook run --json` have the shape of `validate --json` entries (`rule`, `hook`, `id`, `part`, `line`, `message`) plus `severity`. Untrusted hooks and `--no-hooks` skip the event.
 
-A hook can also return `"updates": [{"id", "part", "hash", "body"}]` to rewrite the body of a document or one of its parts. `hash` is the document's `content_hash` as it was sent. Every update is checked (the document exists, the hash still matches, only those four fields) before any is saved, then all are saved with the status through the `update --body` / `--part` path, so it works for every store. If any check or write fails, nothing is saved.
+A hook can also return `"updates": [{"id", "part", "hash", "body"}]` to rewrite the body of a document or one of its parts. `hash` is the document's `content_hash` as it was sent. Every update is checked (the document exists, the hash still matches, only those four fields) before any is saved, then all are saved with the status through the `update --body` / `--part` path, so it works for every store. If any check or write fails, nothing is saved. This guarantee is about document content, not history: a `git` store commits each update, the status change, and any rollback as separate commits.
 
 `hook run pre-transition <id>` fires the same hooks with `from` and `to` both set to the current status, saves the updates, and leaves the status. `hook run validate <id>` runs the `validate` hooks over that one document and prints the findings in the shape of `validate` (`--json` gives `{"event", "id", "errors", "warnings"}`); it exits 2 on an error finding.
 

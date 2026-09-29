@@ -48,3 +48,44 @@ pub mod template;
 pub mod traversal;
 pub mod validation;
 pub mod watch;
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+/// User-local lazyspec state (trust, cache, credentials): `$LAZYSPEC_STATE_DIR`,
+/// else `$HOME/.lazyspec`.
+pub fn user_state_dir() -> PathBuf {
+    resolve_state_dir(
+        std::env::var_os("LAZYSPEC_STATE_DIR"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn resolve_state_dir(state_dir: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    if let Some(dir) = state_dir {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(home.unwrap_or_else(|| ".".into())).join(".lazyspec")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_dir_override_wins_over_home() {
+        let dir = resolve_state_dir(Some("/state".into()), Some("/home/me".into()));
+        assert_eq!(dir, PathBuf::from("/state"));
+    }
+
+    #[test]
+    fn state_dir_defaults_under_home() {
+        let dir = resolve_state_dir(None, Some("/home/me".into()));
+        assert_eq!(dir, PathBuf::from("/home/me/.lazyspec"));
+    }
+
+    #[test]
+    fn state_dir_without_home_is_relative() {
+        assert_eq!(resolve_state_dir(None, None), PathBuf::from("./.lazyspec"));
+    }
+}

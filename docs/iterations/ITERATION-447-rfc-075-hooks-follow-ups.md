@@ -1,13 +1,14 @@
 ---
 title: RFC-075 hooks follow-ups
 type: iteration
-status: draft
+status: complete
 author: Jack Kaloger
 date: 2026-09-29
 tags: []
 related:
 - implements: STORY-296
 - related-to: STORY-295
+reviewed: 9df0c42c40bd521c826f774ca274f2a8a64d699a
 ---
 
 ## Context

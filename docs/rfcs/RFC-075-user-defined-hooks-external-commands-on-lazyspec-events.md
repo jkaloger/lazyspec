@@ -136,7 +136,6 @@ What the hook prints on stdout:
 - **TUI:**
   - Hook findings show in the validation display.
   - A blocked status change shows its findings instead of moving.
-- **Web view:** the same findings and blocked transitions, read from the engine. There is no separate code path.
 
 ### Trust
 
