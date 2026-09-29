@@ -27,9 +27,14 @@ fn main() -> anyhow::Result<()> {
         non_interactive,
         json,
         template,
+        force,
     }) = &cli.command
     {
         use std::io::IsTerminal;
+        if let Some(pack) = lazyspec::cli::init::pack_template(template.as_deref()) {
+            lazyspec::cli::init::run_from_template(&cwd, pack, *force, *json, &GitCli)?;
+            return Ok(());
+        }
         let interactive = lazyspec::cli::init::init_is_interactive(
             *non_interactive,
             *json,
@@ -38,9 +43,14 @@ fn main() -> anyhow::Result<()> {
         );
         if interactive {
             let mut prompter = lazyspec::cli::wizard::StdinPrompter::new();
-            lazyspec::cli::init::run_init_interactive(&cwd, &mut prompter, template.as_deref())?;
+            lazyspec::cli::init::run_init_interactive(
+                &cwd,
+                &mut prompter,
+                template.as_deref(),
+                *force,
+            )?;
         } else {
-            lazyspec::cli::init::run(&cwd)?;
+            lazyspec::cli::init::run(&cwd, *force)?;
         }
         return Ok(());
     }
@@ -122,6 +132,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::load(&cwd, &fs)?;
+    let hook_env = lazyspec::engine::hooks::HookEnv::process(cli.no_hooks);
 
     match cli.command {
         Some(Commands::Init { .. })
@@ -260,6 +271,7 @@ fn main() -> anyhow::Result<()> {
             expand_references,
             max_ref_lines,
             open,
+            parts,
         }) => {
             refresh_github_cache(&cwd, &config);
             let store = load_store(&cwd, &config)?;
@@ -277,6 +289,7 @@ fn main() -> anyhow::Result<()> {
                     &cwd,
                     &gh,
                     &GitCli,
+                    parts,
                 )?;
                 println!("{}", output);
             } else {
@@ -290,6 +303,7 @@ fn main() -> anyhow::Result<()> {
                         fs: &fs,
                         config: &config,
                         git: &GitCli,
+                        parts,
                     },
                 )?;
             }
@@ -301,48 +315,32 @@ fn main() -> anyhow::Result<()> {
             assignee,
             body,
             body_file,
+            part,
             attr,
             json,
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = load_store(&cwd, &config)?;
-            let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
-            let mut updates = Vec::new();
-            if let Some(ref s) = status {
-                updates.push(("status", s.as_str()));
-            }
-            if let Some(ref t) = title {
-                updates.push(("title", t.as_str()));
-            }
-            if let Some(ref a) = assignee {
-                updates.push(("assignee", a.as_str()));
-            }
-            if let Some(ref b) = body_content {
-                updates.push(("body", b.as_str()));
-            }
-            for (key, value) in &attr_pairs {
-                updates.push((key.as_str(), value.as_str()));
-            }
-            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            let push_outcome = lazyspec::cli::update::run_with_config(
+            let output = lazyspec::cli::update::run_cli(
+                &hook_env,
                 &cwd,
+                &config,
                 &store,
-                &path,
-                &updates,
-                Some(&config),
+                lazyspec::cli::update::UpdateArgs {
+                    path: &path,
+                    status: status.as_deref(),
+                    title: title.as_deref(),
+                    assignee: assignee.as_deref(),
+                    body: body_content.as_deref(),
+                    part: part.as_deref(),
+                    attr: &attr,
+                    json,
+                },
                 &GitCli,
             )?;
-            if json {
-                let store = load_store(&cwd, &config)?;
-                let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
-                let mut json_val = lazyspec::cli::json::doc_to_json(doc);
-                lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
-                println!("{}", serde_json::to_string_pretty(&json_val)?);
-            } else {
-                println!("Updated {}", resolved.display());
-                if let Some(warning) = push_outcome.warning() {
-                    eprintln!("{}", warning);
-                }
+            println!("{}", output.message);
+            for warning in &output.warnings {
+                eprintln!("{warning}");
             }
         }
         Some(Commands::Delete { path, json }) => {
@@ -556,7 +554,14 @@ fn main() -> anyhow::Result<()> {
                 let gh = GhCli::new();
                 println!(
                     "{}",
-                    lazyspec::cli::status::run_json(&store, &config, &cwd, &gh, &git_ref_ops)
+                    lazyspec::cli::status::run_json(
+                        &store,
+                        &config,
+                        &hook_env,
+                        &cwd,
+                        &gh,
+                        &git_ref_ops
+                    )
                 );
             } else {
                 let output = lazyspec::cli::status::run_human(&store, &config, &cwd, &git_ref_ops);
@@ -666,9 +671,16 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Validate { json, warnings }) => {
+        Some(Commands::Validate { id, json, warnings }) => {
             let store = load_store(&cwd, &config)?;
-            let exit_code = lazyspec::cli::validate::run_full(&store, &config, json, warnings);
+            let exit_code = lazyspec::cli::validate::run_full(
+                &store,
+                &config,
+                &hook_env,
+                id.as_deref(),
+                json,
+                warnings,
+            )?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
@@ -701,6 +713,13 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Commands::Hook { command }) => {
+            let (out, code) = lazyspec::cli::hook::run(command, &hook_env, &cwd, &config, &GitCli)?;
+            println!("{out}");
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Some(Commands::Config { command, json }) => {
             use lazyspec::cli::config::ConfigCommand;
             match command {
@@ -966,7 +985,7 @@ fn main() -> anyhow::Result<()> {
         }
         None => {
             let store = load_store(&cwd, &config)?;
-            lazyspec::tui::run(store, &config)?;
+            lazyspec::tui::run(store, &config, cli.no_hooks)?;
         }
     }
 

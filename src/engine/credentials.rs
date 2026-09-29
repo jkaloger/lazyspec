@@ -96,44 +96,51 @@ pub trait CredentialStore {
 }
 
 /// Plaintext-file credential store at a fixed path. The global constructor
-/// resolves `~/.lazyspec/credentials.toml`; [`FileCredentialStore::at_path`] is
+/// resolves `credentials.toml` in [`crate::engine::user_state_dir`]; [`FileCredentialStore::at_path`] is
 /// the injection seam tests use so they never touch the real home dir.
 pub struct FileCredentialStore {
-    path: PathBuf,
+    /// `None` when there is no user state dir to hold it; every operation on
+    /// such a store fails naming that.
+    path: Option<PathBuf>,
 }
 
 impl FileCredentialStore {
-    /// The global credential file at `~/.lazyspec/credentials.toml`.
+    /// The global credential file in the user state dir.
     pub fn global() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home)
-            .join(".lazyspec")
-            .join("credentials.toml");
-        FileCredentialStore { path }
+        FileCredentialStore {
+            path: crate::engine::user_state_dir().map(|dir| dir.join("credentials.toml")),
+        }
     }
 
     /// A store rooted at an explicit file path.
     pub fn at_path(path: impl Into<PathBuf>) -> Self {
-        FileCredentialStore { path: path.into() }
+        FileCredentialStore {
+            path: Some(path.into()),
+        }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> Result<&Path> {
+        self.path.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no place to keep credentials: HOME is not set; set HOME or LAZYSPEC_STATE_DIR"
+            )
+        })
     }
 }
 
 impl CredentialStore for FileCredentialStore {
     fn load_clickup_token(&self) -> Result<Option<Token>> {
-        if !self.path.exists() {
+        let path = self.path()?;
+        if !path.exists() {
             return Ok(None);
         }
-        enforce_read_perms(&self.path)?;
+        enforce_read_perms(path)?;
 
-        let src = fs::read_to_string(&self.path)
-            .with_context(|| format!("reading credential file {}", self.path.display()))?;
-        let doc: DocumentMut = src.parse().with_context(|| {
-            format!("credential file {} is not valid TOML", self.path.display())
-        })?;
+        let src = fs::read_to_string(path)
+            .with_context(|| format!("reading credential file {}", path.display()))?;
+        let doc: DocumentMut = src
+            .parse()
+            .with_context(|| format!("credential file {} is not valid TOML", path.display()))?;
 
         let token = doc
             .get(CLICKUP_TABLE)
@@ -145,20 +152,20 @@ impl CredentialStore for FileCredentialStore {
     }
 
     fn store_clickup_token(&self, token: &Token) -> Result<CredentialLocation> {
-        if let Some(parent) = self.path.parent() {
+        let path = self.path()?;
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating credential dir {}", parent.display()))?;
             set_dir_perms(parent)?;
         }
 
         // Merge into any existing file so unrelated tables/keys survive.
-        let mut doc = if self.path.exists() {
-            enforce_read_perms(&self.path)?;
-            let src = fs::read_to_string(&self.path)
-                .with_context(|| format!("reading credential file {}", self.path.display()))?;
-            src.parse::<DocumentMut>().with_context(|| {
-                format!("credential file {} is not valid TOML", self.path.display())
-            })?
+        let mut doc = if path.exists() {
+            enforce_read_perms(path)?;
+            let src = fs::read_to_string(path)
+                .with_context(|| format!("reading credential file {}", path.display()))?;
+            src.parse::<DocumentMut>()
+                .with_context(|| format!("credential file {} is not valid TOML", path.display()))?
         } else {
             DocumentMut::new()
         };
@@ -168,8 +175,8 @@ impl CredentialStore for FileCredentialStore {
         }
         doc[CLICKUP_TABLE][API_TOKEN_KEY] = value(token.expose());
 
-        write_secret_file(&self.path, doc.to_string().as_bytes())?;
-        Ok(CredentialLocation::File(self.path.clone()))
+        write_secret_file(path, doc.to_string().as_bytes())?;
+        Ok(CredentialLocation::File(path.to_path_buf()))
     }
 }
 

@@ -1,31 +1,86 @@
 use crate::engine::cache::DiskCache;
 use crate::engine::config::Config;
-use crate::engine::document::DocMeta;
+use crate::engine::document::{DocMeta, Part};
 use crate::engine::refs::RefExpander;
 use crate::engine::staleness::{Staleness, StalenessTerms};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::{App, AppEvent, StaleFindingsRequest, StalenessRequest};
+use super::{App, AppEvent, BackgroundFindingsRequest, DocRowKind, StalenessRequest};
+
+/// What [`App::request_expansion`] dispatches, keyed by [`App::expansion_source`]
+/// off the selected row (STORY-294): the parent doc's own body plus every part
+/// to concatenate (a `Doc` row -- unchanged from before parts were
+/// selectable), or one part's file alone (a `Part` row, AC3). A `MissingPart`
+/// row has nothing to read, so [`App::expansion_source`] returns `None` for
+/// it rather than a third variant here.
+enum ExpansionSource {
+    Doc { parts: Vec<Part> },
+    Part { part_path: PathBuf },
+}
+
+/// `text` with `@ref` directives expanded, or `text` unchanged when it has
+/// none or expansion fails/cancels. The lenient fallback [`request_expansion`]
+/// uses for a bundle's parts (RFC-074 AC6): a preview degrading to plain text
+/// for one part is preferable to the whole concatenated form vanishing.
+fn expand_or_plain(text: &str, expander: &RefExpander, cancel: &Arc<AtomicBool>) -> String {
+    if !text.contains("@ref ") {
+        return text.to_string();
+    }
+    match expander.expand_cancellable(text, cancel) {
+        Ok(Some(expanded)) => expanded,
+        _ => text.to_string(),
+    }
+}
 
 impl App {
+    /// The selected row's expansion cache key and what to expand for it
+    /// (STORY-294): `None` for a `MissingPart` row (AC5 -- nothing to read),
+    /// a doc row's own path plus its parts for a `Doc` row, or a part's own
+    /// path for a `Part` row (AC3).
+    fn expansion_source(&self) -> Option<(PathBuf, ExpansionSource)> {
+        let node = self.doc_tree.get(self.selected_doc)?;
+        match &node.kind {
+            DocRowKind::MissingPart { .. } => None,
+            DocRowKind::Doc => {
+                let meta = self.store.get(&node.path)?;
+                Some((
+                    meta.path.clone(),
+                    ExpansionSource::Doc {
+                        parts: meta.parts.clone(),
+                    },
+                ))
+            }
+            DocRowKind::Part { parent, name } => {
+                let meta = self.store.get(parent)?;
+                let part = meta.parts.iter().find(|p| &p.name == name)?;
+                Some((
+                    node.path.clone(),
+                    ExpansionSource::Part {
+                        part_path: part.path.clone(),
+                    },
+                ))
+            }
+        }
+    }
+
     pub fn request_expansion(&mut self, tx: &crossbeam_channel::Sender<AppEvent>) {
-        let doc_path = match self.selected_doc_meta() {
-            Some(meta) => meta.path.clone(),
-            None => return,
+        let Some((cache_key, source)) = self.expansion_source() else {
+            return;
         };
 
-        if self.expanded_body_cache.contains_key(&doc_path)
-            && !self.expansion_stale.contains(&doc_path)
+        if self.expanded_body_cache.contains_key(&cache_key)
+            && !self.expansion_stale.contains(&cache_key)
         {
             return;
         }
 
-        if self.expansion_in_flight.as_ref() == Some(&doc_path) {
+        if self.expansion_in_flight.as_ref() == Some(&cache_key) {
             return;
         }
-        self.expansion_stale.remove(&doc_path);
+        self.expansion_stale.remove(&cache_key);
 
         if let Some(cancel) = &self.expansion_cancel {
             cancel.store(true, Ordering::Relaxed);
@@ -33,59 +88,101 @@ impl App {
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.expansion_cancel = Some(cancel.clone());
-        self.expansion_in_flight = Some(doc_path.clone());
+        self.expansion_in_flight = Some(cache_key.clone());
 
         let root = self.store.root().to_path_buf();
         let tx = tx.clone();
         let disk_cache = self.disk_cache.clone();
-        std::thread::spawn(move || {
-            let full_path = root.join(&doc_path);
-            let content = match fs::read_to_string(&full_path) {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            let body = match DocMeta::extract_body(&content) {
-                Ok(b) => b,
-                Err(_) => return,
-            };
-
-            if !body.contains("@ref ") {
+        std::thread::spawn(move || match source {
+            ExpansionSource::Part { part_path } => {
+                // A part carries no frontmatter (RFC-074), so there is no
+                // body to extract -- the whole file, expanded, is the body.
+                let Ok(content) = fs::read_to_string(root.join(&part_path)) else {
+                    return;
+                };
+                let expander = RefExpander::new(root);
+                let body = expand_or_plain(&content, &expander, &cancel);
                 let body_hash = DiskCache::body_hash(&body);
                 let _ = tx.send(AppEvent::ExpansionResult {
-                    path: doc_path,
+                    path: cache_key,
                     body,
                     body_hash,
                 });
-                return;
             }
+            ExpansionSource::Doc { parts } => {
+                let doc_path = cache_key;
+                let full_path = root.join(&doc_path);
+                let content = match fs::read_to_string(&full_path) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let body = match DocMeta::extract_body(&content) {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
 
-            let body_hash = DiskCache::body_hash(&body);
-
-            if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
-                let _ = tx.send(AppEvent::ExpansionResult {
-                    path: doc_path,
-                    body: cached,
-                    body_hash,
-                });
-                return;
-            }
-
-            let expander = RefExpander::new(root);
-            match expander.expand_cancellable(&body, &cancel) {
-                Ok(Some(expanded)) => {
+                // RFC-074 AC6: a bundle's parts are expanded the same way as
+                // the index body, then concatenated after it under a
+                // `## <name>` heading -- the same shape `show --parts`
+                // renders. Bypasses the disk cache below, which is keyed on
+                // the index body alone.
+                if !parts.is_empty() {
+                    let expander = RefExpander::new(root.clone());
+                    let mut full = expand_or_plain(&body, &expander, &cancel);
+                    for part in &parts {
+                        let Ok(part_content) = fs::read_to_string(root.join(&part.path)) else {
+                            continue;
+                        };
+                        let part_body = expand_or_plain(&part_content, &expander, &cancel);
+                        full.push_str(&format!("\n\n## {}\n\n{}", part.name, part_body));
+                    }
+                    let body_hash = DiskCache::body_hash(&full);
                     let _ = tx.send(AppEvent::ExpansionResult {
                         path: doc_path,
-                        body: expanded,
+                        body: full,
                         body_hash,
                     });
+                    return;
                 }
-                Ok(None) => {}
-                Err(_) => {
+
+                if !body.contains("@ref ") {
+                    let body_hash = DiskCache::body_hash(&body);
                     let _ = tx.send(AppEvent::ExpansionResult {
                         path: doc_path,
                         body,
                         body_hash,
                     });
+                    return;
+                }
+
+                let body_hash = DiskCache::body_hash(&body);
+
+                if let Some(cached) = disk_cache.read(&doc_path, body_hash) {
+                    let _ = tx.send(AppEvent::ExpansionResult {
+                        path: doc_path,
+                        body: cached,
+                        body_hash,
+                    });
+                    return;
+                }
+
+                let expander = RefExpander::new(root);
+                match expander.expand_cancellable(&body, &cancel) {
+                    Ok(Some(expanded)) => {
+                        let _ = tx.send(AppEvent::ExpansionResult {
+                            path: doc_path,
+                            body: expanded,
+                            body_hash,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::ExpansionResult {
+                            path: doc_path,
+                            body,
+                            body_hash,
+                        });
+                    }
                 }
             }
         });
@@ -147,28 +244,37 @@ impl App {
     /// Called from `refresh_validation` and nowhere else -- once per event that
     /// can change what validation says, not once per frame -- so no dedupe key:
     /// each of those events is a reason the previous answer may be wrong.
-    pub fn request_stale_findings(&mut self, config: &Config) {
-        self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
-        let _ = self.stale_findings_tx.send(StaleFindingsRequest {
+    pub fn request_background_findings(&mut self, config: &Config) {
+        self.background_findings_generation = self.background_findings_generation.wrapping_add(1);
+        let request = self.background_findings_request(config);
+        let _ = self.background_findings_tx.send(request);
+    }
+
+    fn background_findings_request(&self, config: &Config) -> BackgroundFindingsRequest {
+        BackgroundFindingsRequest {
+            root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),
             docs: self.store.docs.values().cloned().collect(),
-            generation: self.stale_findings_generation,
-        });
+            hook_env: self.hook_env.clone(),
+            generation: self.background_findings_generation,
+        }
     }
 
     /// Apply a findings pass, dropping one a newer pass has superseded, and fold
     /// it into the panel.
-    pub fn apply_stale_findings(
+    pub fn apply_background_findings(
         &mut self,
         generation: u64,
         result: crate::engine::validation::ValidationResult,
+        hook_findings: crate::engine::validation::ValidationResult,
         config: &Config,
     ) {
-        if generation != self.stale_findings_generation {
+        if generation != self.background_findings_generation {
             return;
         }
-        self.stale_findings = result;
+        self.background_findings = result;
+        self.hook_findings = hook_findings;
         self.fold_validation(config);
     }
 
@@ -224,26 +330,18 @@ impl App {
         self.apply_staleness(self.staleness_generation, staleness);
     }
 
-    /// Test-only synchronous `stale` findings, the shape `run_staleness_now` is:
-    /// dispatch, compute inline through `self.git`, apply.
+    /// Test-only synchronous background findings, the shape `run_staleness_now`
+    /// is: dispatch, compute the request inline through `self.git`, apply.
     #[cfg(test)]
-    pub(crate) fn run_stale_findings_now(
+    pub(crate) fn run_background_findings_now(
         &mut self,
         config: &Config,
         cache: &crate::engine::staleness_cache::StalenessCache,
     ) {
-        self.request_stale_findings(config);
-        let docs: Vec<DocMeta> = self.store.docs.values().cloned().collect();
-        let result = crate::engine::validation::stale_findings(
-            self.store.governs_root(),
-            docs.iter(),
-            config,
-            &*self.git,
-            cache,
-        )
-        .into();
-        cache.flush();
-        self.apply_stale_findings(self.stale_findings_generation, result, config);
+        self.request_background_findings(config);
+        let request = self.background_findings_request(config);
+        let (result, hook_findings) = request.compute(&*self.git, cache);
+        self.apply_background_findings(request.generation, result, hook_findings, config);
     }
 
     pub fn request_diagram_render(

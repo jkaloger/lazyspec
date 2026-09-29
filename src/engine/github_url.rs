@@ -197,6 +197,8 @@ mod tests {
             assignee: None,
             id: id.to_string(),
             attributes: BTreeMap::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

@@ -11,7 +11,10 @@ fn validate_catches_broken_link() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(!result.errors.is_empty());
 }
@@ -22,7 +25,10 @@ fn validate_passes_clean_repo() {
     fixture.write_rfc("RFC-001.md", "Good", "draft");
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(result.errors.is_empty());
 }
@@ -43,7 +49,9 @@ fn validate_catches_unlinked_iteration() {
     fixture.write_iteration("ITERATION-001.md", "Orphan Iteration", "draft", None);
     let config = config_with_starter_edges();
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -62,7 +70,9 @@ fn validate_catches_unlinked_adr() {
     fixture.write_adr("ADR-001.md", "Orphan ADR", "draft", None);
     let config = config_with_starter_edges();
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -84,8 +94,14 @@ fn validate_json_includes_parse_errors() {
     );
 
     let store = fixture.store();
-    let output =
-        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["parse_errors"].as_array().unwrap();
@@ -108,7 +124,7 @@ fn validate_json_carries_no_row_for_a_missing_absolute_dir() {
     }]);
 
     let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     let output = lazyspec::cli::validate::run_json(&store, &result, &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -133,7 +149,10 @@ fn validate_passes_linked_iteration() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(result.errors.is_empty());
 }
@@ -145,7 +164,10 @@ fn validate_catches_duplicate_ids() {
     fixture.write_rfc("RFC-020-bar.md", "Bar RFC", "draft");
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let dups: Vec<_> = result
         .errors
@@ -171,8 +193,14 @@ fn validate_duplicate_id_json_output() {
     fixture.write_rfc("RFC-030-beta.md", "Beta", "draft");
 
     let store = fixture.store();
-    let output =
-        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -194,7 +222,10 @@ fn validate_duplicate_id_human_output() {
     let store = fixture.store();
     let output = lazyspec::cli::validate::run_human(
         &store,
-        &store.validate_full(&fixture.config()),
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
         true,
         &[],
     );
@@ -213,7 +244,10 @@ fn validate_no_duplicate_ids_when_unique() {
     fixture.write_rfc("RFC-051-second.md", "Second", "draft");
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let dups: Vec<_> = result
         .errors
@@ -233,7 +267,10 @@ fn validate_ignore_excludes_from_duplicate_check() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let dups: Vec<_> = result
         .errors
@@ -255,7 +292,10 @@ fn validate_broken_link_with_nonexistent_id() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let broken: Vec<_> = result
         .errors
@@ -285,7 +325,10 @@ fn validate_valid_id_link_is_not_broken() {
     );
 
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let broken: Vec<_> = result
         .errors
@@ -308,8 +351,14 @@ fn validate_broken_link_with_nonexistent_id_in_json_output() {
     );
 
     let store = fixture.store();
-    let output =
-        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -372,7 +421,7 @@ fn singleton_violation_detected() {
     );
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let violations: Vec<_> = result
         .errors
@@ -405,7 +454,7 @@ fn singleton_single_doc_no_error() {
     );
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let violations: Vec<_> = result
         .errors
@@ -434,7 +483,7 @@ fn parent_type_inside_dir_no_error() {
     );
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let violations: Vec<_> = result
         .errors
@@ -464,7 +513,7 @@ fn parent_type_outside_dir_error() {
     );
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let violations: Vec<_> = result
         .errors
@@ -500,7 +549,7 @@ fn parent_type_violations(
 ) -> Vec<ValidationIssue> {
     let store = lazyspec::engine::store::Store::load(fixture.root(), config).unwrap();
     store
-        .validate_full(config)
+        .validate_full(config, &lazyspec::engine::hooks::HookEnv::disabled())
         .errors
         .into_iter()
         .filter(|e| matches!(e, ValidationIssue::ParentTypeViolation { .. }))
@@ -585,7 +634,7 @@ fn parent_type_references_non_singleton_error() {
     std::fs::create_dir_all(fixture.root().join("docs/guidelines")).unwrap();
 
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let violations: Vec<_> = result
         .errors
@@ -636,7 +685,7 @@ fn validate_flags_undeclared_relationship_name() {
     };
 
     let store = fixture.store();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let flagged: Vec<_> = result
         .errors
@@ -686,7 +735,7 @@ fn one_error_one_warning() -> (crate::common::TestFixture, Config) {
 fn validate_json_findings_carry_the_rule_slug_and_the_rendered_message() {
     let (fixture, config) = one_error_one_warning();
     let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let output = lazyspec::cli::validate::run_json(&store, &result, &[]);
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -711,7 +760,11 @@ fn validate_json_findings_carry_the_rule_slug_and_the_rendered_message() {
 fn validate_json_findings_carry_the_variants_own_fields() {
     let (fixture, config) = one_error_one_warning();
     let store = fixture.store_with(&config);
-    let output = lazyspec::cli::validate::run_json(&store, &store.validate_full(&config), &[]);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled()),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     let error = &parsed["errors"][0];
@@ -736,8 +789,14 @@ fn validate_json_gives_a_gh_auth_warning_the_same_object_shape() {
     let fixture = crate::common::TestFixture::new();
     let store = fixture.store();
     let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-    let output =
-        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &extra);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
+        &extra,
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["warnings"][0]["rule"], "gh-auth", "got: {output}");
@@ -750,8 +809,12 @@ fn validate_json_gives_a_gh_auth_warning_the_same_object_shape() {
 fn validate_human_output_is_unchanged_by_the_finding_object_shape() {
     let (fixture, config) = one_error_one_warning();
     let store = fixture.store_with(&config);
-    let output =
-        lazyspec::cli::validate::run_human(&store, &store.validate_full(&config), true, &[]);
+    let output = lazyspec::cli::validate::run_human(
+        &store,
+        &store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled()),
+        true,
+        &[],
+    );
 
     assert_eq!(
         output,

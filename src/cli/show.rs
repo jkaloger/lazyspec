@@ -117,6 +117,9 @@ pub struct ShowArgs<'a> {
     pub fs: &'a dyn FileSystem,
     pub config: &'a Config,
     pub git: &'a dyn GitRefOps,
+    /// Render the concatenated form (RFC-074): the index body, then each
+    /// part's body under a `## <name>` heading, in part order.
+    pub parts: bool,
 }
 
 /// Writes to `out` rather than straight to `println!` so a test can assert on
@@ -192,6 +195,20 @@ pub fn run(out: &mut dyn std::io::Write, store: &Store, id: &str, args: ShowArgs
     };
     writeln!(out, "{}", strip_html_comments(&body))?;
 
+    if args.parts {
+        for part in &doc.parts {
+            let part_body = if args.expand {
+                store.get_part_body_expanded(&part.path, args.max_ref_lines, args.fs)?
+            } else {
+                store.get_part_body_raw(&part.path, args.fs)?
+            };
+            writeln!(out)?;
+            writeln!(out, "## {}", part.name)?;
+            writeln!(out)?;
+            writeln!(out, "{}", strip_html_comments(&part_body))?;
+        }
+    }
+
     let child_paths = store.children_of(&doc.path);
     if !child_paths.is_empty() {
         writeln!(out)?;
@@ -207,6 +224,17 @@ pub fn run(out: &mut dyn std::io::Write, store: &Store, id: &str, args: ShowArgs
                 );
                 writeln!(out, "  - {}  ({})", child.title, qualified_shorthand)?;
             }
+        }
+    }
+
+    if !doc.parts.is_empty() || !doc.sidecars.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "{}", dim("Parts:"))?;
+        for part in &doc.parts {
+            writeln!(out, "  - {}  ({})", part.name, part.path.display())?;
+        }
+        for sidecar in &doc.sidecars {
+            writeln!(out, "  - {}", sidecar.display())?;
         }
     }
 
@@ -238,6 +266,7 @@ pub fn run_json(
     root: &Path,
     gh: &dyn GhIssueReader,
     git: &dyn GitRefOps,
+    parts: bool,
 ) -> Result<String> {
     let doc = match resolve_shorthand_or_path(store, id) {
         Ok(doc) => doc,
@@ -266,6 +295,24 @@ pub fn run_json(
         git,
         &StalenessCache::load(store.root()),
     ))?;
+
+    // RFC-074 AC6: `--parts` adds `body` to each `parts[]` entry, read fresh
+    // (not off `doc_to_json`'s name/path pair) so it honours the same
+    // `expand` flag as the parent body.
+    if parts {
+        if let Some(entries) = json.get_mut("parts").and_then(|p| p.as_array_mut()) {
+            for (part, entry) in doc.parts.iter().zip(entries.iter_mut()) {
+                let part_body = if expand {
+                    store.get_part_body_expanded(&part.path, max_ref_lines, fs)?
+                } else {
+                    store.get_part_body_raw(&part.path, fs)?
+                };
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("body".to_string(), serde_json::Value::String(part_body));
+                }
+            }
+        }
+    }
 
     Ok(serde_json::to_string_pretty(&json)?)
 }
@@ -418,6 +465,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "X-1".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -534,6 +583,7 @@ mod tests {
             store.root(),
             &MockGhClient::new(),
             git,
+            false,
         )
         .unwrap();
         serde_json::from_str::<serde_json::Value>(&output).unwrap()["staleness"].clone()
@@ -552,6 +602,7 @@ mod tests {
                 fs: &crate::engine::fs::RealFileSystem,
                 config,
                 git,
+                parts: false,
             },
         )
         .unwrap();

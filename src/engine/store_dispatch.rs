@@ -9,7 +9,7 @@ use crate::engine::clickup::TaskUpdate;
 use crate::engine::clickup_cache;
 use crate::engine::config::{Config, Lifecycle, StoreBackend, TypeDef};
 use crate::engine::document::{
-    body_section, compose_frontmatter, AttrValue, DocMeta, DocType, Status,
+    body_section, compose_frontmatter, AttrValue, DocMeta, DocType, Part, Status,
 };
 use crate::engine::gh::{
     self, missing_project_scope, GhClient, GhGraphql, GhMilestoneClient, GhProjectsClient, GqlVar,
@@ -86,6 +86,13 @@ pub struct CreatedDoc {
     pub path: PathBuf,
     pub id: String,
     pub push_outcome: PushOutcome,
+    /// A directory template's parts and sidecars (STORY-291 AC2), scaffolded
+    /// alongside `path` by [`GitStore::create`](crate::engine::git_store::GitStore)
+    /// -- the only backend that can hit a directory template, since every
+    /// other backend materializes one cache file per document. Empty for
+    /// them, and for a `git` create against a flat-file template.
+    pub parts: Vec<Part>,
+    pub sidecars: Vec<PathBuf>,
 }
 
 pub trait DocumentStore: gh::AsAny {
@@ -345,6 +352,8 @@ impl DocumentStore for ClickupTasksStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -512,7 +521,8 @@ impl DocumentStore for FilesystemStore {
             type_def.subdirectory,
             None,
             |_| {},
-        )?;
+        )?
+        .path;
 
         let relative = path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
         let id = crate::engine::store::extract_id_from_name(
@@ -523,6 +533,8 @@ impl DocumentStore for FilesystemStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -1858,6 +1870,8 @@ impl DocumentStore for GithubIssuesStore {
             assignee: None,
             attributes: Default::default(),
             id: String::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         let issue_body = issue_body::serialize(&placeholder_meta, body);
@@ -1949,6 +1963,8 @@ impl DocumentStore for GithubIssuesStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -2338,6 +2354,8 @@ impl GithubMilestonesStore {
             assignee: None,
             attributes,
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 }
@@ -2379,6 +2397,8 @@ impl DocumentStore for GithubMilestonesStore {
             path: relative,
             id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -2628,6 +2648,8 @@ impl GithubProjectsStore {
             assignee: None,
             attributes: Default::default(),
             id: doc_id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, &node_id)?;
 
@@ -2702,6 +2724,8 @@ impl DocumentStore for GithubProjectsStore {
             assignee: None,
             attributes: Default::default(),
             id: doc_id.clone(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, &node_id)?;
 
@@ -2718,6 +2742,8 @@ impl DocumentStore for GithubProjectsStore {
             path: relative,
             id: doc_id,
             push_outcome: PushOutcome::Synced,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -6083,6 +6109,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         meta.tags = vec![];
         let body = issue_body::serialize(&meta, "prose");
@@ -6184,6 +6212,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         issue_body::serialize(&meta, prose)
     }
@@ -6713,6 +6743,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-001".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         let body = issue_body::serialize(&meta, "ADOPTED PROSE LINE");
         let view_issue = GhIssue {
@@ -7005,6 +7037,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -7050,6 +7084,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -7177,6 +7213,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: String::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         let err = write_cache_file(&root, &td, &meta, "body").unwrap_err();
@@ -7212,6 +7250,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-042".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -7456,6 +7496,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-099".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         write_cache_file(&root, &td, &meta, "body").unwrap();
@@ -7486,6 +7528,7 @@ mod tests {
             staleness: Default::default(),
             web: None,
             git_ref: Default::default(),
+            hooks: Vec::new(),
             extends: None,
         };
 
@@ -8437,6 +8480,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "STORY-400".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         let body = issue_body::serialize(&parent_meta, "body");
         assert!(
@@ -8872,6 +8917,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

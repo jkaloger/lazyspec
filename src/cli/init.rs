@@ -1,18 +1,22 @@
 use crate::cli::config::{apply_collected_type, collect_edge, collect_type_interactive};
 use crate::cli::style::{bold, dim, section_header, success_line, warning_prefix};
 use crate::cli::wizard::Prompter;
+use crate::engine::config::extends;
 use crate::engine::config::{
     starter_edges, starter_relationships, starter_types, CertificationConfig, Config,
     DocumentConfig, EdgeDef, FilesystemConfig, Naming, Templates, UiConfig,
 };
+use crate::engine::fs::RealFileSystem;
 use crate::engine::fs_ops::default_template;
 use crate::engine::gh::{deterministic_color, GhCli, GhError, GhIssueWriter};
+use crate::engine::git_ref::GitRefOps;
 use crate::engine::github::resolve_repo;
-use anyhow::{bail, Result};
+use crate::engine::store::ensure_cache_gitignored;
+use anyhow::{bail, Context, Result};
 use console::colors_enabled;
 use std::fs;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The starter config `init` writes into a fresh project. Per ADR-011 this is the
@@ -45,8 +49,16 @@ pub fn starter_config() -> Config {
         staleness: Default::default(),
         web: None,
         git_ref: Default::default(),
+        hooks: Vec::new(),
         extends: None,
     }
+}
+
+/// The workflow pack `--template` names, if any: anything but `starter` (RFC-074).
+/// `starter` pre-selects the built-in starter designer instead, so it is not a
+/// pack and this returns `None`; so does no `--template` at all.
+pub fn pack_template(template: Option<&str>) -> Option<&str> {
+    template.filter(|t| *t != "starter")
 }
 
 /// Whether `init` should run the interactive wizard: neither opt-out flag set
@@ -60,15 +72,18 @@ pub fn init_is_interactive(
     !non_interactive && !json && stdin_tty && stdout_tty
 }
 
-fn ensure_no_config(root: &Path) -> Result<()> {
+fn ensure_no_config(root: &Path, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
     if root.join(".lazyspec.toml").exists() {
-        bail!(".lazyspec.toml already exists");
+        bail!(".lazyspec.toml already exists; use --force to overwrite");
     }
     Ok(())
 }
 
-pub fn run(root: &Path) -> Result<()> {
-    ensure_no_config(root)?;
+pub fn run(root: &Path, force: bool) -> Result<()> {
+    ensure_no_config(root, force)?;
     write_project(root, &starter_config())
 }
 
@@ -100,6 +115,212 @@ pub fn write_project(root: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// `init --template <path-or-url>`, RFC-074: adopt a workflow pack whole,
+/// rather than design one -- no wizard, no prompter, just a copy. `template`
+/// names a local directory (AC1) or a clone URL (AC2, resolved through the
+/// same `.lazyspec/cache/config/` an `extends` URL clones into). Refuses an
+/// existing `.lazyspec.toml` unless `force` (AC3). Prints (or, under `json`,
+/// serializes) every file written, relative to `root`.
+pub fn run_from_template(
+    root: &Path,
+    template: &str,
+    force: bool,
+    json: bool,
+    git_ref_ops: &dyn GitRefOps,
+) -> Result<()> {
+    let source = resolve_pack_source(root, template, git_ref_ops)?;
+    let files = install_pack(root, &source, force)?;
+    let ships_hooks = declares_hooks(&fs::read_to_string(root.join(".lazyspec.toml"))?);
+
+    if json {
+        let mut payload = serde_json::json!({ "files": files });
+        if ships_hooks {
+            payload["trust"] = serde_json::json!(HOOK_TRUST_COMMAND);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "{}",
+            success_line(&format!(
+                "Adopted pack {} into {}",
+                template,
+                root.display()
+            ))
+        );
+        for file in &files {
+            println!("  {}", file.display());
+        }
+        if ships_hooks {
+            println!(
+                "This pack ships hooks, which stay untrusted until you review them. Run: {HOOK_TRUST_COMMAND}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether the adopted config has a non-empty `[[hooks]]` table -- what trust
+/// covers, wherever each `run` lives. Read as raw TOML: a pack may `extends`,
+/// which `Config::parse` refuses.
+fn declares_hooks(config_text: &str) -> bool {
+    toml::from_str::<toml::Table>(config_text)
+        .ok()
+        .and_then(|table| {
+            table
+                .get("hooks")?
+                .as_array()
+                .map(|hooks| !hooks.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+const HOOKS_DIR: &str = ".lazyspec/hooks";
+const HOOK_TRUST_COMMAND: &str = "lazyspec hook trust";
+
+/// Whether the clone at `clone_root` already came from `url`/`branch`, read
+/// straight off `.git/config` and `.git/HEAD` rather than asking git (this
+/// only ever needs "is it safe to reuse", never a walk of the repo itself).
+/// Anything unreadable -- no clone yet, a `.git` this does not recognize --
+/// reads as "no match": the caller re-clones rather than risking copying the
+/// wrong pack.
+fn clone_matches(clone_root: &Path, url: &str, branch: Option<&str>) -> bool {
+    let Ok(config) = fs::read_to_string(clone_root.join(".git/config")) else {
+        return false;
+    };
+    if !config.lines().any(|l| l.trim() == format!("url = {url}")) {
+        return false;
+    }
+    match branch {
+        None => true,
+        Some(branch) => fs::read_to_string(clone_root.join(".git/HEAD"))
+            .map(|head| head.trim() == format!("ref: refs/heads/{branch}"))
+            .unwrap_or(false),
+    }
+}
+
+/// Where `template` (an `init --template` value that is not `starter`) reads
+/// a pack from: a local directory as-is, or -- when it names a clone URL --
+/// cloned into `.lazyspec/cache/config/`, the same path a URL `extends`
+/// clones into (AC2).
+///
+/// A clone already at that path is reused only when [`clone_matches`] it --
+/// same url, same branch. `--template` never sets `extends` (AC4), so
+/// nothing here can otherwise tell whether an existing clone is a real
+/// `extends` clone, a previous `--template <other-url>` run's leftover, or
+/// actually this url: copying it on that assumption is how a stale or
+/// mismatched clone silently became the installed "pack" (STORY-293
+/// follow-up). A mismatch is removed and re-cloned, so `--template <url>`
+/// always installs exactly what it names.
+fn resolve_pack_source(
+    root: &Path,
+    template: &str,
+    git_ref_ops: &dyn GitRefOps,
+) -> Result<PathBuf> {
+    if !extends::is_url(template) {
+        let candidate = Path::new(template);
+        let dir = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            root.join(candidate)
+        };
+        if !dir.is_dir() {
+            bail!(
+                "--template {} is not a directory (and not a recognized clone URL)",
+                template
+            );
+        }
+        return Ok(dir);
+    }
+
+    let (url, branch) = extends::split_fragment(template);
+    let clone_root = root.join(".lazyspec/cache/config");
+    if clone_root.exists() && !clone_matches(&clone_root, url, branch) {
+        fs::remove_dir_all(&clone_root)
+            .with_context(|| format!("removing stale clone at {}", clone_root.display()))?;
+    }
+    if !clone_root.exists() {
+        ensure_cache_gitignored(root, &RealFileSystem)?;
+        git_ref_ops
+            .clone_repo(url, branch, &clone_root)
+            .with_context(|| {
+                format!(
+                    "cloning {url} ({}) for --template",
+                    branch.unwrap_or("default branch")
+                )
+            })?;
+    }
+    Ok(clone_root)
+}
+
+/// Copy `source`'s `.lazyspec.toml`, `.lazyspec/hooks/` and whole `.lazyspec/templates/` tree
+/// (flat and directory templates alike -- it is a byte copy, not a template
+/// interpreter) into `root`. Storage stays local: nothing here sets `extends`
+/// or otherwise moves where documents live (RFC-074 Decisions). Returns every
+/// file written, relative to `root`, `.lazyspec.toml` first then templates in
+/// directory-listing order.
+fn install_pack(root: &Path, source: &Path, force: bool) -> Result<Vec<PathBuf>> {
+    let source_config = source.join(".lazyspec.toml");
+    if !source_config.is_file() {
+        bail!(
+            "{} is not a lazyspec pack: no .lazyspec.toml",
+            source.display()
+        );
+    }
+    ensure_no_config(root, force)?;
+
+    let mut written = Vec::new();
+
+    fs::create_dir_all(root)?;
+    let dest_config = root.join(".lazyspec.toml");
+    fs::copy(&source_config, &dest_config)?;
+    written.push(PathBuf::from(".lazyspec.toml"));
+
+    let source_templates = source.join(".lazyspec/templates");
+    if source_templates.is_dir() {
+        let dest_templates = root.join(".lazyspec/templates");
+        copy_dir_recursive(root, &source_templates, &dest_templates, &mut written)?;
+    }
+
+    let source_hooks = source.join(HOOKS_DIR);
+    if source_hooks.is_dir() {
+        copy_dir_recursive(root, &source_hooks, &root.join(HOOKS_DIR), &mut written)?;
+    }
+
+    Ok(written)
+}
+
+/// Copy every file under `src` into `dst` (creating directories as needed),
+/// recursing depth-first in sorted (deterministic) directory order, and
+/// appending each destination file's path relative to `root` onto `written`.
+fn copy_dir_recursive(
+    root: &Path,
+    src: &Path,
+    dst: &Path,
+    written: &mut Vec<PathBuf>,
+) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    let mut entries: Vec<_> = fs::read_dir(src)?.collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(root, &src_path, &dst_path, written)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+            written.push(
+                dst_path
+                    .strip_prefix(root)
+                    .unwrap_or(&dst_path)
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Interactive `init`: bail if a config already exists (before prompting), then
 /// scaffold whichever config the chosen designer returns. The wizard defaults to a
 /// blank DAG (STORY-228); passing `template == Some("starter")` pre-selects the
@@ -112,8 +333,9 @@ pub fn run_init_interactive(
     root: &Path,
     prompter: &mut dyn Prompter,
     template: Option<&str>,
+    force: bool,
 ) -> Result<()> {
-    ensure_no_config(root)?;
+    ensure_no_config(root, force)?;
     // This path is only reached interactively (main.rs routes `--json`/non-TTY to
     // `run`), so json is false here; the guard still honours colours-off / non-TTY.
     if crate::cli::spinner::should_greet(false, std::io::stdout().is_terminal(), colors_enabled()) {
@@ -637,6 +859,15 @@ mod tests {
         assert!(init_is_interactive(false, false, true, true), "plain tty");
     }
 
+    // RFC-074: `starter` and no `--template` at all name no pack; anything else
+    // does.
+    #[test]
+    fn pack_template_excludes_starter_and_none() {
+        assert_eq!(pack_template(None), None);
+        assert_eq!(pack_template(Some("starter")), None);
+        assert_eq!(pack_template(Some("./pack")), Some("./pack"));
+    }
+
     // AC4: an existing .lazyspec.toml bails both paths, and the interactive path
     // bails before consuming any prompt answer (empty queue never errors).
     #[test]
@@ -644,11 +875,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".lazyspec.toml"), "existing").unwrap();
 
-        let non_interactive = run(dir.path());
+        let non_interactive = run(dir.path(), false);
         assert!(non_interactive.is_err(), "run should bail");
 
         let mut prompter = scripted(&[]);
-        let interactive = run_init_interactive(dir.path(), &mut prompter, None);
+        let interactive = run_init_interactive(dir.path(), &mut prompter, None, false);
         assert!(interactive.is_err(), "interactive run should bail");
         assert!(
             interactive
@@ -801,7 +1032,7 @@ mod tests {
         );
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "scaffolded project should validate clean: {:?}",
@@ -1196,7 +1427,7 @@ mod tests {
         assert_eq!(loaded.edges[0].traversal, Some(Traversal::Chain));
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "a designed edge must not make a fresh project invalid: {:?}",
@@ -1234,7 +1465,7 @@ mod tests {
         );
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "scaffolded from-scratch project should validate clean: {:?}",
@@ -1264,7 +1495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut prompter = ScriptedPrompter::new(answers);
-        let result = run_init_interactive(root, &mut prompter, None);
+        let result = run_init_interactive(root, &mut prompter, None, false);
 
         assert!(result.is_err(), "aborting the reloop propagates an error");
         assert!(
@@ -1288,7 +1519,7 @@ mod tests {
         let root = dir.path();
         let mut prompter = ScriptedPrompter::new(all_default_answers());
 
-        run_init_interactive(root, &mut prompter, Some("starter")).unwrap();
+        run_init_interactive(root, &mut prompter, Some("starter"), false).unwrap();
 
         let written = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
         assert_eq!(
@@ -1322,7 +1553,7 @@ mod tests {
         let root = dir.path();
         let mut prompter = ScriptedPrompter::new(answers);
 
-        run_init_interactive(root, &mut prompter, None).unwrap();
+        run_init_interactive(root, &mut prompter, None, false).unwrap();
 
         let fs = RealFileSystem;
         let loaded = Config::load(root, &fs).unwrap();
@@ -1415,5 +1646,234 @@ mod tests {
         ensure_gitignore(&config, dir.path()).unwrap();
 
         assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    // --- STORY-293: init --template <dir-or-url> (RFC-074 "Workflow packs") ---
+
+    use crate::engine::git_ref::test_support::MockGitRefClient;
+
+    fn write_pack(root: &Path) {
+        fs::write(
+            root.join(".lazyspec.toml"),
+            starter_config().to_toml().unwrap(),
+        )
+        .unwrap();
+        let change_dir = root.join(".lazyspec/templates/change");
+        fs::create_dir_all(&change_dir).unwrap();
+        fs::write(change_dir.join("index.md"), "index for {title}\n").unwrap();
+        fs::write(change_dir.join("design.md"), "design for {title}\n").unwrap();
+        fs::write(change_dir.join("index.yaml"), "sidecar\n").unwrap();
+    }
+
+    // AC1: a local directory template source resolves to itself, unchanged.
+    #[test]
+    fn resolve_pack_source_local_dir_returns_it_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pack(dir.path());
+
+        let resolved = resolve_pack_source(
+            dir.path(),
+            dir.path().to_str().unwrap(),
+            &MockGitRefClient::new(),
+        )
+        .unwrap();
+        assert_eq!(resolved, dir.path());
+    }
+
+    #[test]
+    fn resolve_pack_source_missing_dir_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            resolve_pack_source(dir.path(), "no/such/dir", &MockGitRefClient::new()).unwrap_err();
+        assert!(err.to_string().contains("no/such/dir"));
+    }
+
+    // AC2: a clone URL is cloned into `.lazyspec/cache/config/`, the same path
+    // a URL `extends` clones into.
+    #[test]
+    fn resolve_pack_source_url_clones_into_the_shared_cache_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+
+        let clone_root = root.join(".lazyspec/cache/config");
+        let resolved =
+            resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+        assert_eq!(resolved, clone_root);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "clone_repo:https://example.invalid/pack.git:next:".to_string()
+                    + &clone_root.display().to_string()
+            ]
+        );
+    }
+
+    fn write_fake_clone(clone_root: &Path, url: &str, branch: &str) {
+        fs::create_dir_all(clone_root.join(".git")).unwrap();
+        fs::write(
+            clone_root.join(".git/config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+        fs::write(
+            clone_root.join(".git/HEAD"),
+            format!("ref: refs/heads/{branch}\n"),
+        )
+        .unwrap();
+    }
+
+    // STORY-293 follow-up: a clone already at that path from the exact same
+    // url and branch is reused rather than re-cloned.
+    #[test]
+    fn resolve_pack_source_url_reuses_a_clone_that_matches_url_and_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(&clone_root, "https://example.invalid/pack.git", "next");
+
+        let resolved =
+            resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+
+        assert_eq!(resolved, clone_root);
+        assert!(
+            calls.borrow().is_empty(),
+            "a matching clone is reused, not re-cloned: {:?}",
+            calls.borrow()
+        );
+    }
+
+    // STORY-293 follow-up: a clone at that path from a different url (an
+    // unrelated `extends`, or a previous `--template <other-url>` run's
+    // leftover) must not be copied as if it were this pack -- it is removed
+    // and re-cloned from the url actually asked for.
+    #[test]
+    fn resolve_pack_source_url_reclones_a_clone_from_a_different_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(
+            &clone_root,
+            "https://example.invalid/other-pack.git",
+            "next",
+        );
+
+        let resolved =
+            resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+
+        assert_eq!(resolved, clone_root);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "clone_repo:https://example.invalid/pack.git:next:".to_string()
+                    + &clone_root.display().to_string()
+            ],
+            "a mismatched clone is removed and re-cloned"
+        );
+    }
+
+    // Same as above, for a branch mismatch on an otherwise identical url.
+    #[test]
+    fn resolve_pack_source_url_reclones_a_clone_from_a_different_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ops = MockGitRefClient::new();
+        let calls = ops.call_log();
+        let clone_root = root.join(".lazyspec/cache/config");
+        write_fake_clone(&clone_root, "https://example.invalid/pack.git", "main");
+
+        resolve_pack_source(root, "https://example.invalid/pack.git#next", &ops).unwrap();
+
+        assert_eq!(calls.borrow().len(), 1, "a branch mismatch is re-cloned");
+    }
+
+    // AC1/AC5: `install_pack` copies `.lazyspec.toml` and every file under
+    // `.lazyspec/templates/` (a directory template's parts and a sidecar
+    // alike), reporting each destination path relative to `root`.
+    #[test]
+    fn install_pack_copies_config_and_templates_and_lists_files() {
+        let source = tempfile::tempdir().unwrap();
+        write_pack(source.path());
+
+        let dest = tempfile::tempdir().unwrap();
+        let root = dest.path();
+
+        let mut written = install_pack(root, source.path(), false).unwrap();
+        written.sort();
+
+        assert!(root.join(".lazyspec.toml").is_file());
+        assert!(root.join(".lazyspec/templates/change/index.md").is_file());
+        assert!(root.join(".lazyspec/templates/change/design.md").is_file());
+        assert!(root.join(".lazyspec/templates/change/index.yaml").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join(".lazyspec/templates/change/index.md")).unwrap(),
+            "index for {title}\n",
+            "a byte copy, not a rendered template"
+        );
+
+        let mut expected = vec![
+            PathBuf::from(".lazyspec.toml"),
+            PathBuf::from(".lazyspec/templates/change/design.md"),
+            PathBuf::from(".lazyspec/templates/change/index.md"),
+            PathBuf::from(".lazyspec/templates/change/index.yaml"),
+        ];
+        expected.sort();
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn install_pack_errors_when_source_has_no_lazyspec_toml() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+
+        let err = install_pack(dest.path(), source.path(), false).unwrap_err();
+        assert!(err.to_string().contains("not a lazyspec pack"));
+    }
+
+    // AC3: an existing `.lazyspec.toml` refuses, naming --force; --force
+    // overwrites it.
+    #[test]
+    fn install_pack_refuses_existing_config_without_force_then_force_overwrites() {
+        let source = tempfile::tempdir().unwrap();
+        write_pack(source.path());
+
+        let dest = tempfile::tempdir().unwrap();
+        let root = dest.path();
+        fs::write(root.join(".lazyspec.toml"), "# custom\n").unwrap();
+
+        let err = install_pack(root, source.path(), false).unwrap_err();
+        assert!(err.to_string().contains("--force"));
+        assert_eq!(
+            fs::read_to_string(root.join(".lazyspec.toml")).unwrap(),
+            "# custom\n",
+            "a refused install must not touch the existing config"
+        );
+
+        install_pack(root, source.path(), true).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".lazyspec.toml")).unwrap(),
+            starter_config().to_toml().unwrap(),
+            "--force overwrites the existing config"
+        );
+    }
+
+    // AC4: --template never sets extends -- run_from_template's own write path
+    // (install_pack) carries no extends handling at all, so a pack-adopted
+    // project's config parses with extends absent.
+    #[test]
+    fn install_pack_sets_no_extends() {
+        let source = tempfile::tempdir().unwrap();
+        write_pack(source.path());
+        let dest = tempfile::tempdir().unwrap();
+
+        install_pack(dest.path(), source.path(), false).unwrap();
+
+        let loaded = Config::load(dest.path(), &RealFileSystem).unwrap();
+        assert!(loaded.extends.is_none());
     }
 }

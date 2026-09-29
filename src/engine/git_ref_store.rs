@@ -158,6 +158,8 @@ impl GitRefStore {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         write_cache_file(&self.root, type_def, &meta, body)?;
 
@@ -198,6 +200,8 @@ impl GitRefStore {
             path: relative,
             id,
             push_outcome,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -554,6 +558,7 @@ mod tests {
             staleness: Default::default(),
             web: None,
             git_ref: Default::default(),
+            hooks: Vec::new(),
             extends: None,
         }
     }

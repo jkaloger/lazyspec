@@ -105,11 +105,12 @@ fn bug_created_then_transitions_to_triaged() {
     // Reload: the store is a snapshot taken before the create wrote the file.
     let store = Store::load(fixture.root(), &config).unwrap();
     lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "BUG-001",
         &[("status", "triaged")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap();

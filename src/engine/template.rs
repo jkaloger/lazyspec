@@ -3,7 +3,148 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::engine::config::{NumberingStrategy, SqidsConfig};
+use anyhow::{bail, Result as AnyResult};
+
+#[cfg(test)]
+use crate::engine::config::StoreBackend;
+use crate::engine::config::{NumberingStrategy, SqidsConfig, TypeDef};
+
+/// Whether a type's template is a single file or a directory of parts
+/// (RFC-074).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateKind {
+    File,
+    Directory,
+}
+
+/// Resolve whether `type_def`'s template is a file or a directory, checking
+/// `templates_dir` (the configured templates directory, already resolved
+/// against the project/docs root). A directory template at
+/// `templates_dir/{type}/` takes precedence over a `{type}.md` file; it must
+/// declare `index.md`, and the type must declare `subdirectory = true` --
+/// either violation is a config error (RFC-074 AC1).
+pub fn resolve_template_kind(templates_dir: &Path, type_def: &TypeDef) -> AnyResult<TemplateKind> {
+    let dir_template = templates_dir.join(&type_def.name);
+    if !dir_template.is_dir() {
+        return Ok(TemplateKind::File);
+    }
+    if !type_def.subdirectory {
+        bail!(
+            "type '{}' has a directory template at {}, but subdirectory = false; a directory \
+             template scaffolds a folder of parts, so declare subdirectory = true for it",
+            type_def.name,
+            dir_template.display()
+        );
+    }
+    if !dir_template.join("index.md").is_file() {
+        bail!(
+            "template directory {} has no index.md; a directory template's index.md is the \
+             parent document's template and is required",
+            dir_template.display()
+        );
+    }
+    Ok(TemplateKind::Directory)
+}
+
+/// The declared part names (file stems, `.md` extension stripped) in a
+/// directory template, in template order (sorted by stem), excluding
+/// `index.md`. Empty when the type's template is not a directory (or the
+/// directory cannot be read). Stems, not filenames, because the loader
+/// (`scan_document_folder`, src/engine/store/loader.rs) matches these against
+/// a part's stem, not its filename -- used to order a bundle's parts:
+/// declared parts first in this order, then any extra parts alphabetically
+/// (RFC-074 AC5). Restricted to `.md` files, mirroring the AC3 part/sidecar
+/// split, so a non-`.md` template file (a sidecar) never masquerades as a
+/// declared part. Deliberately lenient about a misconfigured template
+/// (missing `index.md`, etc.) -- that is reported by [`resolve_template_kind`],
+/// not by ordering, which the loader consults for every document regardless
+/// of whether the template is valid.
+pub fn directory_template_part_order(templates_dir: &Path, type_name: &str) -> Vec<String> {
+    let dir_template = templates_dir.join(type_name);
+    let Ok(entries) = fs::read_dir(&dir_template) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .filter(|n| n != "index")
+        .collect();
+    names.sort();
+    names
+}
+
+/// Every non-`index.md` file a directory template declares, as verbatim
+/// filenames rather than stems: declared parts (`.md`) and declared sidecars
+/// (anything else) together, sorted. What `validate`'s `missing-part` rule
+/// (RFC-074 AC1, src/engine/validation.rs) checks a document's folder
+/// against -- unlike [`directory_template_part_order`], which is restricted
+/// to `.md` stems for ordering a bundle's parts. Empty when the type's
+/// template is not a directory (or the directory cannot be read), same as
+/// [`directory_template_part_order`].
+pub fn directory_template_declared_files(templates_dir: &Path, type_name: &str) -> Vec<String> {
+    let dir_template = templates_dir.join(type_name);
+    let Ok(entries) = fs::read_dir(&dir_template) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(str::to_string))
+        .filter(|n| n != "index.md")
+        .collect();
+    names.sort();
+    names
+}
+
+/// One row STORY-294's TUI doc list renders for a bundle's parts: a part the
+/// document's folder actually has, or a declared part it lacks (a ghost row,
+/// AC5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartRow {
+    Present(crate::engine::document::Part),
+    Missing(String),
+}
+
+/// Merge a directory template's declared part order with a document's actual
+/// `parts` into the row sequence STORY-294 AC1/AC5 wants: declared parts in
+/// template order, each present or a `Missing` ghost, followed by any extra
+/// part the document has that the template does not declare (in `parts`'
+/// own order, which the loader already sorts alphabetically -- RFC-074 AC5).
+///
+/// Filtering the `Missing` rows back out of the result always yields `parts`
+/// unchanged: the declared prefix drops straight to the parts it found (same
+/// relative order), and the extra suffix is `parts` as-is. That is what makes
+/// this the same order as `show --parts` (AC1), which renders `parts`
+/// directly and never sees the ghosts.
+pub fn part_rows(
+    declared_order: &[String],
+    parts: &[crate::engine::document::Part],
+) -> Vec<PartRow> {
+    let mut rows = Vec::with_capacity(declared_order.len().max(parts.len()));
+    let mut used: HashSet<&str> = HashSet::new();
+
+    for name in declared_order {
+        match parts.iter().find(|p| &p.name == name) {
+            Some(part) => {
+                rows.push(PartRow::Present(part.clone()));
+                used.insert(name.as_str());
+            }
+            None => rows.push(PartRow::Missing(name.clone())),
+        }
+    }
+
+    for part in parts {
+        if !used.contains(part.name.as_str()) {
+            rows.push(PartRow::Present(part.clone()));
+        }
+    }
+
+    rows
+}
 
 pub fn render_template(template_content: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template_content.to_string();
@@ -146,6 +287,7 @@ pub fn resolve_filename(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -300,5 +442,244 @@ mod tests {
             "explicit incremental should use numbers, got: {}",
             filename
         );
+    }
+
+    // RFC-074 AC1: no `{type}/` directory in the templates dir -> a file template.
+    #[test]
+    fn resolve_template_kind_is_file_when_no_directory_template_exists() {
+        let dir = TempDir::new().unwrap();
+        let type_def = TypeDef::test_fixture("change", StoreBackend::Filesystem);
+
+        let kind = resolve_template_kind(dir.path(), &type_def).unwrap();
+
+        assert_eq!(kind, TemplateKind::File);
+    }
+
+    // RFC-074 AC1: a `{type}/` directory with `index.md` and `subdirectory = true`
+    // resolves to a directory template.
+    #[test]
+    fn resolve_template_kind_is_directory_when_index_md_present_and_subdirectory_true() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        fs::write(dir.path().join("change/index.md"), "index").unwrap();
+        let type_def = TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        };
+
+        let kind = resolve_template_kind(dir.path(), &type_def).unwrap();
+
+        assert_eq!(kind, TemplateKind::Directory);
+    }
+
+    // RFC-074 AC1: a directory template with no `index.md` is a config error.
+    #[test]
+    fn resolve_template_kind_errors_when_directory_template_has_no_index_md() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        fs::write(dir.path().join("change/design.md"), "design").unwrap();
+        let type_def = TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        };
+
+        let err = resolve_template_kind(dir.path(), &type_def).unwrap_err();
+
+        assert!(err.to_string().contains("index.md"), "got: {err}");
+    }
+
+    // RFC-074 AC1: `subdirectory = false` on a type whose template is a
+    // directory is a config error.
+    #[test]
+    fn resolve_template_kind_errors_when_subdirectory_false_for_directory_template() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        fs::write(dir.path().join("change/index.md"), "index").unwrap();
+        let type_def = TypeDef {
+            subdirectory: false,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        };
+
+        let err = resolve_template_kind(dir.path(), &type_def).unwrap_err();
+
+        assert!(err.to_string().contains("subdirectory"), "got: {err}");
+    }
+
+    // RFC-074 AC5: declared part order is the template directory's file
+    // stems sorted, excluding index.md -- stems, not filenames, since the
+    // loader matches these against a part's stem (src/engine/store/loader.rs).
+    #[test]
+    fn directory_template_part_order_is_sorted_excluding_index() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        for name in ["index.md", "tasks.md", "arch.md", "design.md"] {
+            fs::write(dir.path().join("change").join(name), "x").unwrap();
+        }
+
+        let order = directory_template_part_order(dir.path(), "change");
+
+        assert_eq!(order, vec!["arch", "design", "tasks"]);
+    }
+
+    // RFC-074 AC5: a non-`.md` template file (a sidecar) never counts as a
+    // declared part.
+    #[test]
+    fn directory_template_part_order_excludes_non_md_files() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        fs::write(dir.path().join("change/index.md"), "x").unwrap();
+        fs::write(dir.path().join("change/design.md"), "x").unwrap();
+        fs::write(dir.path().join("change/notes.yaml"), "x").unwrap();
+
+        let order = directory_template_part_order(dir.path(), "change");
+
+        assert_eq!(order, vec!["design"]);
+    }
+
+    // No directory template at all -> no declared order, not an error.
+    #[test]
+    fn directory_template_part_order_is_empty_when_no_directory_template() {
+        let dir = TempDir::new().unwrap();
+
+        let order = directory_template_part_order(dir.path(), "change");
+
+        assert!(order.is_empty());
+    }
+
+    // RFC-074 AC1: declared files are parts and sidecars together, as full
+    // filenames, sorted, excluding index.md.
+    #[test]
+    fn directory_template_declared_files_includes_parts_and_sidecars() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("change")).unwrap();
+        for name in ["index.md", "tasks.md", "design.md", "notes.yaml"] {
+            fs::write(dir.path().join("change").join(name), "x").unwrap();
+        }
+
+        let declared = directory_template_declared_files(dir.path(), "change");
+
+        assert_eq!(declared, vec!["design.md", "notes.yaml", "tasks.md"]);
+    }
+
+    // No directory template at all -> no declared files, not an error.
+    #[test]
+    fn directory_template_declared_files_is_empty_when_no_directory_template() {
+        let dir = TempDir::new().unwrap();
+
+        let declared = directory_template_declared_files(dir.path(), "change");
+
+        assert!(declared.is_empty());
+    }
+
+    fn part(name: &str) -> crate::engine::document::Part {
+        crate::engine::document::Part {
+            name: name.to_string(),
+            path: PathBuf::from(format!("docs/change/CHANGE-001/{name}.md")),
+        }
+    }
+
+    // STORY-294 AC1: every declared part the document has becomes a
+    // `Present` row, in the template's declared order.
+    #[test]
+    fn part_rows_present_only_matches_declared_order() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("arch"), part("design"), part("tasks")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("arch")),
+                PartRow::Present(part("design")),
+                PartRow::Present(part("tasks")),
+            ]
+        );
+    }
+
+    // STORY-294 AC5: a declared part the folder lacks becomes a `Missing`
+    // ghost row in its declared slot, not dropped or moved to the end.
+    #[test]
+    fn part_rows_marks_a_declared_part_missing() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("arch"), part("design")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("arch")),
+                PartRow::Present(part("design")),
+                PartRow::Missing("tasks".to_string()),
+            ]
+        );
+    }
+
+    // STORY-294 AC1: a part the folder has that the template does not
+    // declare (RFC-074 allows extras) is appended after the declared rows,
+    // in `parts`' own order.
+    #[test]
+    fn part_rows_appends_extra_parts_after_declared() {
+        let declared = vec!["design".to_string()];
+        let parts = vec![part("design"), part("zz-extra")];
+
+        let rows = part_rows(&declared, &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("design")),
+                PartRow::Present(part("zz-extra")),
+            ]
+        );
+    }
+
+    // A type with no directory template declares nothing, so every found
+    // part is an extra: all `Present`, in `parts`' own order.
+    #[test]
+    fn part_rows_is_all_present_when_no_declared_order() {
+        let parts = vec![part("design"), part("notes")];
+
+        let rows = part_rows(&[], &parts);
+
+        assert_eq!(
+            rows,
+            vec![
+                PartRow::Present(part("design")),
+                PartRow::Present(part("notes"))
+            ]
+        );
+    }
+
+    // Filtering `Missing` rows back out reproduces `parts` verbatim -- the
+    // invariant `show --parts` (present-only) relies on.
+    #[test]
+    fn part_rows_present_subsequence_matches_parts_verbatim() {
+        let declared = vec![
+            "arch".to_string(),
+            "design".to_string(),
+            "tasks".to_string(),
+        ];
+        let parts = vec![part("design"), part("zz-extra")];
+
+        let rows = part_rows(&declared, &parts);
+        let present: Vec<crate::engine::document::Part> = rows
+            .into_iter()
+            .filter_map(|row| match row {
+                PartRow::Present(p) => Some(p),
+                PartRow::Missing(_) => None,
+            })
+            .collect();
+
+        assert_eq!(present, parts);
     }
 }

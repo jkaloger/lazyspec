@@ -7,6 +7,7 @@ pub mod delete;
 pub mod fetch;
 pub mod fix;
 pub mod govern;
+pub mod hook;
 pub mod ignore;
 pub mod init;
 pub mod json;
@@ -32,6 +33,7 @@ pub mod wizard;
 
 use crate::cli::config::ConfigCommand;
 use crate::cli::govern::GovernCommand;
+use crate::cli::hook::HookCommand;
 use crate::cli::provenance::ProvenanceCommand;
 use crate::cli::reservations::ReservationsCommand;
 use crate::cli::setup::SetupCommand;
@@ -70,6 +72,10 @@ pub enum RenumberFormat {
 #[derive(Parser)]
 #[command(name = "lazyspec", version, about = "Manage project documentation")]
 pub struct Cli {
+    /// Skip every `[[hooks]]` entry for this run
+    #[arg(long, global = true)]
+    pub no_hooks: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -79,7 +85,9 @@ pub enum Commands {
     /// Initialize lazyspec in the current project. On a TTY with neither flag,
     /// walks an interactive wizard: it designs a blank DAG -- types, lifecycles,
     /// and [[edges]] rows once two types are declared -- unless --template
-    /// starter picks the starter config to tweak instead.
+    /// starter picks the starter config to tweak instead. --template <dir|url>
+    /// adopts a workflow pack instead of running any wizard: it copies that
+    /// pack's .lazyspec.toml and .lazyspec/templates/ into the project.
     Init {
         /// Skip the wizard and write the starter config unchanged
         #[arg(long)]
@@ -87,10 +95,15 @@ pub enum Commands {
         /// Suppress the wizard (implies --non-interactive) and write the starter config unchanged
         #[arg(long)]
         json: bool,
-        /// Pre-select a starter template for the interactive wizard (only `starter`
-        /// is supported; the default is a blank DAG). Ignored on non-interactive runs.
-        #[arg(long, value_parser = ["starter"])]
+        /// `starter` pre-selects the starter designer for the interactive wizard.
+        /// Any other value is a workflow pack to adopt: a local directory or a
+        /// clone URL, each carrying its own `.lazyspec.toml` and
+        /// `.lazyspec/templates/`. A pack skips the wizard entirely.
+        #[arg(long)]
         template: Option<String>,
+        /// With --template, overwrite an existing .lazyspec.toml instead of refusing
+        #[arg(long)]
+        force: bool,
     },
     /// Create a new document from template
     Create {
@@ -147,6 +160,11 @@ pub enum Commands {
         /// target and spawn nothing.
         #[arg(long)]
         open: bool,
+        /// Render the concatenated form (RFC-074): the index body, then each
+        /// part's body under a `## <name>` heading, in part order. With
+        /// --json, each `parts[]` entry gains a `body` field instead.
+        #[arg(long)]
+        parts: bool,
     },
     /// Update document frontmatter
     Update {
@@ -168,6 +186,10 @@ pub enum Commands {
         /// Read body from file (use `-` for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Write a part's body instead of the document's own (RFC-074):
+        /// requires --body or --body-file, creates the part if absent
+        #[arg(long)]
+        part: Option<String>,
         /// Set a custom attribute (repeatable): --attr key=value
         #[arg(long = "attr", value_name = "KEY=VALUE")]
         attr: Vec<String>,
@@ -326,6 +348,9 @@ pub enum Commands {
     },
     /// Validate all documents
     Validate {
+        /// Scope findings to a single document (path or shorthand ID, e.g. STORY-292)
+        #[arg(long, add = ArgValueCompleter::new(completions::complete_doc_id))]
+        id: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -381,6 +406,11 @@ pub enum Commands {
     Reservations {
         #[command(subcommand)]
         command: ReservationsCommand,
+    },
+    /// Inspect and trust the hooks declared in .lazyspec.toml
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
     },
     /// Manage the source globs a document governs
     Govern {

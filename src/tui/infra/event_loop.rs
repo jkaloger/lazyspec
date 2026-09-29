@@ -621,7 +621,16 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
                         // absolute path as the cache/store key.
                         let key = path.strip_prefix(root).unwrap_or(path);
                         let _ = app.store.reload_file(root, key, &*app.fs);
-                        app.invalidate_expansion(key);
+                        // The concatenated preview lives under the index's own
+                        // path (STORY-291 AC6/AC8); a part's own path also
+                        // caches its standalone preview now that a part row
+                        // can be selected on its own (STORY-294 AC3) -- both
+                        // need invalidating on a change to either file.
+                        let cache_key = app.store.bundle_root(key);
+                        app.invalidate_expansion(&cache_key);
+                        if cache_key != key {
+                            app.invalidate_expansion(key);
+                        }
                     } else {
                         has_non_md = true;
                         // The root `.lazyspec.toml` (or the extended project's,
@@ -725,8 +734,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         } => {
             app.apply_staleness(generation, staleness);
         }
-        AppEvent::StaleFindingsComputed { generation, result } => {
-            app.apply_stale_findings(generation, result, config);
+        AppEvent::BackgroundFindingsComputed {
+            generation,
+            result,
+            hook_findings,
+        } => {
+            app.apply_background_findings(generation, result, hook_findings, config);
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
@@ -784,7 +797,7 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
     needs_validation
 }
 
-pub fn run(store: Store, config: &Config) -> Result<()> {
+pub fn run(store: Store, config: &Config, no_hooks: bool) -> Result<()> {
     // Owned, reassignable session config: `reload_session` re-parses
     // `.lazyspec.toml` and rebinds this so subsequent reads see it.
     let mut config: Config = config.clone();
@@ -822,6 +835,7 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
     );
     app.terminal_image_protocol = protocol;
     app.tool_availability = tool_availability;
+    app.hook_env.disabled = no_hooks;
     app.refresh_validation(&config);
     // Seeds the header's unpushed count from whatever shared clones already
     // exist on disk (BUG-032 AC7), without a poll: `unpushed` never fetches,
@@ -913,33 +927,27 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
         }
     });
 
-    // Background `stale` findings worker (STORY-276): the validation panel's
+    // Background `stale` and hook findings worker (STORY-276): the validation panel's
     // share of the same rule. `refresh_validation` gates it out of the
     // synchronous pass, so this thread is what answers it -- one pass per event
     // that can change what validation says, drained to the newest, results
     // carrying their generation, exactly as the two workers above.
-    let (stale_findings_tx, stale_findings_rx) =
-        crossbeam_channel::unbounded::<crate::tui::state::StaleFindingsRequest>();
-    app.stale_findings_tx = stale_findings_tx;
-    let stale_findings_result_tx = tx.clone();
+    let (background_findings_tx, background_findings_rx) =
+        crossbeam_channel::unbounded::<crate::tui::state::BackgroundFindingsRequest>();
+    app.background_findings_tx = background_findings_tx;
+    let background_findings_result_tx = tx.clone();
     std::thread::spawn(move || {
         let git = crate::engine::git_ref::GitCli;
-        while let Ok(mut req) = stale_findings_rx.recv() {
-            while let Ok(newer) = stale_findings_rx.try_recv() {
+        while let Ok(mut req) = background_findings_rx.recv() {
+            while let Ok(newer) = background_findings_rx.try_recv() {
                 req = newer;
             }
-            let result = crate::engine::validation::stale_findings(
-                &req.governs_root,
-                req.docs.iter(),
-                &req.config,
-                &git,
-                &staleness_cache,
-            );
-            staleness_cache.flush();
-            if stale_findings_result_tx
-                .send(AppEvent::StaleFindingsComputed {
+            let (result, hook_findings) = req.compute(&git, &staleness_cache);
+            if background_findings_result_tx
+                .send(AppEvent::BackgroundFindingsComputed {
                     generation: req.generation,
-                    result: result.into(),
+                    result,
+                    hook_findings,
                 })
                 .is_err()
             {
@@ -1177,7 +1185,14 @@ pub fn run(store: Store, config: &Config) -> Result<()> {
             let root = app.store.root().to_path_buf();
             if let Ok(relative) = path.strip_prefix(&root) {
                 let _ = app.store.reload_file(&root, relative, &*app.fs);
-                app.invalidate_expansion(relative);
+                let cache_key = app.store.bundle_root(relative);
+                app.invalidate_expansion(&cache_key);
+                // STORY-294 AC3/AC4: `e` on a part row edits the part's own
+                // file, which caches its own preview -- invalidate that too,
+                // not just the parent's concatenated one.
+                if cache_key != relative {
+                    app.invalidate_expansion(relative);
+                }
                 if let Some(ref shared_store) = shared_gh_store {
                     let push_root = root.clone();
                     let push_relative = relative.to_path_buf();
@@ -1756,6 +1771,154 @@ mod tests {
         assert!(
             app.expansion_stale.is_empty(),
             "dispatching must consume the stale mark, or every frame re-dispatches"
+        );
+    }
+
+    // RFC-074 AC6: the TUI preview's expansion worker concatenates a bundle's
+    // parts after the index body, under a `## <name>` heading, in part order --
+    // the same shape `show --parts` renders.
+    #[test]
+    fn request_expansion_concatenates_a_bundles_parts_after_the_index_body() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        std::fs::write(dir.join("tasks.md"), "Tasks content.\n").unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        app.request_expansion(&tx);
+
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expansion worker must send a result");
+        let AppEvent::ExpansionResult { body, .. } = event else {
+            panic!("expected ExpansionResult");
+        };
+
+        let parent_pos = body.find("Parent body.").expect("parent body present");
+        let design_heading = body.find("## design").expect("design heading present");
+        let design_body = body.find("Design content.").expect("design body present");
+        let tasks_heading = body.find("## tasks").expect("tasks heading present");
+        let tasks_body = body.find("Tasks content.").expect("tasks body present");
+
+        assert!(parent_pos < design_heading);
+        assert!(design_heading < design_body);
+        assert!(design_body < tasks_heading);
+        assert!(tasks_heading < tasks_body);
+    }
+
+    // STORY-294 AC3: a selected `Part` row expands to that part's own body
+    // alone -- concatenation with the index and other parts stays reserved
+    // for the parent `Doc` row (the test above).
+    #[test]
+    fn request_expansion_on_a_part_row_expands_only_that_parts_body() {
+        use crate::tui::state::DocRowKind;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        std::fs::write(dir.join("tasks.md"), "Tasks content.\n").unwrap();
+
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let design_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::Part { name, .. } if name == "design"))
+            .expect("the design part row");
+        app.selected_doc = design_idx;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.request_expansion(&tx);
+
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expansion worker must send a result");
+        let AppEvent::ExpansionResult { path, body, .. } = event else {
+            panic!("expected ExpansionResult");
+        };
+
+        assert_eq!(path, app.doc_tree[design_idx].path);
+        assert_eq!(body.trim(), "Design content.");
+        assert!(
+            !body.contains("Parent body."),
+            "must not include the index body: {body:?}"
+        );
+        assert!(
+            !body.contains("Tasks content."),
+            "must not include another part: {body:?}"
+        );
+    }
+
+    // STORY-294 AC5: a `MissingPart` ghost row has nothing to read -- request
+    // must not dispatch a worker for it.
+    #[test]
+    fn request_expansion_on_a_missing_part_row_dispatches_nothing() {
+        use crate::engine::config::StoreBackend;
+        use crate::tui::state::DocRowKind;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(root.join(".lazyspec/templates/type0")).unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/index.md"), "index").unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/arch.md"), "arch").unwrap();
+        std::fs::write(root.join(".lazyspec/templates/type0/design.md"), "design").unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        // arch.md is declared but absent.
+
+        let mut config = Config::default();
+        config.documents.types = vec![{
+            let mut t = TypeDef::test_fixture("type0", StoreBackend::Filesystem);
+            t.subdirectory = true;
+            t
+        }];
+
+        let mut app = make_app(root, &config);
+        app.build_doc_tree();
+        let doc_path = app.doc_tree[0].path.clone();
+        app.toggle_expanded(&doc_path);
+        let missing_idx = app
+            .doc_tree
+            .iter()
+            .position(|n| matches!(&n.kind, DocRowKind::MissingPart { name, .. } if name == "arch"))
+            .expect("the missing arch ghost row");
+        app.selected_doc = missing_idx;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.request_expansion(&tx);
+
+        assert!(
+            app.expansion_in_flight.is_none(),
+            "a missing part row has nothing to expand"
         );
     }
 

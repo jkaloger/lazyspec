@@ -60,6 +60,8 @@ pub fn fetch_milestones(
             assignee: None,
             attributes,
             id: id.clone(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
 
         if !previously.contains(&id) {

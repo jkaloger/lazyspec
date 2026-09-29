@@ -30,7 +30,10 @@ fn setup_with_chain(rfc_status: &str, story_status: &str, iter_status: &str) -> 
 fn superseded_parent_warning() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(result
         .warnings
@@ -43,7 +46,10 @@ fn superseded_parent_warning() {
 fn rejected_parent_error() {
     let fixture = setup_with_chain("rejected", "draft", "draft");
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(result
         .errors
@@ -55,7 +61,10 @@ fn rejected_parent_error() {
 fn warnings_dont_affect_exit_code() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(!result.warnings.is_empty());
     assert!(result.errors.is_empty());
@@ -66,8 +75,14 @@ fn warnings_dont_affect_exit_code() {
 fn validate_json_has_separate_arrays() {
     let fixture = setup_with_chain("superseded", "accepted", "accepted");
     let store = fixture.store();
-    let output =
-        lazyspec::cli::validate::run_json(&store, &store.validate_full(&fixture.config()), &[]);
+    let output = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert!(parsed["errors"].is_array());
@@ -81,7 +96,10 @@ fn validate_without_warnings_flag_hides_warnings() {
     let store = fixture.store();
     let output = lazyspec::cli::validate::run_human(
         &store,
-        &store.validate_full(&fixture.config()),
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
         false,
         &[],
     );
@@ -95,7 +113,10 @@ fn validate_with_warnings_flag_shows_warnings() {
     let store = fixture.store();
     let output = lazyspec::cli::validate::run_human(
         &store,
-        &store.validate_full(&fixture.config()),
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
         true,
         &[],
     );
@@ -156,7 +177,9 @@ fn custom_parent_child_row_fires_when_story_lacks_rfc_link() {
         Severity::Error,
     )]);
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -182,7 +205,9 @@ fn custom_relation_existence_row_fires_for_type_with_no_relations() {
         Severity::Error,
     )]);
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -207,7 +232,9 @@ fn a_row_required_at_warning_severity_produces_warning_not_error() {
         Severity::Warning,
     )]);
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.warnings.iter().any(|w| matches!(
@@ -243,7 +270,9 @@ fn declared_rows_are_the_only_demands_so_the_standard_ones_do_not_fire() {
         Severity::Error,
     )]);
 
-    let result = fixture.store_with(&config).validate_full(&config);
+    let result = fixture
+        .store_with(&config)
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         !result
@@ -291,7 +320,7 @@ fn status_based_checks_work_with_custom_hierarchy() {
 
     let config = config_with_one_chain_row();
     let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     // RejectedParent should fire from status-based check inferred from custom hierarchy
     assert!(

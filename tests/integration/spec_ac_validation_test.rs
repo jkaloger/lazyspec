@@ -10,7 +10,10 @@ fn write_spec_with_ac(fixture: &TestFixture, slug: &str, ac_body: &str) {
 
 fn warning_messages(fixture: &TestFixture) -> Vec<String> {
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
     result.warnings.iter().map(|w| format!("{}", w)).collect()
 }
 

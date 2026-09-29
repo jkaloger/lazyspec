@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::Path;
 
 use crate::tui::state::forms::SettingsVariantPicker;
-use crate::tui::state::{App, FieldEditor, FilterField, PreviewTab, ViewMode};
+use crate::tui::state::{App, DocRowKind, FieldEditor, FilterField, PreviewTab, ViewMode};
 
 impl App {
     pub fn handle_key(
@@ -810,9 +810,15 @@ impl App {
             (KeyCode::Char('d'), _) if self.selected_doc_meta().is_some() => {
                 self.open_delete_confirm();
             }
+            // STORY-294 AC4/AC5: `e` opens the selected row's own file -- the
+            // doc for a `Doc` row, the part's file for a `Part` row (both are
+            // `node.path`) -- and no-ops on a `MissingPart` ghost row, which
+            // has none.
             (KeyCode::Char('e'), _) if self.selected_doc_meta().is_some() => {
-                if let Some(doc) = self.selected_doc_meta() {
-                    self.editor_request = Some(root.join(&doc.path));
+                if let Some(node) = self.doc_tree.get(self.selected_doc) {
+                    if !matches!(node.kind, DocRowKind::MissingPart { .. }) {
+                        self.editor_request = Some(root.join(&node.path));
+                    }
                 }
             }
             (KeyCode::Char('o'), _) if self.selected_doc_meta().is_some() => {

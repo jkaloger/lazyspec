@@ -182,6 +182,8 @@ pub fn deserialize(issue_body: &str, ctx: &IssueContext) -> Result<(DocMeta, Str
         assignee: None,
         attributes,
         id: String::new(),
+        parts: Vec::new(),
+        sidecars: Vec::new(),
     };
 
     Ok((meta, body))
@@ -402,6 +404,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: "RFC-042".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

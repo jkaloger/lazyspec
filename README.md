@@ -2,1163 +2,197 @@
   🤖
   <br>lazyspec
 </h1>
-<p align="center">
-    Feature-rich documentation CLI & TUI for humans & LLMs.
-    <br>A context engine that unifies git-tracked markdown, GitHub issues, and more.
-</p>
-
-<p align="center">
-  <a href="https://github.com/jkaloger/lazyspec/actions/workflows/ci.yml"><img src="https://github.com/jkaloger/lazyspec/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <img src="https://img.shields.io/badge/rust-2021-orange?logo=rust&logoColor=white" alt="Rust 2021">
-  <img src="https://img.shields.io/badge/status-experimental-blueviolet" alt="Status: Experimental">
-  <img src="https://img.shields.io/github/v/tag/jkaloger/lazyspec?label=version&color=blue" alt="Version">
-  <a href="https://github.com/jkaloger/lazyspec/commits/main"><img src="https://img.shields.io/github/last-commit/jkaloger/lazyspec?logo=git&logoColor=white" alt="Last commit"></a>
-  <a href="https://github.com/jkaloger/lazyspec/blob/main/flake.nix"><img src="https://img.shields.io/badge/nix-flake-5277C3?logo=nixos&logoColor=white" alt="Nix Flake"></a>
-</p>
 
 <img alt="screenshot of a terminal interface displaying codebase documentation, categorised by type" src="https://github.com/user-attachments/assets/91f308d1-8d03-4815-b2ec-fa445159c563" />
 
-> [!WARNING]
-> Lazyspec is experimental. APIs and CLI interfaces will change frequently and without notice.
+Lazyspec manages project documents through a TUI and a command line interface.
 
-Lazyspec manages project documentation as version-controlled markdown files with YAML frontmatter. Documents live in your repo, so agents and humans read from the same source of truth. You define the document types, their relationships, and their lifecycle in `.lazyspec.toml`; lazyspec creates, links, validates, and serves them, and every command supports `--json` output for automation.
+```bash
+lazyspec [command] [options]
+lazyspec
+```
+
+## Description
+
+Lazyspec stores documents as Markdown with YAML frontmatter. `.lazyspec.toml` defines document types, relationships, lifecycle states, templates, and storage backends. The CLI creates, links, searches, and validates documents. The terminal interface provides document navigation and Markdown preview.
+
+The project is experimental. CLI and configuration interfaces may change between releases.
+
+## Commands
+
+Most commands accept `--json`. `lazyspec help <command>` prints the complete options for a command.
+
+| Command                                  | Behaviour                                                                                                                                                                                                                     |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init`                                   | Creates `.lazyspec.toml` and templates. On a terminal, it runs the configuration wizard. `--non-interactive`, `--json`, or a non-terminal writes the starter configuration. `--template <dir-or-url>` copies a workflow pack: its config, templates, and hooks. |
+| `create <type> <title>`                  | Creates a document from a template. `--parent <id>` creates a nested document when the parent and child use the same store.                                                                                                   |
+| `list [type]`                            | Lists documents, optionally filtered by type or status.                                                                                                                                                                       |
+| `show <id>`                              | Displays a document. `-e` expands `@ref` directives. `--parts` includes bundle parts. `--open` opens a browser or configured viewer.                                                                                          |
+| `update <id>`                            | Changes title, status, assignee, attributes, or body. `--part <name>` writes a bundle part.                                                                                                                                   |
+| `delete <id>`                            | Deletes a document.                                                                                                                                                                                                           |
+| `link <from> <relation> <to>` / `unlink` | Adds or removes a configured relationship. Inverse relationship names are accepted.                                                                                                                                           |
+| `tag add/remove <id> <tags>...`          | Changes document tags.                                                                                                                                                                                                        |
+| `search <query>`                         | Searches titles, tags, paths, and bodies. A source path also matches documents whose `governs` globs cover it.                                                                                                                |
+| `why <path>`                             | Lists the documents governing a source file.                                                                                                                                                                                  |
+| `context [id]`                           | Shows one document's chain or the full context forest.                                                                                                                                                                        |
+| `status`                                 | Reports documents, validation findings, and pending `git` store commits.                                                                                                                                                      |
+| `validate`                               | Reports document, relationship, staleness, and source ownership findings. `--id <id>` limits document findings to one document.                                                                                               |
+| `fix`                                    | Repairs supported document findings. `--config`, `--governs`, and `--renumber` select other repair modes. `--dry-run` previews changes.                                                                                       |
+| `govern add/remove/list`                 | Manages source file globs on a document.                                                                                                                                                                                      |
+| `hook list` / `hook trust` / `hook run <event> <id> [--dry-run]` | Lists the `[[hooks]]` entries with their event, scope, and trust state / trusts the current hook table / fires the `pre-transition` or `validate` hooks for one document without changing its status (`--dry-run` saves nothing; `validate` hooks update nothing). `validate` findings print like `validate` and exit non-zero on an error. `--no-hooks` (any command) skips every hook.                                                                  |
+| `pin <id>`                               | Records the current Git commit as the document's review anchor and pins `@ref` directives.                                                                                                                                    |
+| `provenance add/remove/list`             | Manages document citations.                                                                                                                                                                                                   |
+| `fetch` / `push`                         | Refreshes remote documents / publishes commits from `git` stores.                                                                                                                                                             |
+| `config`                                 | Prints the resolved configuration. `config schema` prints its JSON Schema. Other subcommands edit types, lifecycles, and edges.                                                                                               |
+| `convention`                             | Prints configured convention content.                                                                                                                                                                                         |
+| `setup`                                  | Configures remote store authentication.                                                                                                                                                                                       |
+| `completions <shell>`                    | Prints a shell completion script.                                                                                                                                                                                             |
+
+JSON validation output has `errors`, `warnings`, and `parse_errors` arrays. Findings include a stable `rule` field. JSON mutation output includes `synced`. A value of `false` means the write is local and has not reached its remote. For a `git` store, mutations commit locally and `push` publishes them.
+
+### Configuration
+
+`[[types]]` declares document types. `[[relationships]]` declares link names and optional inverse names. `[[edges]]` constrains type relationships and selects links used for chain or related traversal. A type's `lifecycle` declares its states and transitions. `config --json` prints the resolved configuration. `config schema` prints the key reference.
+
+Each type selects a store. The default `filesystem` store writes Markdown under the type's `dir`. Other stores include `github-issues`, `github-milestones`, `github-projects`, `git-ref`, `git`, and `clickup-tasks`. Remote documents are refreshed with `fetch`. Configuration can also extend another directory or Git URL through `extends`.
+
+Templates are read from `.lazyspec/templates/` by default. A type may use a shared `template.md`, a `<type>.md` file, or a `<type>/` directory. A directory template requires `index.md` and creates a document bundle. Markdown files beside `index.md` without frontmatter are parts of that document. Files with frontmatter are child documents.
+
+The optional `[governs]` table defines a source root and an ownership check. Document `governs` globs identify source files covered by a document. `pin` sets the `reviewed` Git commit. Staleness can be based on age or changes under those globs. `show` reports the resulting `fresh`, `aging`, or `stale` band.
+
+### Hooks
+
+A `[[hooks]]` entry attaches an external command to a lazyspec event. There are two events: `validate` and `pre-transition` (below). For `validate`, the command runs once per validation with every matching document as JSON on stdin (the `show --json` shape, with `body`, each part's `body`, and a `content_hash`; documents with `validate_ignore` are left out), and prints `{"findings": [{"id", "part", "line", "severity", "message"}]}` on stdout.
+
+```toml
+[[hooks]]
+name = "required-sections"
+event = "validate"
+types = ["story", "rfc"]
+run = [".lazyspec/hooks/required-sections"]
+timeout = 30
+```
+
+`run` is an argv array with no shell. The hook runs with the project root as its working directory; a path in `run` is resolved from the docs root, which is the project root, or the extended root when the config uses `extends`. `types` defaults to every type. `timeout` is in seconds and defaults to 30. Findings appear in `validate`, `status`, and the terminal interface like built-in findings, and name the hook. A non-zero exit, invalid JSON, a timeout, or any `updates` in the output becomes one error finding that includes the hook's stderr.
+
+Hooks from a cloned repository do not run until you run `lazyspec hook trust`. Trust records a hash of the `[[hooks]]` table and of each `run` file inside the docs root, in `~/.lazyspec/hook-trust.json` (or `$LAZYSPEC_STATE_DIR`). Editing either makes the hooks untrusted again, and validation warns until you trust them. The terminal interface shows the hook findings from the last full validation, which a background pass refreshes, and spawns no hook process on a quick refresh.
+
+#### Hooks in a workflow pack
+
+A pack can ship its hook scripts in `.lazyspec/hooks/`, next to its `.lazyspec.toml` (which carries the `[[hooks]]` entries) and `.lazyspec/templates/`. `lazyspec init --template <dir-or-url>` copies the whole directory, keeping file modes, and `--json` lists the copied files and adds `"trust": "lazyspec hook trust"` when the adopted config declares `[[hooks]]`. The adopted hooks are untrusted, so none run. Read them, then run `lazyspec hook trust`; `init` prints that command.
+
+#### pre-transition
+
+`event = "pre-transition"` hooks run when `update --status` or the terminal interface moves a document's status. Scope them with `types`, `from` and `to`; hooks run in declaration order. `context_types` lists the types whose documents are sent alongside as `context`. The hook receives `{"event", "hook", "transition": {"from", "to"}, "documents": [<the document>], "context": [<documents of context_types>]}`, each document in the same shape as for `validate`.
+
+An error finding blocks the move and stops the remaining hooks: `update` exits non-zero and prints the findings (with `--json`, `{"error", "findings"}`), and the terminal interface shows them on the status picker and leaves the status alone. Warnings are reported and the move goes ahead (`hook_findings` in `update --json`). Findings in `update --json` and `hook run --json` have the shape of `validate --json` entries (`rule`, `hook`, `id`, `part`, `line`, `message`) plus `severity`. Untrusted hooks and `--no-hooks` skip the event.
+
+A hook can also return `"updates": [{"id", "part", "hash", "body"}]` to rewrite the body of a document or one of its parts. `hash` is the document's `content_hash` as it was sent. Every update is checked (the document exists, the hash still matches, only those four fields) before any is saved, then all are saved with the status through the `update --body` / `--part` path, so it works for every store. If any check or write fails, nothing is saved. This guarantee is about document content, not history: a `git` store commits each update, the status change, and any rollback as separate commits.
+
+`hook run pre-transition <id>` fires the same hooks with `from` and `to` both set to the current status, saves the updates, and leaves the status. `hook run validate <id>` runs the `validate` hooks over that one document and prints the findings in the shape of `validate` (`--json` gives `{"event", "id", "errors", "warnings"}`); it exits 2 on an error finding.
+
+### Terminal interface
+
+Running `lazyspec` without a command opens the terminal interface. It includes document and graph views, search, Markdown preview, validation findings, and a configuration editor. Changes to document files and `.lazyspec.toml` are detected while it runs. `?` displays the complete key list.
+
+| Key             | Action                                  |
+| --------------- | --------------------------------------- |
+| `j` / `k`       | Move through rows.                      |
+| `h` / `l`       | Change document type or graph pivot.    |
+| `Enter`         | Open the selected document or relation. |
+| `/`             | Search.                                 |
+| `n` / `e` / `d` | Create, edit, or delete a document.     |
+| `s` / `r`       | Change status or add a relation.        |
+| `` ` ``         | Cycle views.                            |
+| `5`             | Open settings.                          |
+| `w`             | Open validation findings.               |
+| `R`             | Reload configuration.                   |
+| `?`             | Show keys.                              |
+| `q`             | Quit.                                   |
+
+### Source references
+
+An `@ref` directive names committed source content. `show -e` expands it from Git. Rust and TypeScript symbols can be selected by name.
+
+```text
+@ref <path>
+@ref <path>#<symbol>
+@ref <path>#<symbol>@<sha>
+@ref <path>#<line>
+@ref <path>#<line>@<sha>
+```
+
+## Exit status
+
+`validate` exits `0` when it finds no errors or parse errors, and `2` when either is present. Warnings alone do not change its exit status. Commands report other failures with a nonzero status.
+
+## Files
+
+| Path                   | Contents                            |
+| ---------------------- | ----------------------------------- |
+| `.lazyspec.toml`       | Project configuration.              |
+| `.lazyspec/templates/` | Document templates.                 |
+| `.lazyspec/cache/`     | Fetched documents and derived data. |
+| `.lazyspec/git/`       | Shared clones for `git` stores.     |
+
+## Examples
+
+```sh
+lazyspec init --non-interactive
+lazyspec create rfc "Adopt event sourcing" --json
+lazyspec create story "Record events" --json
+lazyspec list --json
+lazyspec link STORY-001 implements RFC-001 --json
+lazyspec context STORY-001 --json
+lazyspec validate --json
+```
+
+```sh
+lazyspec init --template ./examples/openspec
+lazyspec create change "Add caching" --json
+lazyspec show CHANGE-001 --parts
+```
+
+```sh
+lazyspec config schema > lazyspec.schema.json
+lazyspec completions zsh > _lazyspec
+```
+
+## See also
+
+- [Example configurations](examples/)
+- [Bundled skills](skills/README.md)
+- [Releases](https://github.com/jkaloger/lazyspec/releases)
 
 ## Install
 
-macOS (Apple Silicon & Intel) and Linux (x86_64 & aarch64, static musl):
+The installer supports macOS and Linux and verifies a SHA-256 checksum. It installs to `~/.local/bin` by default. `LAZYSPEC_INSTALL_DIR` changes the destination. `LAZYSPEC_VERSION` selects a release.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jkaloger/lazyspec/main/install.sh | sh
 ```
 
-The installer verifies the SHA-256 checksum and installs to `~/.local/bin` (override with `LAZYSPEC_INSTALL_DIR`; pin a version with `LAZYSPEC_VERSION=v0.12.0`).
-
-<details>
-<summary>Other install methods & shell completions</summary>
-
-### Cargo
+Cargo and Nix installations are also available:
 
 ```sh
 cargo install lazyspec
-```
-
-### Prebuilt binaries
-
-Release tarballs with SHA-256 checksums are on the [releases page](https://github.com/jkaloger/lazyspec/releases) if you'd rather not pipe to sh.
-
-### Nix
-
-```sh
 nix profile install github:jkaloger/lazyspec
 ```
 
-Or pin it as a flake input:
+Release archives and checksums are available on the [releases page](https://github.com/jkaloger/lazyspec/releases).
 
-```nix
-inputs.lazyspec.url = "github:jkaloger/lazyspec/v0.11.3";
-# then, in a devShell:
-packages = [ inputs.lazyspec.packages.${system}.default ];
-```
+## Development
 
-Releases are pushed to a public binary cache at `https://lazyspec.cachix.org`. The flake advertises it through `nixConfig`, so Nix asks once whether to trust the substituter. To skip the prompt, add it to `nix.conf`:
-
-```
-extra-substituters = https://lazyspec.cachix.org
-extra-trusted-public-keys = lazyspec.cachix.org-1:vPXwfgzSiLee3OEYP+a9Y/3Xlwpzs6WnpLuQjQZlvZ8=
-```
-
-Cache hits require the same derivation CI built. Setting `inputs.nixpkgs.follows` on the `lazyspec` input changes the derivation and falls back to a source build.
-
-### From source
-
-```sh
-git clone https://github.com/jkaloger/lazyspec
-cd lazyspec
-cargo install --path .
-```
-
-### Shell completions
-
-Generate and source a completion script for your shell:
-
-```sh
-# zsh
-source <(lazyspec completions zsh)
-
-# bash
-source <(lazyspec completions bash)
-
-# fish
-lazyspec completions fish | source
-```
-
-Add the appropriate line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to load completions on startup. Completions cover subcommands, flags, document IDs, and relationship types.
-
-</details>
-
-## Quick start
-
-Initialise a new project, then launch the TUI:
-
-```sh
-lazyspec init
-lazyspec
-```
-
-`init` writes a `.lazyspec.toml` and templates. Running `lazyspec` with no subcommand opens the interactive dashboard. From there, or from the CLI:
-
-```sh
-lazyspec create rfc "Adopt event sourcing"   # create a document
-lazyspec list                                # list documents
-lazyspec validate                            # check links and frontmatter (non-zero on error)
-```
-
-> [!TIP]
-> Check the `examples/` directory for a complete project setup including config, templates, and agent skill definitions you can use as a starting point.
-> This repo dogfoods lazyspec, so you can also browse `docs/` or run `lazyspec` from this repo.
-
-<details>
-<summary><h2>Features</h2></summary>
-
-- Create, update, link, and validate documents. Config-driven relationships (the starter set is `implements`, `supersedes`, `blocks`, `related-to`) keep the chain explicit.
-- Catch broken links, orphaned documents, and incomplete frontmatter before they rot. `lazyspec validate` exits non-zero on errors, so it slots into CI.
-- Embed `@ref` directives in your specs to point at source code. Lazyspec expands them inline using `git show`, with symbol-level extraction for Rust and TypeScript.
-- Fuzzy search, markdown preview, live file watching, and document creation without leaving the terminal.
-- Every command supports `--json` output for automation and agent integration.
-- Define your own types, templates, and directory layout in `.lazyspec.toml`.
-
-</details>
-
-<details>
-<summary><h2>Skills & agent integration</h2></summary>
-
-Lazyspec ships a set of config-driven generic verb skills that enforce its workflow against whatever document types your `.lazyspec.toml` defines. The `lazy` router is the entry point: it reads the configured lifecycle DAG and the user's position, then dispatches the right verb.
-
-| Skill      | Purpose                                                                           |
-| ---------- | --------------------------------------------------------------------------------- |
-| `lazy`     | Entry-point router: reads the DAG and position, dispatches the right verb         |
-| `scaffold` | Create a new document's file and frontmatter, hand the body back to the human     |
-| `co-write` | Collaboratively draft a document body: AI proposes, human edits, iterate          |
-| `generate` | Author a full document body from context (only when the type's ceiling allows it) |
-| `advance`  | Move a document to its next status along the type's lifecycle DAG, maintaining links across the transition |
-| `review`   | Critique a *document* against its intent and acceptance criteria before advancing |
-| `execute`  | Build one delivery document's task breakdown in a single agent pass, then report  |
-| `orchestrate` | Drive a batch of delivery documents to done: order, dispatch, review, commit, close |
-| `review-work` | Critique landed *code*: acceptance conformance, convention conformance, quality |
-
-The work verbs split on two axes. `/review` reads document bodies, `/review-work` reads diffs and is the only place project conventions are checked. `/execute` owns exactly one delivery document and never spawns an agent; `/orchestrate` owns a set and is the only agent that spawns agents.
-
-### Installing skills
-
-`skills install` places the embedded skill set into the project. It works with or without a `.lazyspec.toml`, and never creates one:
-
-```sh
-lazyspec skills install                      # both runtimes (default)
-lazyspec skills install --runtime claude     # .claude/skills/ only
-lazyspec skills install --runtime agents-md  # ./AGENTS.md only
-```
-
-For Claude, each skill is written under `.claude/skills/<verb>/SKILL.md`, and the router is installed under the configured `[skills] entry` name (default `lazy`). For other agents, the same prose is concatenated into `./AGENTS.md`. Re-running is idempotent. Configure the router name via `[skills] entry` in `.lazyspec.toml`.
-
-### Install as a Claude Code plugin
-
-Claude Code users can install the skills and the convention hook together through the plugin marketplace hosted in this repo, instead of running `skills install` and hand-editing settings. Two commands:
-
-```
-/plugin marketplace add jkaloger/lazyspec
-/plugin install lazyspec@lazyspec
-```
-
-This loads every on-disk skill under `skills/` and registers a `UserPromptSubmit` hook that injects the project convention (`lazyspec convention --preamble`) into the agent's context on each prompt.
-
-**Prerequisite:** the `lazyspec` binary must be on `PATH`. The hook shells out to it. Without the binary the hook is a silent noop, and in any directory lacking a `.lazyspec.toml` it injects nothing.
-
-The plugin is an additional channel, not a replacement for `skills install`. Use `skills install` when you need the `AGENTS.md` target or a renamed router entry via `[skills] entry`: a static plugin ships the default `lazy` entry and the Claude runtime only.
-
-</details>
-
-<details>
-<summary><h2>TUI</h2></summary>
-
-Running `lazyspec` with no subcommand opens the interactive dashboard. It provides fuzzy search, markdown preview, document creation, and live file watching: documents update automatically when changed on disk. An external edit of `.lazyspec.toml` (for example a `git pull`) reloads the running session automatically; press `R` to reload it manually. Press `?` for the full keybindings overlay.
-
-| Key                 | Action                                              |
-| ------------------- | --------------------------------------------------- |
-| `j` / `k`           | Navigate up/down                                    |
-| `h` / `l`           | Switch document type                                |
-| `g` / `G`           | Jump to top/bottom                                  |
-| `Ctrl-d` / `Ctrl-u` | Half page down/up                                   |
-| `Space`             | Expand/collapse                                     |
-| `Tab`               | Cycle preview tab                                   |
-| `Enter`             | Open document / follow relation                     |
-| `n`                 | Create new document                                 |
-| `e`                 | Edit document in `$EDITOR`                          |
-| `o`                 | Open externally (browser or `[tui]` viewer)         |
-| `d`                 | Delete document                                     |
-| `s`                 | Change status                                       |
-| `r`                 | Add relation                                        |
-| `p`                 | Provenance                                          |
-| `R`                 | Reload config from `.lazyspec.toml`                 |
-| `P`                 | Push all `git`-store clones (`lazyspec push`)       |
-| `x`                 | Toggle wrap                                         |
-| `/`                 | Fuzzy search (a source file path lists the documents governing it) |
-| `w`                 | Warnings / validation panel                         |
-| `` ` ``             | Cycle view (documents / filters / graph / settings) |
-| `5`                 | Open the Settings view                              |
-| `?`                 | Toggle keybindings help                             |
-| `q` / `Ctrl-c`      | Quit                                                |
-
-The preview header carries the selected document's staleness band — the same line `show` prints, coloured by band. It is computed in a background worker when the selection changes, never on the render path, so holding `j` down a long list does not queue keystrokes behind a `git diff`. The slot reads `computing…` until the result lands, and a result that arrives after the selection has moved on is dropped rather than shown against the wrong document. Only the selected document is banded: list rows carry none. See [Staleness](#staleness).
-
-### Settings view
-
-Press `5` (or cycle to it with `` ` ``) to open the Settings view, which edits `.lazyspec.toml` in place. Categories are listed on the left; the right panel shows the fields (or entries) of the selected category. Saving rewrites `.lazyspec.toml`, preserving its comments and formatting, after validating the whole config. An invalid config is reported and not written.
-
-| Key            | Action                                                                                                                                                     |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `h` / `l`      | Switch category (also `Left` / `Right`)                                                                                                                    |
-| `j` / `k`      | Move between fields / entries (also `Down` / `Up`)                                                                                                         |
-| `Enter`        | Drill into a collection entry, or start editing a field (a set field opens the two-pane picker below)                                                      |
-| `n`            | Add a new entry to a collection (Document Types / Relationships / Edges seed a default and drill in; Certification prompts for a spec-path key)            |
-| `d`            | Delete the selected collection entry, behind a confirm (refuses the last relationship)                                                                     |
-| `Space`        | Toggle a boolean / cycle an enum field                                                                                                                     |
-| `g`            | When a dependency section is auto-scaffolded (for example cycling numbering to `sqids`), jump to the required field it needs filled                        |
-| type + `Enter` | Confirm a text / number / duration / list edit                                                                                                             |
-| `Esc`          | Cancel an in-progress edit, or undrill from an entry                                                                                                       |
-| `w` / `Ctrl-S` | Save changes to `.lazyspec.toml` (validates the whole config)                                                                                              |
-| `q` / `Esc`    | Quit; with unsaved changes, prompts `(s)ave / (d)iscard / (Esc) cancel`                                                                                    |
-
-#### Choosing set members
-
-Some settings fields hold a set of names rather than a single value: an `[[edges]]` row's `from` and `to` (target document types, or `*` for any) and the `[tui.statusbar]` zones (`left` / `center` / `right`). `Enter` on one of these opens a two-pane picker — the members currently chosen on the left, the remaining choices on the right — which adds and removes them one at a time.
-
-| Key             | Action                                                                                            |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| `Tab`           | Switch between the Selected and Available panes                                                   |
-| `j` / `k`       | Move within the focused pane (also `Down` / `Up`)                                                 |
-| `Space` / `Enter` | Add the focused available name, or remove the focused selected one                              |
-| `K` / `J`       | Move the focused member up / down — status-bar zones only, where the order is the render order    |
-| `c`             | Commit the chosen members into the buffer (`w` / `Ctrl-S` still saves the whole config)           |
-| `Esc`           | Close without changing the field                                                                  |
-
-An edge's target types are a set, not a sequence, so the picker offers no ordering for them; `*` is offered alongside the declared type names and is exclusive with them, since it selects any type rather than naming one. A target set must name something: committing an empty one is refused. The same holds for an edge's `via`, which is typed as a comma-separated list rather than picked — confirming it empty is refused too.
-
-### Graph view
-
-Cycle to the Graph view with `` ` ``. The left panel is a pivot picker (`h` / `l` to re-root the forest on a document type or a tag, or `All` for the whole store). The right panel renders the dependency forest as a nested table sharing the documents table's styling (git-status gutter, slim `ID` column, selection bar, scrolling). The `DOC` column is the document tree, with indentation and connector art showing the chain lineage, drawn from whichever relationships the config gives the `chain` traversal role; each configured column follows. A document reachable from more than one parent (a diamond) is drawn once under each parent; cyclic edges are hidden. Pivoting on a type or tag also nests each anchor's chain ancestors below it as an inverted subtree, so a leaf-type pivot reads top-down instead of as a flat list; those rows carry `↑` where a forward child carries `▶`. Siblings under a shared parent can be sorted by any column while the parent grouping and topological order are preserved.
-
-| Key                 | Action                                                                         |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `j` / `k`           | Navigate up/down                                                               |
-| `Ctrl-d` / `Ctrl-u` | Half page down/up                                                              |
-| `h` / `l`           | Pivot the anchor (whole store → types → tags)                                  |
-| `o`                 | Cycle the sibling sort column (`path` → `status` → declared attributes → wrap) |
-| `O`                 | Reverse the sort direction                                                     |
-| `g` / `G`           | Jump to top/bottom                                                             |
-| `Enter`             | Open the selected document                                                     |
-| `e`                 | Edit document in `$EDITOR`                                                     |
-
-The columns and default sort are configured under `[tui.graph]` in `.lazyspec.toml`:
-
-```toml
-[tui.graph]
-# Columns rendered to the right of the DOC tree column. Each id is either a
-# built-in (`status`, `related`) or a declared attribute name (`[[types.attributes]]`).
-# An attribute not declared/present on a row's type renders as an empty cell.
-columns = ["status", "related"]   # default
-# Default sibling sort column: `path` (the stable topological order), `status`,
-# or any declared attribute name. `o` cycles from here; missing attribute values
-# always sort last.
-sort = "path"                     # default
-```
-
-Both keys carry defaults, so a config without a `[tui.graph]` block still loads.
-
-The documents table's columns are configured under `[tui.table]`:
-
-```toml
-[tui.table]
-# Columns rendered to the right of the fixed ID and DOC columns. Each id is
-# either a built-in (`status`, `tags`, `assignee`, `provenance`, `related`) or a
-# declared attribute name (`[[types.attributes]]`). An attribute not
-# declared/present on a row's type renders as an empty cell; the `assignee`
-# column is blank for unassigned documents.
-columns = ["status", "tags", "assignee", "provenance"]   # default
-```
-
-The key carries a default matching today's layout, so a config without a `[tui.table]` block renders the table unchanged.
-
-Status colours (used in both the documents table and the Graph view's `status` column) are configured under `[tui.status_colors]`, mapping a status name to a colour:
-
-```toml
-[tui.status_colors]
-draft = "yellow"
-in-progress = "cyan"
-blocked = "#cc4444"
-```
-
-A colour is either a named ANSI colour (case-insensitive: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`/`grey`, `darkgray`/`darkgrey`, `white`, or the light variants `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`) or a `#rrggbb` hex string. An invalid colour value is skipped, falling through to the next source below.
-
-A status's colour resolves in this order: this `[tui.status_colors]` config, then a synced ClickUp status-colour cache, then built-in defaults for the standard statuses (`draft`, `review`, `accepted`, `in-progress`, `complete`, `rejected`, `superseded`), then a deterministic hashed-palette fallback. Even unknown or custom statuses always render with a stable, visible colour. The block is optional; omitting it means statuses resolve via the remaining sources.
-
-The external viewer used to open documents without a web URL (via `show --open`) is configured with a `viewer` key under `[tui]`:
-
-```toml
-[tui]
-viewer = "glow"
-```
-
-This command is spawned with the document's file path as its argument when the document has no browser URL (a `git-ref`/`clickup-tasks` doc, or a filesystem doc whose repo coordinates don't resolve). The key is optional; without it, `show --open` on such a document reports an error instead of guessing a viewer.
-
-</details>
-
-<details>
-<summary><h2>CLI</h2></summary>
-
-All document management is available as subcommands. Most accept `--json` for machine-readable output, including every mutating command: `create`, `update`, and `tag` emit the resulting document, while `delete`, `link`, `unlink`, `ignore`, and `unignore` emit a structured outcome (`action` plus the doc id/path or relation edge) instead of the human confirmation line.
-
-Every mutation's `--json` output also reports whether the change reached the document's remote: a `"synced"` boolean (`true` when the backend push landed, `false` when only the local write succeeded), and, only when `"synced": false`, a `"warnings"` array carrying the local-only message (naming the remote and doc, for `git-ref`) or the clone path (for `git`). `git-ref` defers its push and can fall back to a local-only write when the remote is unreachable. `git` never pushes on write at all: every mutation commits into the type's shared clone and reports `"synced": false`; `lazyspec push` is the separate step that publishes it. Synchronous backends (filesystem, GitHub, ClickUp) always report `"synced": true`. In non-`--json` mode the same warning is written to stderr, so the machine-readable channel and the human channel stay in sync. `"synced": false` means two different things depending on the backend: for `git` and a URL-`extends` write it is the healthy, expected state of a local commit awaiting `lazyspec push`, while for `git-ref` it means the push itself failed. Either way, `reserved` numbering already reached the remote at create time to claim the id, so a later `"synced": false` on that same document is never about the number.
-
-| Command                                                                                           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init [--non-interactive] [--json] [--template starter]`                                          | Initialise lazyspec in the current project. On a TTY runs an interactive wizard that defaults to designing a blank DAG — types, lifecycles, and `[[edges]]` rows once two types are declared; `--template starter` (or picking `starter` on the first screen) tweaks the built-in starter DAG instead. `--non-interactive`/`--json`/non-TTY write the starter config unchanged (`--template` is ignored)                                                                                                                                                                                                                                                                                                                       |
-| `create <type> <title> [--author X] [--parent ID] [--body / --body-file]`                         | Create a document (rfc, adr, story, iteration); seed body inline, from a file, or `-` for stdin. `--parent <ID>` makes the new doc a child of an existing doc; the child must be the same store as its parent. For filesystem-store types the child is authored as a sibling `.md` inside the parent's subdir (promoting a flat parent to `TYPE-n-slug/index.md` on the first child). For `github-issues`-store types the child is created as a real GitHub issue and bound as a native sub-issue of the parent at create time; a later `fetch` mirrors them into the nested cache layout (`.lazyspec/cache/<type>/<PARENT>/index.md` + `NN-<child>.md`) |
-| `list [type] [--status X]`                                                                        | List documents with optional filters; each list card shows the assignee (as `@name`) when one is set, and nothing when unset                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `show <id> [-e] [--open]`                                                                         | Display a document by path or shorthand ID (for example `RFC-001`); `--open` opens it in a browser or viewer instead. The detail header adds an `Assignee:` line when the document has one (omitted when unset), mirroring the `Tags:` line. The `--json` output includes an `assignee` field (a string, or `null` when unset) alongside `status`/`tags`; `status --json` reports it for every document too                                                                                                                                                                                                                                              |
-| `update <path> [--status X] [--title X] [--assignee X] [--body / --body-file] [--attr key=value]` | Update frontmatter and/or body content (`--body-file -` reads stdin); `--assignee` sets the first-class assignee field (pass `--assignee ""` to clear it); `--attr` (repeatable) sets a declared custom attribute, coerced and validated against its type; `--status` on a filesystem- or `github-issues`-backed document also stamps `reviewed` with the current `HEAD` (see [Staleness](#staleness)); works for all stores                                                                                                                                                                                                                                                                                                                                                                          |
-| `delete <path>`                                                                                   | Delete a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `link <from> <rel> <to>`                                                                          | Add a typed relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `unlink <from> <rel> <to>`                                                                        | Remove a relationship (canonical or inverse keyword)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `tag add <id> <tags>...`                                                                          | Add tags to a document (auto-creates GitHub labels if needed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `tag remove <id> <tags>...`                                                                       | Remove tags from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `govern add <id> <globs>...`                                                                      | Add globs to a document's `governs` list; a glob that does not compile is refused and nothing is written (see [Governed files](#governed-files))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `govern remove <id> <globs>...`                                                                   | Remove globs from a document's `governs` list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `govern list <id>`                                                                                | Print a document's `governs` globs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `search <query> [--doc-type X]`                                                                   | Fuzzy search over titles, tags, paths and bodies; a query that reads as a source file path also lists the documents whose `governs` globs match it, as one more result rather than instead of the text matches (see [Governed files](#governed-files))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `why <path>`                                                                                      | List the documents that govern a source file (see [Governed files](#governed-files))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `context <id> [--depth N]`                                                                        | Show the full document chain (RFC -> Story -> Iteration)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `context [--anchor TYPE]`                                                                         | Emit the context forest (omit `<id>`); `--anchor` re-roots on a type, nesting each anchor's chain descendants and its inverted chain ancestors below it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `status`                                                                                          | Show full project status with all documents and validation; also reports unpushed commits for each shared `git`-store clone                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `ignore <path>`                                                                                   | Mark a document to skip validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `unignore <path>`                                                                                 | Remove validation skip from a document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `validate [--warnings]`                                                                           | Check document integrity and link consistency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `fix [paths] [--dry-run]`                                                                         | Fix documents with broken or incomplete frontmatter. The sub-modes below are mutually exclusive with each other and with `[paths]`, and `--type` belongs to `--renumber`; an incompatible combination is rejected rather than silently ignored                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `fix --renumber <sqids\|incremental> [--type X] [--dry-run]`                                      | Renumber all documents to the given format; `--type` filters to a single document type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `fix --config [--dry-run]`                                                                        | Repair `.lazyspec.toml`: add the missing standard relationships and lifecycles, and translate `[[rules]]` into `[[edges]]` (destructive — see _Migrating an existing config_)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `fix --governs [--dry-run]`                                                                       | Rewrite every `governs` glob that matches nothing to the `suggested_glob` its finding carried; leaves `reviewed` alone (see _Governed files_)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `completions <shell>`                                                                             | Generate a shell completion script (bash, elvish, fish, powershell, zsh)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `pin <id>`                                                                                        | Pin blob hashes onto `@ref` directives and stamp `reviewed` with the current `HEAD`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `fetch [--type X]`                                                                                | Fetch remote documents into the cache (`github-issues`, `github-milestones`, `git-ref`, `git`, `clickup-tasks` types)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `push [--json]`                                                                                   | Publish locally committed `git`-store writes: rebase each shared clone onto its remote, then push. See [Store backends](#store-backends)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `convention [--preamble] [--tags X]`                                                              | Show convention and dictum content; `--preamble` omits the dictum, `--tags` filters it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `skills install [--runtime <claude\|agents-md>]`                                                  | Install the embedded agent skill set into the project (both runtimes by default)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `config [--json]`                                                                                 | Print the resolved `.lazyspec.toml` as JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `config schema`                                                                                   | Print a JSON Schema for `.lazyspec.toml` (runs from any directory)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `config add-type <name> <plural> <dir> <prefix>`                                                  | Append a new document type to `.lazyspec.toml` (bare, on a TTY, runs the interactive wizard)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `config set-lifecycle <type> [--state X] [--edge from:to]`                                        | Replace a type's lifecycle states and status transitions (`--edge` is a transition, not a DAG edge)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `config add-edge <name> --from T --to T --via R [--required error\|warning] [--traversal chain\|related] [--json]` | Append an `[[edges]]` row declaring one kind of DAG edge; repeat `--from`/`--to`/`--via` per name, `*` for any. `--json` prints the row that landed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `config set-edge <name> [--from T] [--to T] [--via R] [--required error\|warning \| --no-required] [--traversal chain\|related \| --no-traversal] [--json]` | Change fields on an existing `[[edges]]` row; an omitted flag leaves its field, `--to` replaces the whole target set, `--no-*` drops an optional. `--json` prints the row after the edit                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `config remove-edge <name> [--json]`                                                              | Drop an `[[edges]]` row; a config declaring no edges is legal, so the last row can go. `--json` prints the row that was removed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `provenance add <id> <citation>`                                                                  | Append a citation to a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `provenance remove <id> <citation>`                                                               | Remove an exact-match citation from a document's provenance list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `provenance list [id]`                                                                            | List citations for a document, or for all documents grouped by id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `reservations list`                                                                               | Show all reservation refs on the remote                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `reservations prune [--dry-run]`                                                                  | Remove refs for documents that already exist locally                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `setup`                                                                                           | Validate GitHub auth and fetch issues for `github-issues` types                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `setup clickup [--token pk_...]`                                                                  | Validate a ClickUp personal API token and store it globally (see [ClickUp store auth](#clickup-store-auth))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-
-### `validate` findings
-
-`validate --json` reports `errors` and `warnings` as arrays of finding objects. Each object carries `rule`, a stable slug naming the rule that produced it; `message`, the line the human render prints; and the fields that rule reports on. `status --json` embeds the same objects under `validation.errors` and `validation.warnings`. Findings are selected by `rule` and read by field. The wording of `message` is not a stable interface.
-
-Which array a finding lands in is its severity, and that is a property of the finding rather than of the rule: a rule whose severity is configurable emits into either. `unsatisfied-edge` is the case in point — an `[[edges]]` row's `required` value decides it — so a consumer that wants every finding of a rule reads both arrays.
-
-```sh
-lazyspec validate --json | jq '[.errors[], .warnings[]] | map(select(.rule == "unsatisfied-edge") | {path, edge_name, to})'
-```
-
-Every finding about a document names it in a field: `path` on most rules, `source` on `broken-link`, `paths` on `duplicate-id` and `singleton-violation`, and `type_name` on the rules that report a type rather than a document. The `unsatisfied-edge` finding also carries `edge_name`, `from_type`, `to` and `via`; `to` and `via` are spelled as in `[[edges]]`, a bare name, a list of names, or `"*"`.
-
-`governs-unowned` is the one finding about a source file rather than a document: it names the file in `file` and no document at all, because the absence of one is what it reports. See [Governed files](#governed-files).
-
-`stale` reports a document whose band is `stale`. It carries `path` and `staleness`, the same object `show --json` prints — `band`, `driver`, `anchor`, `age_days` and `drift`. Its severity is configurable, `[staleness] finding`, so like `unsatisfied-edge` it reaches either array; `finding = "off"` emits none. See [Staleness](#staleness).
-
-```sh
-lazyspec validate --json | jq '[.errors[], .warnings[]] | map(select(.rule == "stale") | {path, band: .staleness.band, age_days: .staleness.age_days})'
-```
-
-One warning is about the environment rather than a document and so names none: `gh-auth`, raised when the project declares a `github-issues` type and the `gh` CLI is missing, unauthenticated, or unreadable. It carries `rule` and `message` and no other field. Filtering `warnings` on a document field silently drops it, so select it by `rule` if you care about it. It appears only in `validate --json`, never in `status --json`.
-
-`validate --json` also reports a third array, `parse_errors`: files under a document directory that would not load — malformed frontmatter, or a `governs` glob that would not compile. Its entries are not findings, so no `rule` selects them; each is `{ "path", "error" }`. A non-empty `parse_errors` exits 2, the same as an error. `status --json` carries the same array, but at its top level beside `validation` rather than inside it.
-
-Before this shape, `errors` and `warnings` were arrays of rendered strings. That is a breaking change for consumers that matched on them.
-
-### Relationship keywords
-
-`link` and `unlink` resolve relationship names against the `[[relationships]]` block in your `.lazyspec.toml` (see [Configuration](#configuration)). The starter config declares the canonical set (`implements`, `supersedes`, `blocks`, `related-to`) and, for each directional relationship, an inverse keyword (`implemented-by`, `superseded-by`, `blocked-by`), but the vocabulary is yours to change. An inverse keyword is a write-time alias: it flips the direction and stores the canonical relation on the target document. Nothing new is persisted; the reverse direction is still computed by the link graph.
-
-```sh
-lazyspec link STORY-9 blocked-by RFC-2
-# writes `blocks: STORY-9` onto RFC-2, prints:
-# Linked docs/rfcs/RFC-002-....md --blocks--> STORY-9
-```
-
-A relationship declared without an `inverse` is symmetric (like `related-to`) and has no separate inverse keyword. A keyword that matches no declared `name` or `inverse` is rejected before anything is written, and `validate` flags any document carrying a relationship name absent from `[[relationships]]`.
-
-### `show` flags
-
-| Flag                        | Description                                      |
-| --------------------------- | ------------------------------------------------ |
-| `-e`, `--expand-references` | Expand `@ref` directives into fenced code blocks |
-| `--max-ref-lines N`         | Max lines per expanded ref (default: 25)         |
-| `--open`                    | Open the document externally (see below)         |
-
-`show <id> --open` opens the document in an external viewer. For a document whose backend has a web URL (a `github-issues` doc opens its issue page, a `github-milestones` doc its milestone page, a `filesystem` doc its blob on the default branch), it launches your browser (`open` on macOS, `xdg-open` on Linux). For any other document (a `git-ref` or `clickup-tasks` doc, or a filesystem doc whose repo coordinates don't resolve) it launches the command configured as `viewer` under `[tui]` in `.lazyspec.toml` (for example `viewer = "glow"`) on the document's file. If no web URL resolves and no viewer is configured, `--open` reports a clear error rather than doing nothing. With `--json`, `--open` prints the resolved target (`{ "target": "url", "url": ... }` or `{ "target": "file", "path": ... }`) and spawns nothing.
-
-Each document entry in `show --json` and `status --json` (under `documents[]`) includes an `attributes` object holding the document's custom frontmatter attributes (declared via `[[types.attributes]]`). Declared attributes are emitted as their typed JSON value: `int`/`float` as numbers, `string`/`enum` as strings, `bool` as a boolean, `date` as a `"YYYY-MM-DD"` string. Undeclared keys pass through with their raw YAML value. The field is always present; a document with no attributes serializes it as `{}`, so consumers needn't null-check.
-
-`show` prints a `Governs:` row listing the document's globs, joined by commas, and a `Reviewed:` row carrying its review anchor. A row is omitted when its field is unset. Every command that emits a document as JSON, `show --json` and `status --json` among them, carries `governs` and `reviewed`. `governs` is a list of glob strings, empty when the document declares none; `reviewed` is a string, or `null` when the document declares none. `reviewed` is spelled and encoded the same way in [`why --json`](#why). `governs` has no counterpart there: a `why` entry is one document-and-glob pair, so it carries `glob`, the single string that matched, not the document's whole list. See [Governed files](#governed-files).
-
-`show` prints one `staleness:` line for every document, and `show --json` carries the same facts under a `staleness` key:
-
-```sh
-lazyspec show SPEC-001
-# staleness: stale (drift, 12 files since 0123456, 140d)
-
-lazyspec show RFC-001
-# staleness: aging (age, 140d since 2026-04-21)
-
-lazyspec show SPEC-001 --json | jq .staleness
-# { "band": "stale", "driver": "drift", "anchor": "0123456", "age_days": 140,
-#   "drift": { "files": 12, "insertions": 310, "deletions": 85 } }
-```
-
-The line quotes the fact that banded the document: a drift-driven one names the file count, an age-driven one names the days. The JSON carries both either way.
-
-`band` is `fresh`, `aging` or `stale` and `driver` is what banded it; see [Staleness](#staleness) for the thresholds and the per-type driver. `anchor` is the document's `reviewed` sha when it has one and its `date` when it does not, and `age_days` counts from that anchor's commit time or from that date. `drift` is what `git diff` counts between the anchor and `HEAD` for the files the document's `governs` globs match — reported as a fact even for a document banded by age, and zero when there is nothing to diff. Both surfaces carry the line for every document, pinned or not.
-
-The band is computed on demand by the commands that show it, never at load, so nothing else pays for the git subprocess and nothing is written back to the document. What git answers is memoized under `.lazyspec/cache/`, keyed on the document's `reviewed` anchor and on `HEAD`, so a second command over a tree where neither has moved re-reads no commit and re-runs no diff; see [Staleness](#staleness). The globs are never handed to git as pathspecs: git only names the files that changed, and those names are matched with the same globs, in the same dialect, that decide which document [governs a file](#governed-files). A file that drifts a document is exactly a file the document governs.
-
-`show --json` and `status --json` also include a read-only `comments` array. For documents whose type uses the `github-issues` store, this fetches the issue's GitHub comment thread live (each entry `{ "author", "body", "timestamp" }`); for all other documents it is an empty array. Comments are never written back to GitHub, never merged into `body`, and never cached. The field is always present.
-
-### `context` flags
-
-| Flag            | Description                                                                                                                                                                                                                                                             |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--depth N`     | Max hops to follow related links when collecting related records (default: 1)                                                                                                                                                                                           |
-| `--anchor TYPE` | Forest mode only (omit `<id>`): re-root the forest on documents of `TYPE`, emitting each anchor with its chain descendants nested below it and its chain ancestors below it too as an inverted subtree, marked `↑` in the human tree and `reverse_in_context` in `--json` |
-
-With an `<id>`, `context` shows that document's chain. Omit the id to emit the whole-store context forest (every document, parents-first); add `--anchor TYPE` (for example `--anchor story`) to re-root the forest on a document type.
-
-An anchored forest is bidirectional: each anchor-type doc is a root, with its chain descendants nested below it and its chain ancestors nested below it too as an inverted subtree. Pivoting on a leaf type therefore reads top-down (`ITERATION-246` → `STORY-184` → `RFC-058`) instead of emitting a flat list. A row reached by an inverted (ancestor) edge is marked `↑` in the human tree, in the same column its forward siblings put their connector. In `--json` it carries `reverse_in_context: true` and lists the anchor-side paths it hangs under in `inverted_parents_in_context`, so `implements_in_context` never asserts an edge pointing the other way; a node's parents in the rendered tree are the union of the two lists, and only one of them is ever populated. `inverted_parents_in_context` holds inverted parent EDGES, not "the docs that implement this one": on `--anchor story` a story's implementing iterations are forward children, so the story's list is empty. The whole-store forest has no inverted edges, so it carries neither key and is unchanged.
-
-```sh
-lazyspec context ITERATION-001            # chain for one document
-lazyspec context --json                   # whole-store forest
-lazyspec context --json --anchor story    # stories as roots: iterations below, RFCs inverted below
-lazyspec context --anchor iteration       # leaf pivot: each iteration with its story and RFC above it
-```
-
-### `why`
-
-`why` takes a file path and reports every document whose `governs` globs match it. The argument is a path, not a document ID, and is never fuzzy-matched against ids. A relative path resolves against the project root, and matching is done against the path relative to the `[governs]` root (see [Governed files](#governed-files)); a path outside that root matches nothing.
-
-A document is listed once for each of its globs that matches, so a document pinning both `src/engine/**` and `src/engine/store.rs` is listed twice against `src/engine/store.rs`. Results are ordered by document path, then by glob.
-
-```sh
-lazyspec why src/engine/context/resolve.rs
-# [spec] Context resolution [accepted] docs/specs/SPEC-001-context.md [src/engine/context/**]
-
-lazyspec why src/engine/context/resolve.rs --json
-```
-
-Each `--json` entry carries `id`, `type`, `title`, `status`, `reviewed`, `glob` and `drifted`. `reviewed` is `null` on a document that declares none. `drifted` is `true` when files under that document's globs have changed since its `reviewed` commit — the document may describe code that has moved on — and `false` when nothing has changed since, or when the document declares no `reviewed` to measure from. It is a `--json` field only; the human listing is unchanged. For the full band behind it, see [`show` flags](#show-flags). A path no glob matches prints an empty array and exits zero.
-
-### `provenance` subcommands
-
-Cite the sources of truth that informed a document. Citations are free-form strings stored as a YAML list in frontmatter.
-
-```sh
-lazyspec provenance add RFC-001 "Workshop 2026-04-12"
-lazyspec provenance add RFC-001 "Privacy Act 1988"
-lazyspec provenance list RFC-001
-# Workshop 2026-04-12
-# Privacy Act 1988
-
-lazyspec provenance remove RFC-001 "Privacy Act 1988"
-lazyspec provenance list
-# RFC-001	Workshop 2026-04-12
-```
-
-All three subcommands accept `--json`. Shapes:
-
-- `add` / `remove`: `{ "doc": "...", "added"|"removed": "...", "provenance": [...], "synced": true|false }`. As with every mutation, `add`/`remove` also carry the push outcome: `"synced"` reflects whether the backend push landed, and a `"warnings"` array is present only when `"synced": false` (a `git-ref` local-only write against an unreachable remote). The same warning goes to stderr in non-`--json` mode.
-- `list <id>`: `{ "doc": "...", "provenance": [...] }`
-- `list` (no id): `{ "documents": [{ "id": "...", "path": "...", "provenance": [...] }, ...] }`
-
-`add` rejects empty citations. `remove` is exact-match and errors when the citation is absent.
-
-</details>
-
-<details>
-<summary><h2><code>@ref</code> syntax</h2></summary>
-
-Documents can embed references to source code using `@ref` directives. By default, `lazyspec show` renders them as-is. Pass `-e` to expand them inline.
-
-```
-@ref <path>                    # entire file
-@ref <path>#<symbol>           # specific type or struct
-@ref <path>#<symbol>@<sha>     # symbol at a specific git commit
-@ref <path>#123                # line 123
-@ref <path>#123@<sha>          # line 123 at a specific git commit
-```
-
-Expansion resolves content via `git show` (committed state, not working tree). Supported languages for symbol extraction are TypeScript (`.ts`/`.tsx`) and Rust (`.rs`).
-
-Each expanded ref includes a caption line showing the file path, short git SHA, and symbol or line info. Expanded blocks are truncated to 25 lines by default; when truncated, a trailing comment shows how many lines were omitted. Use `--max-ref-lines` to adjust the limit.
-
-**Example**
-
-A document containing:
-
-```
-@ref src/engine/store.rs#Store
-```
-
-Renders as:
-
-````
-```rust
-pub struct Store { ... }
-```
-````
-
-Unresolvable refs render as:
-
-```
-> [unresolved: src/engine/store.rs#Store]
-```
-
-</details>
-
-<details>
-<summary><h2>Configuration</h2></summary>
-
-`lazyspec init` creates a `.lazyspec.toml` in your project root. On a TTY it runs an interactive wizard. By default the wizard designs a **blank** type DAG from scratch: it prompts for each type and its lifecycle, and then, once two or more types are declared, for `[[edges]]` rows. `--template starter` tweaks the built-in starter set instead, and prompts for no row.
-
-Each row is prompted as a source type, a target set, the relationships that realize it, a requiredness and a traversal role. The source is one of the declared types; the target set and the relationship set are chosen from the declared names or `*`, which is a whole position and is refused beside a name. `required` and `traversal` both default to unset, except that `chain` is the traversal offered while no declared row states a role at all — a DAG no row gives a role to walks nothing. The row's `name` is generated from the plural forms of the types it names (`stories-to-rfcs`), with `-2`, `-3`, … appended while that name is taken, since two rows may not share one. A row with a wildcard source, or one for a project with a single type, is declared with `config add-edge` rather than in the wizard.
-
-`--non-interactive`, `--json`, or a non-TTY writes the starter config unchanged, whose five `[[edges]]` are `stories-need-rfcs`, `iterations-need-stories`, `adrs-need-relations`, `implements-traversal`, and `related-to-traversal`. The first three are demands for a link, and the first two are chain rows as well. The last two are the blanket rows that put every `implements` link on the chain and every `related-to` link in the related neighbourhood, whatever the types at their ends — so a scaffolded project's `context` walks its hierarchy and its neighbourhood with no further declaration. The starter set states `traversal` only on `[[edges]]`; none of its `[[relationships]]` carries a marker, because a project's DAG belongs in one table. Dropping a starter type in the wizard drops the edge rows that name it; the two blanket rows name none, so they survive every drop. Both designers print a DAG summary before the write confirmation, listing every declared row and, separately, every row a dropped type took with it.
-
-The engine ships no built-in types or vocabulary: the `[[types]]`, `[[relationships]]`, and `[[edges]]` in `.lazyspec.toml` are the sole source of truth. A missing `.lazyspec.toml` (or one with no `[[types]]`) errors and points you at `lazyspec init`; a config with no `[[relationships]]`, or one still declaring the retired `[[rules]]`, points you at `lazyspec fix --config`.
-
-> [!NOTE]
-> `lazyspec config schema` prints a JSON Schema for `.lazyspec.toml`, derived from the actual parser so it never drifts from the binary. It is the authoritative key reference: point [taplo](https://taplo.tamasfe.dev/) or Even Better TOML at it for editor autocomplete, or read it instead of inferring keys from this README. The sections below cover the main blocks with examples.
-
-```toml
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-icon = "●"
-
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-
-[[relationships]]
-name = "related-to"
-
-[templates]
-dir = ".lazyspec/templates"
-
-[naming]
-pattern = "{type}-{n:03}-{title}.md"
-```
-
-### Migrating an existing config
-
-Two shapes of `.lazyspec.toml` no longer load, and both point you at the same migration. A project created before relationships became config-driven has no `[[relationships]]` block. A project created before the edge table has a `[[rules]]` block, which is retired: the document DAG is declared in `[[edges]]` and nowhere else, so a config declaring both would declare it twice. Strict load rejects either shape on **every** command:
-
-```sh
-lazyspec fix --config --dry-run  # print the whole plan, including what it destroys, without writing
-lazyspec fix --config            # apply it
-```
-
-Run the `--dry-run` first. The migration is a rewrite, not an addition, and the plan is the only place it says what it takes away.
-
-`fix --config` reads the config leniently (the one place strict load is bypassed — which is what lets it read a config every other command refuses) and then does two different things to it.
-
-**Append-only, for relationships and lifecycles.** It adds the standard `[[relationships]]` that are missing, comparing by name, so user-added relationships are kept and nothing is duplicated. It injects the default `lifecycle` into any `[[types]]` entry that lacks one (a type that already declares a lifecycle is left untouched); migrated types are reported under `lifecycles_added`. Nothing the file already said is taken away.
-
-Into a config that says nothing at all about its DAG — no `[[edges]]` **and** no `[[rules]]` — it also seeds the standard set, the same rows `lazyspec init` scaffolds: the three constraints and the two blanket walks they hang on. They land as `[[edges]]`, which is the only shape that loads; no run of `fix --config` ever writes a `[[rules]]` block. A standard row naming a type the config does not declare is skipped, since an edge row's type names are checked at load. A blanket row — `implements-traversal`, `related-to-traversal` — is seeded only when the config marks no `traversal` on the relationship it names; where it does, that marker translates to the same row under the same name. A seeded row states no `traversal` at all where a marker gives `implements` the `related` role, since the two rows would overlap and disagree. A config carrying any `[[rules]]` of its own is not topped up: its rules may already say what a standard one says under another name, and the pair would be two equally specific rows demanding the same edge at different severities, which does not load.
-
-**A translating rewrite, for the edge migration.** `[[rules]]` blocks and `[[relationships]].traversal` markers become `[[edges]]` rows, and the source declarations are then deleted — a config cannot declare its DAG twice. A `parent-child` rule becomes one row whose `via` names every relationship the config marks `traversal = "chain"`; if it marks none, the rule was satisfiable by nothing and the row carries `via = []`, which is satisfied by nothing too. Two things do not survive the deletion:
-
-- **Comments attached to a declaration the rewrite deletes** — a whole `[[rules]]` block, header and keys alike, or the `traversal` key of a `[[relationships]]` block that otherwise survives. Each is reported under `comments_lost`, naming the block and the declaration it belonged to, so you can move the text somewhere it will keep.
-- **`require_parent_status` gates.** ADR-033 retired status-conditioned `create` gating with no successor, so the key is dropped rather than translated. Each is reported under `gates_dropped`. Nothing validates differently afterwards; that is why the plan has to say it.
-
-The rewritten text is parsed strictly before it replaces the file. If a row the migration writes collides with one already there — a hand-written `via = "*"` row carrying a `traversal` overlaps every marker row, and the loader refuses the pair — nothing is written and the error names both rows.
-
-`--dry-run` prints that whole plan — additions, translations, deletions, and both losses — before anything is applied, and writes nothing. Everything the human output says is a field in `--json`.
-
-`fix --config --json` prints one object. Every field is always present; an array with nothing to report is empty, so no key needs a null check. `--dry-run` changes no field but `written`.
-
-| Field                 | Value                                                                                                                                                                                                       |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relationships_added` | Names of the standard `[[relationships]]` the file was missing                                                                                                                                              |
-| `lifecycles_added`    | Names of the `[[types]]` that were given the default lifecycle                                                                                                                                              |
-| `edges_written`       | Names of every `[[edges]]` row the run writes: the translated rules, the translated `traversal` markers, and the standard set seeded beside them. There is no `rules_added` field; a rule is never written   |
-| `rules_removed`       | Names of the `[[rules]]` blocks the rewrite deletes                                                                                                                                                         |
-| `traversal_removed`   | Names of the relationships whose `traversal` key the rewrite deletes                                                                                                                                        |
-| `comments_lost`       | One object per destroyed comment: `{ "block", "name", "comment" }`. `block` is `"rule"` or `"relationship"`, `name` is the declaration it sat on, and `comment` is the text with its leading `#`             |
-| `gates_dropped`       | Names of the rules whose `require_parent_status` gate was dropped                                                                                                                                           |
-| `written`             | `true` when the file was replaced; `false` under `--dry-run` and on a config that needed no repair                                                                                                           |
-
-A config gaining its first `[[edges]]` block gets it directly after the `[[relationships]]` its rows name, not at the end of the file. Every section the migration does not understand (`[github]`, your own tables, their comments and ordering) is preserved, and the run is idempotent: on an up-to-date config it makes no change and reports nothing to add and nothing to migrate. The flag is config-only: no documents are touched (use plain `lazyspec fix` for frontmatter).
-
-### Inspecting and editing the config
-
-`lazyspec config` reads and edits `.lazyspec.toml` without you opening the file. The read is plain JSON; the mutators reconcile the TOML in place, preserving comments, formatting, and block order exactly as `fix --config` and the TUI settings screen do; and `schema` emits a JSON Schema describing the file's shape. Each type in the JSON carries `resolved_dir`, the absolute directory its documents are read from: `dir` joined to the project root and normalised for a `filesystem` type, or `.lazyspec/cache/<name>` for a cache-backed store, which ignores `dir`. Under [`extends`](#sharing-a-doc-set), `resolved_dir` is under the extended root, and the JSON carries `.extends`, the resolved root itself.
-
-```sh
-lazyspec config --json                      # print the resolved config as JSON
-lazyspec config schema                      # print a JSON Schema for .lazyspec.toml
-
-# Append a new document type (name, plural, dir, prefix are positional)
-lazyspec config add-type spike spikes docs/spikes SPIKE \
-  --icon "◆" --intent "throwaway exploration" \
-  --authorship generated
-
-# With no positionals on a TTY, add-type prompts interactively.
-lazyspec config add-type
-
-# Declare custom frontmatter attributes with the type
-lazyspec config add-type bug bugs docs/bugs BUG \
-  --attribute "severity:enum:required:low,medium,high" \
-  --attribute "reported:date" --attribute "estimate:int"
-
-# Replace a type's lifecycle (states + status transitions; `*` matches any source state)
-lazyspec config set-lifecycle iteration \
-  --state draft --state in-progress --state done \
-  --edge draft:in-progress --edge in-progress:done --edge "*:rejected"
-
-# Append an `[[edges]]` row: a kind of DAG edge, not a status transition
-lazyspec config add-edge iterations-implement-work \
-  --from iteration --to story --to bug --via implements \
-  --required error --json
-
-# Edit one field of that row; the rest of it, and the file's comments, stand
-lazyspec config set-edge iterations-implement-work --required warning
-
-# Replace the target set (not add to it), and drop an optional
-lazyspec config set-edge iterations-implement-work --to story --no-traversal
-
-# Drop the row; the last one can go, leaving a config that declares no edges
-lazyspec config remove-edge iterations-implement-work --json
-```
-
-`add-type` rejects a duplicate name; `set-lifecycle` replaces the whole lifecycle (it is a set, not a merge) and rejects an unknown type; `add-edge` rejects a `name` already in the table, since a row is addressed by its name; `set-edge` merges — an omitted flag leaves its field alone — except for the set-valued positions, where `--from`/`--to`/`--via` each replace the declared set, so a set can be shrunk. It rejects a name no row carries, and so does `remove-edge`, which otherwise refuses nothing: a project with no edges is legal, and a removal that silences a finding or shortens a chain is not asked about. The mutators require an already-valid config; run `lazyspec fix --config` first to migrate a legacy one.
-
-Past those argument checks, every mutator reads back the exact bytes it is about to write. A change that would leave a config the next command could not load — a `--to` naming an undeclared type, a `--required` on a wildcard `--from`, a row that disagrees with one already in the table — is refused with the loader's own error message, and `.lazyspec.toml` is left untouched. This is the same render-parse-write the TUI settings screen runs on save, so neither surface accepts what the other refuses. Under `--json` the refusal is reported by exit status and stderr rather than as an object: no lazyspec command has a JSON error envelope, so an empty stdout with a non-zero exit *is* the refusal, and the message is on stderr.
-
-`add-edge --json` prints one object — `{ "action": "edge-added", "name": …, "edge": … }` — whose `edge` is the row spelled exactly as `config --json` spells it, so a caller reads what landed without re-reading the config. `set-edge --json` prints the same envelope with `"action": "edge-updated"` and the row after the edit; `remove-edge --json` prints it with `"action": "edge-removed"` and the row as it stood, which is the only copy left of it. `--json` is accepted before the subcommand as well as after it.
-
-`config schema` needs no active project and runs from any directory (every other `config` subcommand requires a `.lazyspec.toml`). Save it as a machine-readable reference for a human or agent editing the config:
-
-```sh
-lazyspec config schema > lazyspec.schema.json
-```
-
-### Store backends
-
-Every `[[types]]` block has a `store` (default `filesystem`) that decides where its documents live and how mutations sync. Set it with `--store` on `config add-type`. Per-store config keys are documented in `lazyspec config schema`; per-command behaviour in `lazyspec <cmd> --help`.
-
-| Store                  | Documents are                                                     | Auth                                      |
-| ---------------------- | ------------------------------------------------------------------ | ------------------------------------------ |
-| `filesystem` (default) | Markdown files under the type's `dir`                             | none                                      |
-| `github-issues`        | GitHub issues (labelled `lazyspec:{type}` by default)             | `gh auth login`                           |
-| `github-milestones`    | GitHub milestones                                                 | `gh auth login`                           |
-| `github-projects`      | Existing Projects v2 boards (associate only)                      | `gh auth login`, `-s project`              |
-| `git-ref`              | Docs in git custom refs, pushed live to the remote                | a writable git remote                      |
-| `git`                  | Files in a clone shared by every type on the same remote + branch, under `.lazyspec/git/` | a readable git remote (writable to push) |
-| `clickup-tasks`        | Tasks in one bound ClickUp List (read/write)                      | `lazyspec setup clickup`                   |
-
-A `filesystem` type's `dir` may point outside the project, either as an absolute path or as a relative path that escapes the root (`../shared-specs`). Both spell the same location, so `config --json` reports one `resolved_dir` for it and `list`/`show` report its documents as normalised absolute paths whatever the spelling. If an absolute `dir` does not exist, every command that reads the type prints a `warning:` on stderr naming the resolved path; a missing relative `dir` is skipped silently, since an unpopulated local docs dir between `init` and the first `create` is normal.
-
-Remote-backed types cache into `.lazyspec/cache/` and refresh with `lazyspec fetch [--type <name>]`. `fetch` refreshes every remote type in one pass; a per-type failure still refreshes the rest, reports the error, and exits non-zero. `git-ref` mutations push live with `--force-with-lease`; if the remote is unreachable the change stays local and prints a `warning:`.
-
-Every `git` type declaring the same `remote` and `branch` shares one clone at `.lazyspec/git/<slug>`, regardless of how many `[[types]]` entries name it. A mutation on a `git`-store document writes into that clone and commits locally; it never pushes, and reports `"synced": false`. `lazyspec fetch` rebases the clone onto the fetched head rather than discarding local commits, so an unpushed write survives a refresh.
-
-`lazyspec push [--json]` publishes what those local commits have accumulated: for each shared clone that exists, it fetches and rebases onto the remote, checks whether the rebase produced a doc id colliding with another doc of the same type in the clone, then pushes. A clone with nothing to push reports zero and exits 0. A rebase conflict this call caused aborts the rebase, keeps the local commits, exits non-zero, and names the clone path and the conflicted files; resolve it with `git -C <path> pull --rebase`, then re-run `push`. A rebase already in progress in the clone (started outside `push`, maybe mid-resolution) is left untouched rather than aborted; `push` exits non-zero and names the clone, with `git -C <path> rebase --continue` (or `--abort`) to finish it before re-running `push`. A clone with an uncommitted change outside any of that (a file hand-edited in the clone itself) is left untouched too, before any rebase starts; `push` exits non-zero and names the clone, with `git -C <path> commit -am ...` or `git -C <path> stash` to clear it before re-running `push` -- `fetch` hits the same clone the same way and reports the identical wording. A colliding id (two clones independently numbering the same `incremental` id) blocks that clone's push entirely, exits non-zero, and names each colliding id with its paths; rename one of each pair and re-run `push`. `reserved` numbering claims its id on the remote at create time, so it cannot produce this collision. One clone failing does not stop the rest from pushing. `push --json` reports `{ "clones": [ { "path", "remote", "branch", "types", "pushed", "error" } ] }`, `error` being `null` or an object naming its `kind` (`"rebase_conflict"`, `"rebase_in_progress"`, `"uncommitted_changes"`, `"duplicate_ids"`, or `"other"`) and a `message`, plus `files` for `"rebase_conflict"` or `collisions` for `"duplicate_ids"`. No `git` type configured: `push` exits 0 with an empty `clones` list. `status --json` always reports a `git_stores` array of the same clones' unpushed commit counts as `git_stores: [{ "path", "remote", "branch", "types", "unpushed" }]`, empty when no `git` type is configured; a clone whose `unpushed` count cannot be read reports `"unpushed": null` and an `"error"` string instead of failing the whole command. Human `status` prints one line per clone with unpushed commits.
-
-In the TUI, a project with any `git`-store type shows the total unpushed commit count across shared clones in the header (`↑<n>`, hidden at zero), read from the clones already on disk without touching the network; `P` runs `push` in the background (a spinner replaces the count while it runs), then refreshes the count and reloads documents. A per-clone push error surfaces in the same conflict overlay `R`/config-reload and `fetch` errors use, naming the clone path and, for a rebase conflict or an id collision, the commands to resolve it there.
-
-`fetch` prints every warning to stderr as `warning: <message>` in both modes. `fetch --json` also prints one entry per type on stdout: `{ "type", "fetched", "new", "removed" }`, plus a `"warnings"` array repeating that type's warnings (a subtree the composed read could not refresh, so the prior cache stands; a connection truncated at its cap on one document; a document whose `Status` the authority board does not set) when it produced any, and an `"error"` string when its fetch failed.
-
-Before the shared-clone model, each `git` type cloned into its own `.lazyspec/cache/<type>/`. `fetch` migrates away from that: for every configured `git` type, a leftover clone there with nothing unpushed and no uncommitted changes is deleted and reported both as a human line (`removed legacy clone for type \`<name>\`: <path>`) and, in every mode, as `note: removed legacy clone for type \`<name>\`: <path>` on stderr. One that is not clean -- or whose cleanliness could not even be checked -- is left alone and named in a `warning:` on stderr instead, for you to push or copy the changes out (or investigate) and delete it by hand. A cache-backed type's own `.lazyspec/cache/<name>` (`github-issues` and the rest) is never touched, and neither is a `git` type literally named `config`, whose legacy path would collide with the URL-`extends` clone.
-
-GitHub native fields (issue types, Projects v2 boards, milestone associations) need the `project` scope on your token:
-
-```sh
-gh auth refresh -s project
-```
-
-**<a id="clickup-store-auth"></a>ClickUp auth.** ClickUp has no `gh`-style CLI, so lazyspec owns its own credential store. `lazyspec setup clickup` validates a `pk_` personal API token (from ClickUp's _Settings -> Apps_) against the `/user` endpoint, then stores it keychain-first: the OS keychain by default, falling back to a `0600` `~/.lazyspec/credentials.toml` (with a loud warning) on headless boxes. The token is global, never per-repo, never committed, and redacted in all output.
-
-```sh
-lazyspec setup clickup                       # prompt (no echo)
-lazyspec setup clickup --token pk_XXXXXXXX    # non-interactive
-```
-
-Deeper per-store behaviour (write-through, optimistic locking, label/tag matching, relation and custom-field mapping via keys like `github_issue_tag`, `github_label`, `status_authority`, `clickup_list_id`, `clickup_custom_field_map`, and `github_native`) is described by `lazyspec config schema` and the relevant command's `--help`.
-
-### Sharing a doc set
-
-A `.lazyspec.toml` containing only `extends = "<dir-or-url>"` adopts the configuration declared at that location: its types, its DAG, its documents. No other top-level key may accompany `extends`; a config that declares one is a load error naming every sibling key, in file order. The extended config may not itself declare `extends`; a chain is a load error too.
-
-`extends` names a directory or a clone URL. A relative directory resolves against the directory containing `.lazyspec.toml`. A URL clones into the local repository's `.lazyspec/cache/config/`; a fragment (`<url>#branch`) selects a branch, and with no fragment the remote's default branch is used. `lazyspec fetch` brings an existing clone current.
-
-Only `[[types]].dir` and `[templates].dir` follow the extended root. `[governs] root`, `reviewed`/staleness anchors, `@ref` expansion, and `.lazyspec/cache/` for remote-backed types resolve against the local repository, not the extended one.
-
-The config's mutating commands (`config add-type`, `config set-edge`, and the rest), the TUI settings screen, and `fix --config` refuse to run under `extends`. `config --json` reports the resolved extended root as `.extends`.
-
-A URL `extends` clone is a commit target like a `git` type's clone: a mutation on a `filesystem` type writes into it and commits locally, reporting `"synced": false`, and never pushes. `lazyspec fetch` rebases that clone onto the fetched head rather than resetting it away, so the local write survives a refresh. `lazyspec push` covers it alongside every `git` type's clone, and `status --json`'s `git_stores` (and the TUI's unpushed count) count its unpushed commits the same way.
-
-### Custom types
-
-Each document type is declared with a `[[types]]` block. This lets you rename the defaults, add new types, or set custom prefixes and icons used in the TUI. Directories derive entirely from each type's own `dir`; there is no separate `[directories]` table.
-
-```toml
-[[types]]
-name = "rfc"
-plural = "rfcs"
-dir = "docs/rfcs"
-prefix = "RFC"
-icon = "●"
-
-[[types]]
-name = "spec"
-plural = "specs"
-dir = "docs/specs"
-prefix = "SPEC"
-icon = "◆"
-```
-
-A type may name a `parent_type`. The named type contains it: the child type's documents live under the parent type's `dir` and share its `store` backend. The named type must be a singleton, since the containment is into the directory of one document. `validate` reports `ParentTypeNotSingleton` when it is not, and reports `ParentTypeViolation` for each document of the child type found outside the parent type's `dir`. `parent_type` constrains no relationship. Which types may link to which, and with which relationship, is declared in `[[edges]]`.
-
-```toml
-[[types]]
-name = "convention"
-plural = "convention"
-dir = "docs/convention"
-prefix = "CONVENTION"
-singleton = true
-
-[[types]]
-name = "dictum"
-plural = "dicta"
-dir = "docs/convention"
-prefix = "DICTUM"
-parent_type = "convention"
-```
-
-### Lifecycle
-
-Each type declares a `lifecycle`: the set of valid statuses (`states`) and, optionally, the permitted status transitions (`edges`). `update --status` is gated by this lifecycle: a move is allowed only when an edge from the current status to the target is declared. An edge with a `*` source matches any current status (for example `* -> superseded` lets any document be superseded). Setting a status to its current value is always a no-op (idempotent, never rejected). When a move has no matching edge, `update` exits non-zero and the frontmatter is left unchanged.
-
-`edges` is optional. A lifecycle that declares `states` but omits `edges` (or sets `edges = []`) is unconstrained: any move between declared states is allowed. Declare `edges` only when you want to constrain the order of transitions.
-
-```toml
-[[types]]
-name = "rfc"
-prefix = "RFC"
-lifecycle = { states = ["draft", "review", "accepted", "in-progress", "complete", "rejected", "superseded"], edges = [{ from = "draft", to = "review" }, { from = "review", to = "accepted" }, { from = "accepted", to = "in-progress" }, { from = "in-progress", to = "complete" }, { from = "*", to = "rejected" }, { from = "*", to = "superseded" }] }
-```
-
-**Board-derived states.** A `github-issues` type may hand its lifecycle to one Projects v2 board by naming a `github-projects` document in `status_authority`. That board's `Status` single-select options become the type's `lifecycle` states — lowercased, in board order, with no transition edges — written into `.lazyspec.toml` by `lazyspec fetch`. No `config` subcommand sets the key; edit it by hand.
-
-```toml
-[[types]]
-name = "ticket"
-prefix = "TICKET"
-store = "github-issues"
-status_authority = "PROJECT-7"
-```
-
-Only the nominated board is authoritative. A document can belong to several boards; every other board's fields, including its own `Status`, stay plain `PROJECT-n.<field>` attributes and do not affect the lifecycle. A type that sets no `status_authority` is unaffected: it keeps its declared lifecycle, or, for `github-issues` and `github-milestones` types that declare none, the canonical `open`/`closed` pair.
-
-Each document of a board-bound type also takes its own status from that board: `fetch` reads the document's `Status` cell on the authority board, and nothing on the issue itself — neither its open/closed state nor the status stored in its body — contributes one. A closed issue sitting in the board's `In Progress` column is therefore `in progress`, not `closed`. `fetch` makes exactly one write to the board: a document of the type whose issue is not yet an item is added to it, so the type cannot report one lifecycle for its board members and another for everyone else. No `Status` value is ever written — the added item's cell starts empty, which leaves the document with no status and a warning, as does an existing item whose cell is empty. The two warnings are worded differently because the fixes differ, and a failed add warns as well without failing the fetch. A `fetch` that cannot read the board (a token without the `project` scope) warns and leaves each document at the status it last read off the board.
-
-`update --status` on a board-bound type moves the card: it writes the document's `Status` cell on the authority board, matching the value you pass against the board's column names case-insensitively, so `--status "In Progress"` and `--status "in progress"` are the same move. The column names and their ids come from the cached schema snapshot, so a value naming no column on the board is rejected offline — naming the valid columns — before anything is written. The GitHub issue's `open`/`closed` state is deliberately left untouched, in both directions: reaching the board's last column does not close the issue and leaving it does not reopen it. Express that coupling as Projects automation on the board itself, where the rest of your team's board rules live. The TUI status picker offers the same columns and writes through the same path.
-
-The same move also stamps `reviewed` with the current `HEAD`, in the same issue write that carries the rest of the document — one edit, not two — because a human running `update --status` has just looked at the document against the code. A status arriving through `fetch` does not: a card someone dragged on the board is not a review, so a fetched status changes the document's status and leaves its anchor exactly as it was, present or absent. See [Staleness](#staleness).
-
-An `update` that changes anything else on a board-bound document — its title, body or an attribute — leaves the status alone: it stays whatever the board last reported, and the issue's open/closed state cannot move it. A document whose issue is not an item of the authority board has no cell to write, so `update --status` rejects it (run `fetch`, which adds it) before touching the issue. A board write GitHub rejects — most often a token without the `project` scope, which GitHub answers with an error and HTTP 200 — fails the update rather than reporting a move that did not happen.
-
-Because `fetch` overwrites `lifecycle`, `validate` reports a declared lifecycle the nominated board could not have produced: one carrying transition `edges`, or (once the board's columns are cached) states that are not the board's. It also reports a `status_authority` that cannot work at all: one set on a type whose `store` is not `github-issues` (only a GitHub issue can be a board item), and one whose value names no board number.
-
-Projects whose `[[types]]` predate the lifecycle axis can backfill the default lifecycle with `lazyspec fix --config` (see _Migrating an existing config_).
-
-### Relationships
-
-The relationship vocabulary is config-driven, just like document types. Each `[[relationships]]` block declares a relationship `name` and an optional `inverse` keyword. A directional relationship declares its inverse (for example `implements` / `implemented-by`); a relationship with no `inverse` is symmetric (for example `related-to`). `link`/`unlink` resolve the keyword you type against this registry: a canonical `name` links in the stated direction, while a declared `inverse` flips it and stores the canonical relation on the target. `validate` flags any document carrying a relationship name not declared here.
-
-A relationship may also declare `traversal`, the walk it joins where no `[[edges]]` row gives it a role: `chain` relationships form the parent-child hierarchy that the context chain walk follows, while `related` relationships form the symmetric related-context neighbourhood. A relationship with no `traversal` participates in neither walk, but a document's own declared relations still surface at one hop in its related section in `context`, the TUI Relations tab and the web document page.
-
-`traversal` here is blanket: it applies to every pair of document types the relationship links, and it is the fallback for relationships that no `[[edges]]` row assigns a role to. A relationship named by the `via` of a row that states a `traversal` takes its membership in both walks from the rows instead, source type and target type included. See [Edges](#edges).
-
-What `validate` calls a parent follows the same declaration. The status-hierarchy findings — `implements rejected document` and `implements superseded document` — read the `traversal = "chain"` rows of the edge table, asking each link the whole triple: the child's type, the relationship, and the parent's type. A blanket `traversal = "chain"` marker still answers for a relationship no row mentions, and it answers for every pair of types, since a marker names no types at all. The prompt context's child-type listing additionally needs a row naming concrete endpoints: a blanket marker declares no child type for anything.
-
-```toml
-[[relationships]]
-name = "implements"
-inverse = "implemented-by"
-traversal = "chain"
-
-[[relationships]]
-name = "tracks"
-inverse = "tracked-by"
-
-[[relationships]]
-name = "related-to"
-traversal = "related"
-```
-
-### Edges
-
-An `[[edges]]` block declares one directed edge kind in the document DAG: a source type, the permitted target types, and the relationships that realize the edge. `[[edges]]` is where the DAG is declared, and the only place: a document of a type named in `from` is expected to carry a relation named in `via` to a document of a type named in `to`, and an edge is satisfied only by a relationship its `via` names.
-
-| Key        | Meaning                                                                                                                    |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `name`     | Identifies the edge in validation findings. Non-empty, and distinct from every other row's                                 |
-| `from`     | The types of the document that declares the relation, written as one type name, a list of them, or `"*"` for any type       |
-| `to`       | The permitted target types, written the same way. `to = "story"` and `to = ["story"]` are identical, as are the `from` equivalents |
-| `via`      | The relationships that realize the edge, written as one relationship name, a list of them, or `"*"` for any relationship. `via = "implements"` and `via = ["implements"]` are identical, as for `from` and `to`. Required — omitting it is an error, not a shorthand for `"*"` |
-| `required` | `"error"` or `"warning"`: the severity of a finding when the edge is absent. Omit it and the edge is legal but not demanded |
-| `traversal` | `"chain"` or `"related"`: the walk this edge joins. Omit it and this row names no role. Another matching row may still give the edge one. |
-
-A row is asked in the direction the relation was declared, both for findings and for the walks. `from` is the type of the document whose frontmatter carries the relation, and `to` the type at the far end of that same declaration. Reading a link from its far end asks the same triple rather than the reverse of it. A nested child document inherits its parent's links, and such a link asks the parent's type as `from`. A row whose `from` names the inheriting type admits neither end of it. `validate` reports its finding against the declaring document, and both ends of one declared link join the related neighbourhood or neither does.
-
-`validate` reports one finding per document whose type is listed in `from` and which carries no relation named in `via` to a document of any type listed in `to`. All three lists are disjunctions. The edge below is satisfied by an iteration that implements a spike, or a story, or a bug — not one link per member. The finding names the edge, the type of the document it is about, and every permitted target type.
-
-```toml
-[[edges]]
-name = "iterations-implement-work"
-from = "iteration"
-to = ["spike", "story", "bug"]
-via = "implements"
-required = "error"
-
-[[edges]]
-name = "stories-implement-rfcs"
-from = "story"
-to = "rfc"
-via = "implements"
-required = "warning"
-```
-
-A list on `from` states the same demand of several source types at once, rather than repeating the row per type. The edge below reports an iteration that implements nothing and a bug that implements nothing, each finding naming that document's own type:
-
-```toml
-[[edges]]
-name = "delivery-implements-work"
-from = ["iteration", "bug"]
-to = ["spike", "story"]
-via = "implements"
-required = "error"
-```
-
-A list on `via` names the relationships any one of which realizes the edge, rather than repeating the row per relationship. The row below is satisfied by a story that implements an RFC and by one that targets an RFC; a story that does neither is reported once, and the finding names both relationships:
-
-```toml
-[[edges]]
-name = "stories-need-rfcs"
-from = "story"
-to = "rfc"
-via = ["implements", "targets"]
-required = "warning"
-```
-
-Any of `from`, `to` and `via` may be written as `"*"`, which matches every declared type or relationship. Each position takes `"*"` independently of the others:
-
-```toml
-[[edges]]
-name = "general-relatedness"
-from = "*"
-to = "*"
-via = "related-to"
-```
-
-A wildcard `to` is satisfied by a relation that resolves to a document present in the store. A relation naming a document that is not in the store carries its own broken-link finding and does not satisfy the edge.
-
-Wildcarding `to` and `via` together demands a relationship without naming one, the shape a `relation-existence` rule translates to. The edge below reports every iteration that carries no relation at all:
-
-```toml
-[[edges]]
-name = "iterations-need-relations"
-from = "iteration"
-to = "*"
-via = "*"
-required = "error"
-```
-
-A finding names what a wildcard position matches rather than the spelling `"*"`: `iteration needs any relationship to a document of any type`.
-
-Two rows overlap when one concrete edge is covered by both. Overlapping rows are ordered by specificity: the count of `from`, `to` and `via` positions that name something rather than wildcarding, from zero to three. A named position counts once whether it names one type or relationship or six of them, so `from = "iteration", to = "*"` and `from = "*", to = ["story"]` are equally specific, and so are `via = "implements"` and `via = ["implements", "targets"]`.
-
-Specificity resolves requiredness and nothing else, and it ranges only over the rows that state `required`. A row that omits it declares the edge legal and takes no part: it neither conflicts with a demand nor cancels one, however specific it is.
-
-Requiredness is resolved per document, not per link, because it is a claim about absence and a document with no relations at all has no link to resolve against. A row applies to a document when `from` matches the document's type; among the applicable rows that state `required`, one that a more specific such row overlaps is discarded. The demands that survive each report at their own severity. So the `iterations-need-relations` row above still reports an iteration that carries no relations even when a narrower row says an iteration may relate to a story.
-
-Two overlapping rows of equal specificity may not state different severities. Such a pair fails config load, naming both rows and the `required` each writes. Rows stating the same severity, rows of unequal specificity, rows that cannot both cover any one edge, and rows where one or both say nothing about requiredness raise no such conflict.
-
-There is no spelling for "legal here, and stop demanding the broader edge". Narrowing the broader row's `from`, `to` or `via` is how you exempt a case from it.
-
-`required` on a row whose `from` is `"*"` fails config load, naming the edge, because such a row demands the edge of every declared type. A wildcard `from` on a row that omits `required` loads.
-
-Traversal composes: an edge joins a walk when any matching row gives it a role. Two rows that can both cover one concrete edge and name different roles fail config load, naming both rows and the `traversal` each writes. Specificity does not resolve such a disagreement, so a concrete row contradicting a wildcard row fails the same way an equally specific pair does. A row that omits `traversal` names no role: it joins no walk and contradicts nothing, however specific it is.
-
-Both walks read these rows, and one engine walk over them produces the chain and the neighbourhood every surface renders: `context` and the TUI Graph view and Relations tab. No surface derives the walk for itself, so a row changes what all three show at once. Chain membership is asymmetric for a nested child document that inherits its parent's chain relation: it is a chain descendant of the document its parent links to, and at the same time a root of the forest the Graph view and `context` without an id render. The forest's parent edges read each document's own frontmatter, and such a child declares no chain parent there. A row carrying `traversal = "chain"` makes the edge walk the chain for the triples it names: a source type from `from`, a relationship from `via`, a target type from `to`. No other triple walks on account of that row.
-
-A row carrying `traversal = "related"` scopes the related neighbourhood to the triple it names in the same way. `context` follows those rows when it walks out from the chain, and the Graph view's `related` column and the TUI Relations tab read the same declaration, so all of them follow whatever relationships the config gives the related role rather than a fixed `related-to`. A relation whose target resolves to no document in the store joins neither walk. It has no type for a row to admit, so it appears in no chain and no neighbourhood on any surface, and carries its own broken-link finding instead. A single row with `from = "*"`, `to = "*"`, `via = "related-to"` and `traversal = "related"` gives that relationship the role between every pair of declared types, which is what a blanket `traversal = "related"` on `[[relationships]]` means.
-
-The table is therefore precise where a row is spent and blanket where it is not. A row naming concrete types walks those type pairs and no others. A wildcard position restores the blanket behaviour for the position it wildcards, so a config that walks every pair with one wildcard row is no more precise than a global marker.
-
-A row that states any `traversal` also settles walk membership for the relationship its `via` names. That relationship's `traversal` on `[[relationships]]` is suppressed, and the rows become the only declaration the walks read for it. The row below suppresses the blanket marker above it. An iteration that targets a milestone walks the chain. An iteration that targets a story does not, and no longer appears in that story's chain.
-
-```toml
-[[relationships]]
-name = "targets"
-inverse = "targeted-by"
-traversal = "chain"
-
-[[edges]]
-name = "iterations-target-milestones"
-from = "iteration"
-to = "milestone"
-via = "targets"
-traversal = "chain"
-```
-
-Suppression is keyed by relationship name rather than by triple, which makes it broader than the row's own selectors suggest. A row suppresses the global marker of every relationship its `via` names, and a row with `via = "*"` and any `traversal` suppresses the global marker of every declared relationship. Suppression is also blind to which role the row names: a row with `traversal = "related"` suppresses the same relationship's global `traversal = "chain"`, and a row with `traversal = "chain"` suppresses its global `traversal = "related"`. The row has assigned that relationship a role, and the two declarations do not combine.
-
-A wildcard filters but does not enumerate. `to = "*"` admits every target type, so a row with `from = "iteration"` and `to = "*"` reports `iteration` as a child type of every type. `from = "*"` names no source type, so such a row walks the chain and contributes no child types at all. The child types of a type, rendered as `child_types` when a prompt template is filled, are the `from` types of the rows that name them. Only a row that names its source types contributes a concrete child type.
-
-The wildcard is always explicit. Leaving `via` out does not mean "any relationship" — it fails config load, naming the edge, because a table whose shape carried a second meaning would be a rule nobody wrote down.
-
-The wildcard also has one spelling: the bare string. A list is read as names, so `to = ["*"]` fails config load telling you to write `to = "*"`. `["*", "story"]` fails the same way rather than meaning "any type, and also story", and `via = ["*"]` fails as `to` does.
-
-An edge naming a type absent from `[[types]]`, or a relationship absent from `[[relationships]]`, fails config load; `"*"` names neither and is never reported as an unknown identifier. Declared edges appear in `lazyspec config --json` under `edges`, and re-emit in the spelling they were written in.
-
-A row can also be appended without opening the file, with `lazyspec config add-edge <name> --from T --to T --via R`: the three position flags repeat per name, and each takes `*` on its own. Repeated flags are the one place `["*", "story"]` could be assembled, so the command refuses that mix where it is typed rather than writing a row the next load rejects. `--required` and `--traversal` are optional and absent stays absent, which is what leaves the written row silent about a role rather than claiming one.
-
-The other authoring path is the `init` wizard designing a DAG from scratch, which prompts for rows once two or more types are declared. Its `from` is one declared type and its `to` is declared types or `*`, so no row it writes can name a type the config does not declare, and it refuses the wildcard beside a name for the reason `add-edge` does. It generates each row's `name` instead of asking for one. The wizard tweaking the starter set prompts for no row and drops the rows a dropped type names. See [Configuration](#configuration).
-
-An existing row is edited with `lazyspec config set-edge <name>`, which takes the same flags and merges: a flag you leave out leaves its field as it stands, so changing one field never means re-passing the DAG. The three position flags are the exception — `--to story` is the new target set, not an addition to the old one, which is the only way to shrink a set from the CLI (the Settings panel answers the same question with a picker that adds and removes members one at a time). Dropping an optional has its own spelling, `--no-required` and `--no-traversal`, because omitting a flag already means "leave it"; the key is removed from the file rather than written back as a default. A row cannot be renamed here: its `name` is the address the command and every finding use, and the writer would rename it by dropping the block and appending a new one, losing the block's comments and its place in the table. `remove-edge <old>` followed by `add-edge <new>` spells that trade out where you can see it; renaming the row in the file itself is how you keep what the block carries. The Settings panel's `name` field will take a rename, but it saves through the same writer: the block is dropped and a new one appended, so its comments and its place in the table go with it.
-
-A row is dropped with `lazyspec config remove-edge <name>`, which refuses a name no row carries and nothing else. The last row can go — a project that declares no edges loads clean and constrains nothing — and the `[[edges]]` table goes with it rather than staying behind empty, while `config --json` still reports `edges` as `[]`. The dropped block takes its own comments with it and leaves every other block, and its decor, where it was. A removal can change what `validate` says: dropping a `required` row silences its findings, and dropping a `traversal` row shortens every chain that walked it. Neither is refused, warned about, or confirmed, which is why `--json` prints the whole row — it is the only copy left for a caller that wants to say what changed.
-
-A row is addressed by its `name` — in every finding and load error above, and by the Settings panel writing an edit back — so an empty `name`, or two rows sharing one, fails config load naming the rows at fault.
-
-`[[edges]]` is the whole declaration of the DAG. Rows describe it and drive findings; they never refuse a command.
-
-Findings stack: one document may be reported by several rows, and no row silences another's finding. A walk cannot stack, because a link either is hierarchy or is not, so traversal takes the narrower rule described above: an `[[edges]]` row that states a `traversal` suppresses the relationship's blanket marker instead of adding to it. The suppression reaches the walks and everything that reads them, `validate`'s status-hierarchy findings included: a row that suppresses a blanket marker changes both what `context` walks and which documents are reported as hanging off a rejected, superseded or unaccepted parent.
-
-### Governed files
-
-A document declares the source files it governs as globs in its frontmatter. `lazyspec why <path>` reports the documents governing a file; see [`why`](#why). `lazyspec show <id>` reports the pin a document carries; see [`show` flags](#show-flags).
-
-The same lookup is reachable from search, so the question can be asked without leaving the browser: type a source file path into `lazyspec search`, the TUI's `/`, or the web search box, and the documents whose globs match it appear beside the ordinary text matches. It is additive, not a fallback — a query that matches both a title and a path returns both — and a document matching in both ways is still one row. Path matching is exact glob matching rather than fuzzy, so such a hit outranks every text match; `search --json` reports it as `"match_field": "governs"` with the matching glob as the snippet and a `null` `score`, there being no fuzzy score to report. `why` remains the precise answer, listing every matching glob rather than one row per document.
-
-```yaml
----
-title: "Context resolution"
-type: spec
-status: accepted
-governs:
-  - src/engine/context/**
-reviewed: 662d5533f0b1c9e4a7d2
----
-```
-
-`governs` is a list of glob patterns, matched against file paths relative to the code root. Every document type accepts it, and it defaults to empty. `lazyspec govern add <id> <glob>...` writes it, compiling each glob first so a bad pattern is refused rather than stored; `govern remove` drops entries and `govern list` prints them. `update --attr governs=…` is refused and points at `govern`. `reviewed` records the commit the document was last reviewed against. `lazyspec pin <id>` writes it, stamping whatever `HEAD` resolves to in the code root at the time — the code root, not the docs root, because that is where the rename lookup below diffs from it; under a docs-repo split the two are different repositories — the same run that pins blob hashes onto the document's `@ref` directives, so one verb says "I have checked this document against the code as it stands". An existing value is replaced; there is no history. `HEAD` is read before anything is written, so a repository with no commits reports the failure and leaves the document untouched. `--json` reports the sha written as `reviewed`. Nothing judges the value. `update --status` stamps the same field from the same root, best-effort rather than fatally; see [Staleness](#staleness).
-
-Globs are compiled when the store loads. An entry that is not a valid glob is reported as a parse error naming the document and the entry, and that document then governs nothing until the entry is fixed.
-
-A glob that compiles but matches no file under the code root is a pin the code moved out from under, and `validate` reports it as a `governs-no-match` warning naming the document and the glob. The finding is per glob rather than per document, so a document with three pins of which one is dead is reported once. It carries `path`, `glob`, the repair fields `renamed` and `suggested_glob`, and `rename_lookup_error`. Its severity is fixed at warning, so it appears in `warnings` and never in `errors`. See [`validate` findings](#validate-findings).
-
-`renamed` and `suggested_glob` say where the code went. When the document carries a `reviewed` anchor, `renamed` lists the renames git detected between that commit and `HEAD` whose old path the dead glob matched, each as `{ "from", "to" }` and in git's own order; renames elsewhere in the repository are not reported, because the pin never spoke for them. `suggested_glob` is the longest common directory prefix of the `to` paths with `/**` appended: for files that all landed in one directory it is that directory, and for a module that split across two it is their common ancestor, which is wider than either half. Every pair is reported beside it so the suggestion can be narrowed by hand.
-
-Both fields are empty and `null` when the document declares no `reviewed` — there is no anchor to diff from, so nothing is asked of git — and when no rename under the dead glob is found, which is what a deletion rather than a move looks like. A `reviewed` commit git cannot read, such as one dropped by a rebase, also yields no repair data, but is not silent: `rename_lookup_error` carries git's complaint and the finding's `message` names it. Since `pin` stamps `HEAD` of the same root the diff runs in, a sha that cannot be resolved there is an anomaly worth seeing rather than the expected case, and it is the difference between "nothing moved" and "nothing was asked". `rename_lookup_error` is `null` on every other finding, including one from a document with no anchor.
-
-```sh
-lazyspec validate --json | jq '.warnings | map(select(.rule == "governs-no-match") | {glob, suggested_glob, renamed})'
-```
-
-`lazyspec fix --governs` applies those suggestions. Each rotted glob carrying a `suggested_glob` is replaced by it in the document's frontmatter; the document's other pins, its `reviewed` anchor, and every other field are left exactly as they were. `reviewed` staying put is deliberate: the repair moves the pin, not the claim that the document was checked against the code, so a staleness check still sees the drift. A finding with no suggestion — no `reviewed` anchor, a deletion rather than a move, a `reviewed` commit git cannot read — is skipped, not an error, and `governs-unowned` findings are not its business. Nothing is chosen interactively: the whole repair lands in one reviewable diff, and a suggestion that over-widened is narrowed by editing that diff.
-
-```sh
-lazyspec fix --governs --dry-run  # print each rewrite without writing
-lazyspec fix --governs            # apply them
-```
-
-`fix --governs --json` prints one object with a `governs` array, one entry per rewrite:
-
-```json
-{
-  "governs": [
-    {
-      "path": "docs/specs/SPEC-001-context.md",
-      "old_glob": "src/engine/ctx/**",
-      "new_glob": "src/engine/context/**",
-      "written": true,
-      "error": null
-    }
-  ],
-  "synced": true
-}
-```
-
-Like every mutation, the object also carries the push outcome (`"synced"`, and `"warnings"` when `false`): a rewrite that landed in a `git`-store document's shared clone is a local commit, not a push, so it reports `"synced": false` there too.
-
-`written` is `false` under `--dry-run`, and for a document whose frontmatter could not be rewritten; `error` tells the two apart, carrying the reason for a failed write and `null` otherwise. Human output says `Would repin` for a dry run, `Repinned` for a write that landed, and `error: could not repin <path>: <reason>` for one that did not.
-
-A run with nothing to repair prints an empty array and exits 0; unlike bare `fix`, no rotted pin is a healthy repo rather than a failure. A run where any rewrite failed to reach its document exits 1.
-
-The optional `[governs]` table configures the code root and the unowned-file check:
-
-```toml
-[governs]
-scope   = ["src/**"]
-unowned = "warning"
-root    = "."
-```
-
-| Key       | Value                                                                                                                                                                     |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `root`    | Code root that `governs` globs resolve against. Defaults to `.`, the project root. A documents-only repository sets it to the checkout it describes, such as `../app`      |
-| `scope`   | Globs selecting the files that must be governed by some document. Defaults to empty                                                                                       |
-| `unowned` | Severity (`warning` or `error`) reported for a file under `scope` that no document governs. Omitted, the check is off                                                      |
-
-With `unowned` set, `validate` reports every file under `scope` that no document's glob matches as a `governs-unowned` finding carrying `file`, the path relative to the code root. Its severity is the configured one, so an `unowned = "error"` project sees the findings in `errors` and `validate` exits 2; `unowned = "warning"` puts them in `warnings`. Omit `unowned` and no walk happens at all, whatever `scope` says. An empty `scope` reports nothing rather than claiming the whole root.
-
-```sh
-lazyspec validate --json | jq -r '[.errors[], .warnings[]] | map(select(.rule == "governs-unowned") | .file) | .[]'
-```
-
-The check is off by default because turning it on in an unpinned repository emits one finding per file under `scope`. Seed pins first, then narrow `scope` to the modules you want owned.
-
-Both `governs` rules read one walk, bounded to the directories the globs name literally: `scope = ["src/**"]` reads `src` and nothing else. That literal prefix is the only bound, so a glob's matches never depend on what other documents pinned. A glob whose first component is already a wildcard (`**/*.rs`) has no such bound and reads the whole code root, build and version-control directories included.
-
-### Staleness
-
-Every document carries a staleness band: `fresh`, `aging` or `stale`. The optional `[staleness]` table sets the two age thresholds the band steps at:
-
-```toml
-[staleness]
-aging   = "90d"
-stale   = "180d"
-finding = "warning"
-```
-
-| Key       | Value                                                                                          |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| `aging`   | Age at which a document stops being `fresh`. Defaults to `90d`                                 |
-| `stale`   | Age at which a document becomes `stale`. Defaults to `180d`                                    |
-| `finding` | Severity `validate` reports a stale document at: `off`, `warning` or `error`. Defaults to `warning` |
-
-`aging` and `stale` are a whole number of days, written `<n>d`. Any other spelling is a config error. An absent table applies the defaults.
-
-`finding` is on by default, so documentation rot is reported unless a project opts out. Opting out is written, not omitted: `finding = "off"` is the only spelling that turns the check off, and with it set `validate` bands no document and costs no git call for it — `show` and `why` still report a band. Only the `stale` band is a finding; `aging` is a fact `show` reports and never a warning. Any value other than the three is a config error.
-
-A type declares what drives its band with `staleness`:
-
-```toml
-[[types]]
-name = "spec"
-prefix = "SPEC"
-staleness = "drift"
-```
-
-| Value     | Band                                                                                              |
-| --------- | ------------------------------------------------------------------------------------------------- |
-| `age`     | The `[staleness]` thresholds, measured from the document's review anchor. The default              |
-| `drift`   | Any change under the document's `governs` globs since its `reviewed` commit makes it `stale`       |
-
-A `drift` type falls back to `age` for a document that declares no `governs` globs, or no `reviewed` anchor: there is nothing to diff. Any other value is a config error.
-
-The anchor is reset by the two commands that mean "I have checked this document against the code": `pin <id>`, which stamps without moving the document, and `update --status`, which stamps as part of the move. A local status transition is a human looking at the document and deciding it is still true, so it writes `reviewed` with the current `HEAD` in the same frontmatter write as the status. The TUI status picker is the same path and stamps the same way. Where `pin` refuses to run at all when `HEAD` cannot be read, `update --status` is best-effort: in a repository with no commits the transition still succeeds, silently, and `reviewed` is left exactly as it was. Only filesystem- and `github-issues`-backed documents are stamped — a `github-issues` document carries the anchor in its issue body, and the other backends' cache files have nowhere to hold one. A status arriving through `fetch` never stamps, whatever the store; see [Lifecycle](#lifecycle). `reviewed` cannot be set by hand, and `--attr reviewed=` is refused.
-
-`show` reports the band, as one line and as a `staleness` object under `--json`; see [`show` flags](#show-flags). `why --json` reports the drift half of it per record, as a `drifted` boolean; see [`why`](#why). `validate` bands every document to emit its `stale` findings, unless `finding = "off"` — and so does anything that embeds `validate`'s result, notably `status --json`. No other command computes a band, so nothing else pays for the git call one costs. The TUI computes both of its bands off the render path, in background workers: the detail badge on selection, and the `stale` findings behind its validation panel on every validation refresh, folded into the panel when they land; see [TUI](#tui).
-
-Three things bound what that costs. A document banded by `age` whose own `date` falls inside the `aging` window is skipped without asking git anything: its anchor is never older than its date, so no anchor could band it worse than `fresh`. What git does answer is memoized in `.lazyspec/cache/staleness.json`, keyed on the anchor and on `HEAD` — commit times are kept for as long as the commit exists, and every recorded diff is dropped the moment `HEAD` moves — so a second run over an unchanged tree costs one `rev-parse` however many documents are pinned. The file is a cache: `init` gitignores `.lazyspec/cache/`, and deleting it costs one cold run. And `why`, which reports the drift bit and not the band, reads no anchor commit: one git call per record rather than two.
-
-### Numbering
-
-Document numbers are assigned automatically during `create`. Three strategies are available per type:
-
-| Strategy      | Behaviour                                                                                 |
-| ------------- | ----------------------------------------------------------------------------------------- |
-| `incremental` | Next sequential integer from existing files (default)                                     |
-| `sqids`       | Short hash-like IDs derived from a timestamp, configured via `[numbering.sqids]`          |
-| `reserved`    | Reserves numbers on a git remote before creating files, preventing distributed collisions |
-
-Reserved numbering uses git custom refs (`refs/reservations/*`) to coordinate across branches. It wraps either incremental or sqids formatting with an atomic push-based lock, so two people never get the same number.
-
-```toml
-[[types]]
-name = "rfc"
-prefix = "RFC"
-numbering = "reserved"
-
-[numbering.reserved]
-remote = "origin"        # default
-format = "incremental"   # or "sqids"
-max_retries = 5          # push retry attempts before failing
-```
-
-If the remote is unreachable, `create` fails rather than silently falling back. Use `lazyspec reservations prune` to clean up refs for documents that have been created.
-
-### Templates
-
-Markdown templates live in the templates directory (`.lazyspec/templates/` by default). `init` materializes a single `template.md` carrying general authoring guidance; because the tool is config-driven, no per-type templates are shipped. `{title}`, `{author}`, `{date}`, and `{type}` are substituted when a document is created, so one template serves every type.
-
-When creating a document, lazyspec resolves the template in this order: a per-type override `{type}.md` (for example `rfc.md`, `story.md`), then the shared `template.md`, then a built-in default. Add a `{type}.md` to override a single type while leaving the rest on the shared template.
-
-</details>
-
-<details>
-<summary><h2>Development</h2></summary>
-
-### Nix (recommended)
-
-The repo includes a Nix flake that provides the full toolchain. With [direnv](https://direnv.net/) installed:
-
-```sh
-direnv allow
-```
-
-Or enter the dev shell manually:
+The Nix flake supplies the Rust toolchain. `nix flake check` runs the project checks.
 
 ```sh
 nix develop
-```
-
-This gives you cargo, clippy, rustfmt, and rust-analyzer at pinned versions.
-
-To run all checks (clippy, tests, formatting):
-
-```sh
 nix flake check
 ```
 
-### Without Nix
+The development binary runs through Cargo:
 
 ```sh
-cargo build
+cargo run -- --help
 cargo test
 ```
-
-</details>

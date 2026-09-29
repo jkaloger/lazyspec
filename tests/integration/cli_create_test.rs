@@ -487,3 +487,191 @@ fn create_json_filesystem_reports_synced_true_no_warnings() {
         "a synced create must omit warnings, got: {output}"
     );
 }
+
+// RFC-074 AC2/AC5: `create` on a directory template scaffolds every file in
+// it -- `.md` files substituted, non-`.md` copied verbatim -- and `--json`
+// reports the scaffolded parts (in template order) and sidecars.
+#[test]
+fn create_scaffolds_a_directory_template_and_reports_parts_and_sidecars() {
+    let fixture = crate::common::TestFixture::new();
+    let root = fixture.root();
+
+    let mut config = Config::default();
+    config.documents.types.push(TypeDef {
+        dir: "docs/changes".to_string(),
+        prefix: "CHANGE".to_string(),
+        subdirectory: true,
+        ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+    });
+    fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+
+    let template_dir = root.join(".lazyspec/templates/change");
+    fs::create_dir_all(&template_dir).unwrap();
+    fs::write(
+        template_dir.join("index.md"),
+        "---\ntitle: \"{title}\"\ntype: {type}\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n\nParent for {title}.\n",
+    )
+    .unwrap();
+    fs::write(template_dir.join("design.md"), "# Design for {title}\n").unwrap();
+    fs::write(template_dir.join("tasks.md"), "# Tasks for {title}\n").unwrap();
+    fs::write(template_dir.join("index.yaml"), "sidecar: \"{title}\"\n").unwrap();
+
+    let store = lazyspec::engine::store::Store::load(root, &config).unwrap();
+    let output = lazyspec::cli::create::run_json(
+        root,
+        &config,
+        &store,
+        "change",
+        "Add caching",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    let index_path = root.join(json["path"].as_str().unwrap());
+    let index_content = fs::read_to_string(&index_path).unwrap();
+    assert!(
+        index_content.contains("title: \"Add caching\""),
+        "got: {index_content}"
+    );
+
+    let design_content =
+        fs::read_to_string(index_path.parent().unwrap().join("design.md")).unwrap();
+    assert_eq!(design_content, "# Design for Add caching\n");
+
+    let sidecar_content =
+        fs::read_to_string(index_path.parent().unwrap().join("index.yaml")).unwrap();
+    assert_eq!(
+        sidecar_content, "sidecar: \"{title}\"\n",
+        "a sidecar is copied verbatim, never substituted"
+    );
+
+    let part_names: Vec<&str> = json["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(part_names, vec!["design", "tasks"]);
+    assert_eq!(
+        json["parts"][0]["path"],
+        serde_json::json!(format!(
+            "{}",
+            index_path
+                .parent()
+                .unwrap()
+                .join("design.md")
+                .strip_prefix(root)
+                .unwrap()
+                .display()
+        ))
+    );
+
+    let sidecars: Vec<&str> = json["sidecars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sidecars,
+        vec!["docs/changes/CHANGE-001-add-caching/index.yaml"]
+    );
+}
+
+// RFC-074 AC5: a document scaffolded from a directory template keeps the
+// template's declared order for its declared parts, then sorts any extra
+// (undeclared) part alphabetically after them -- regression for a bug where
+// `directory_template_part_order` returned filenames ("design.md") while the
+// loader compared against stems ("design"), so nothing ever matched and every
+// part fell back to alphabetical order regardless of the template.
+#[test]
+fn create_then_extra_part_orders_declared_parts_before_alphabetical_extras() {
+    let fixture = crate::common::TestFixture::new();
+    let root = fixture.root();
+
+    let mut config = Config::default();
+    config.documents.types.push(TypeDef {
+        dir: "docs/changes".to_string(),
+        prefix: "CHANGE".to_string(),
+        subdirectory: true,
+        ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+    });
+    fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+
+    let template_dir = root.join(".lazyspec/templates/change");
+    fs::create_dir_all(&template_dir).unwrap();
+    fs::write(
+        template_dir.join("index.md"),
+        "---\ntitle: \"{title}\"\ntype: {type}\nstatus: draft\nauthor: \"{author}\"\ndate: {date}\ntags: []\n---\n\nParent for {title}.\n",
+    )
+    .unwrap();
+    // Declared in template order design, tasks -- deliberately not alphabetical
+    // relative to the extra part added below ("appendix" sorts before both).
+    fs::write(template_dir.join("design.md"), "# Design for {title}\n").unwrap();
+    fs::write(template_dir.join("tasks.md"), "# Tasks for {title}\n").unwrap();
+
+    let store = lazyspec::engine::store::Store::load(root, &config).unwrap();
+    let created = lazyspec::engine::ops::create::run_with_body_full(
+        root,
+        &config,
+        &store,
+        "change",
+        "Add caching",
+        "agent",
+        None,
+        None,
+        &GitCli,
+        |_| {},
+    )
+    .unwrap();
+
+    // An extra, undeclared part dropped in after scaffolding -- not part of
+    // the template, so it must sort alphabetically after the declared ones.
+    let spec_dir = created.path.parent().unwrap();
+    fs::write(spec_dir.join("appendix.md"), "# Appendix\n").unwrap();
+
+    let store = lazyspec::engine::store::Store::load(root, &config).unwrap();
+    let doc = store.resolve_shorthand("CHANGE-001").unwrap();
+    let part_names: Vec<&str> = doc.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(part_names, vec!["design", "tasks", "appendix"]);
+}
+
+// RFC-074 AC1: a directory template with no `index.md` is a config error at
+// create time.
+#[test]
+fn create_errors_when_directory_template_has_no_index_md() {
+    let fixture = crate::common::TestFixture::new();
+    let root = fixture.root();
+
+    let mut config = Config::default();
+    config.documents.types.push(TypeDef {
+        dir: "docs/changes".to_string(),
+        prefix: "CHANGE".to_string(),
+        subdirectory: true,
+        ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+    });
+    fs::write(root.join(".lazyspec.toml"), config.to_toml().unwrap()).unwrap();
+
+    let template_dir = root.join(".lazyspec/templates/change");
+    fs::create_dir_all(&template_dir).unwrap();
+    fs::write(template_dir.join("design.md"), "# Design\n").unwrap();
+
+    let store = lazyspec::engine::store::Store::load(root, &config).unwrap();
+    let err = lazyspec::cli::create::run(
+        root,
+        &config,
+        &store,
+        "change",
+        "Add caching",
+        "agent",
+        &GitCli,
+        |_| {},
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("index.md"), "got: {err:#}");
+}

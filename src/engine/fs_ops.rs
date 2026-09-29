@@ -6,11 +6,23 @@ use chrono::Local;
 
 use crate::engine::config::{Config, NumberingStrategy, ReservedFormat, TypeDef};
 use crate::engine::document::{
-    apply_attrs, body_section, compose_frontmatter, split_frontmatter, DocMeta,
+    apply_attrs, body_section, compose_frontmatter, split_frontmatter, DocMeta, Part,
 };
 use crate::engine::reservation;
 use crate::engine::store::Store;
 use crate::engine::template;
+use crate::engine::template::TemplateKind;
+
+/// What [`create_document`] wrote: the parent document's path always, plus
+/// (RFC-074 AC2) any parts and sidecars scaffolded from a directory template.
+/// Both are empty for a file-templated type. Paths are relative to `root`,
+/// matching every other path a document carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreatedDocument {
+    pub path: PathBuf,
+    pub parts: Vec<Part>,
+    pub sidecars: Vec<PathBuf>,
+}
 
 /// Load the template for `doc_type` from the configured templates directory.
 /// Resolution order: a per-type `{type}.md` override, then the shared
@@ -108,7 +120,7 @@ pub fn create_document(
     subdirectory: bool,
     reservation_repo: Option<&Path>,
     on_progress: impl Fn(reservation::ReservationProgress),
-) -> Result<PathBuf> {
+) -> Result<CreatedDocument> {
     let target_dir = root.join(dir);
     fs::create_dir_all(&target_dir)?;
 
@@ -179,10 +191,30 @@ pub fn create_document(
         ("type", doc_type),
     ];
 
-    let seed_status = config
-        .type_by_name(doc_type)
+    let type_def = config.type_by_name(doc_type);
+    let seed_status = type_def
         .map(|t| t.lifecycle.seed_status())
         .unwrap_or("draft");
+
+    let templates_dir = config
+        .docs_root(root)
+        .join(&config.filesystem.templates.dir);
+    let template_kind = match type_def {
+        Some(t) => template::resolve_template_kind(&templates_dir, t)?,
+        None => TemplateKind::File,
+    };
+
+    if template_kind == TemplateKind::Directory {
+        let dir_name = filename.trim_end_matches(".md");
+        let spec_dir = target_dir.join(dir_name);
+        return scaffold_directory_template(
+            root,
+            &templates_dir.join(doc_type),
+            &spec_dir,
+            &vars,
+            seed_status,
+        );
+    }
 
     if subdirectory {
         let dir_name = filename.trim_end_matches(".md");
@@ -195,7 +227,11 @@ pub fn create_document(
         let index_path = spec_dir.join("index.md");
         fs::write(&index_path, index_content)?;
 
-        return Ok(index_path);
+        return Ok(CreatedDocument {
+            path: index_path,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
+        });
     }
 
     let target_path = target_dir.join(&filename);
@@ -204,7 +240,91 @@ pub fn create_document(
     let content = seed_lifecycle_status(&content, seed_status)?;
     fs::write(&target_path, content)?;
 
-    Ok(target_path)
+    Ok(CreatedDocument {
+        path: target_path,
+        parts: Vec::new(),
+        sidecars: Vec::new(),
+    })
+}
+
+/// Scaffold every file in a directory template (RFC-074 AC2) into `spec_dir`:
+/// `.md` files with `{title}`/`{author}`/`{date}`/`{type}` substituted (and,
+/// for `index.md` alone, its `status:` seeded to the type's first lifecycle
+/// state), everything else copied verbatim. Every non-`index.md` file becomes
+/// a part (`.md`) or a sidecar (anything else) -- the same distinction the
+/// loader draws by frontmatter presence, but decided here by position in the
+/// template rather than by re-reading what was just written, since a
+/// directory template's non-index files are never expected to carry their
+/// own frontmatter. Part and sidecar paths are relative to `root`, as every
+/// other document path is.
+fn scaffold_directory_template(
+    root: &Path,
+    template_dir: &Path,
+    spec_dir: &Path,
+    vars: &[(&str, &str)],
+    seed_status: &str,
+) -> Result<CreatedDocument> {
+    fs::create_dir_all(spec_dir)?;
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(template_dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    entries.sort();
+
+    let mut index_path: Option<PathBuf> = None;
+    let mut parts = Vec::new();
+    let mut sidecars = Vec::new();
+
+    for entry in entries {
+        let file_name = entry
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let dest = spec_dir.join(&file_name);
+        let relative = dest.strip_prefix(root).unwrap_or(&dest).to_path_buf();
+
+        if entry.extension().and_then(|e| e.to_str()) == Some("md") {
+            let raw = fs::read_to_string(&entry)
+                .with_context(|| format!("reading template part {}", entry.display()))?;
+            let rendered = template::render_template(&raw, vars);
+            if file_name == "index.md" {
+                let rendered = seed_lifecycle_status(&rendered, seed_status)?;
+                fs::write(&dest, rendered)?;
+                index_path = Some(dest);
+            } else {
+                fs::write(&dest, rendered)?;
+                let stem = entry
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&file_name)
+                    .to_string();
+                parts.push(Part {
+                    name: stem,
+                    path: relative,
+                });
+            }
+        } else {
+            fs::copy(&entry, &dest)
+                .with_context(|| format!("copying sidecar {}", entry.display()))?;
+            sidecars.push(relative);
+        }
+    }
+
+    let index_path = index_path.ok_or_else(|| {
+        anyhow!(
+            "template directory {} has no index.md",
+            template_dir.display()
+        )
+    })?;
+
+    Ok(CreatedDocument {
+        path: index_path,
+        parts,
+        sidecars,
+    })
 }
 
 /// Author a single child document as a `.md` directly inside `target_dir`.
@@ -284,6 +404,88 @@ pub fn delete_document(root: &Path, store: &Store, doc_id: &str) -> Result<()> {
     }
     fs::remove_file(&full_path)?;
     Ok(())
+}
+
+/// Write a part's body (STORY-291 AC7): `update <id> --part <name>` targets the
+/// existing part's path when the document already has one by that name, or a
+/// new `{name}.md` beside its `index.md` otherwise -- creating the part. A
+/// part carries no frontmatter, so the body is written byte for byte (with a
+/// single trailing newline), unlike [`update_document`]'s reserved `body` key,
+/// which preserves the parent's frontmatter around it.
+///
+/// Refuses names that would let `--part` escape being "a part": `index` (the
+/// parent itself), any name containing `/` or `..` (path traversal out of the
+/// document's folder), an existing child document's stem (a real document
+/// with its own frontmatter), and any document whose own path is not an
+/// `index.md` (a flat document has no folder to hold a part in; writing
+/// `--part` there would silently overwrite an unrelated file beside it).
+pub fn write_part(
+    root: &Path,
+    store: &Store,
+    doc_id: &str,
+    part_name: &str,
+    body: &str,
+) -> Result<PathBuf> {
+    let doc = store
+        .get(Path::new(doc_id))
+        .or_else(|| store.resolve_shorthand(doc_id).ok())
+        .ok_or_else(|| anyhow!("could not resolve document: {}", doc_id))?;
+
+    if doc.path.file_name().and_then(|f| f.to_str()) != Some("index.md") {
+        return Err(anyhow!(
+            "'{}' is not a bundle (its path is not an index.md): --part only targets a document scaffolded from a directory template",
+            doc_id
+        ));
+    }
+
+    if part_name.is_empty() || part_name.contains('/') || part_name.contains("..") {
+        return Err(anyhow!(
+            "invalid part name '{}': must not contain '/' or '..'",
+            part_name
+        ));
+    }
+
+    if part_name == "index" {
+        return Err(anyhow!(
+            "'index' is the document itself; use --body to update it, not --part"
+        ));
+    }
+
+    let child_stems: Vec<String> = store
+        .children_of(&doc.path)
+        .iter()
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    if child_stems.iter().any(|stem| stem == part_name) {
+        return Err(anyhow!(
+            "'{}' is a child document of '{}', not a part; use `update` on it directly",
+            part_name,
+            doc_id
+        ));
+    }
+
+    let target = match doc.parts.iter().find(|p| p.name == part_name) {
+        Some(existing) => root.join(&existing.path),
+        None => {
+            let doc_dir = root
+                .join(&doc.path)
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| {
+                    anyhow!("document has no parent directory: {}", doc.path.display())
+                })?;
+            doc_dir.join(format!("{part_name}.md"))
+        }
+    };
+
+    let trimmed = body.trim_end_matches('\n');
+    let content = if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    };
+    fs::write(&target, content)?;
+    Ok(target)
 }
 
 /// Update frontmatter fields of a filesystem document.
@@ -501,7 +703,8 @@ mod tests {
             None,
             noop_progress,
         )
-        .unwrap();
+        .unwrap()
+        .path;
 
         assert_eq!(status_line(&path), "status: reported");
     }
@@ -524,7 +727,8 @@ mod tests {
             None,
             noop_progress,
         )
-        .unwrap();
+        .unwrap()
+        .path;
 
         assert_eq!(status_line(&path), "status: reported");
     }
@@ -547,7 +751,8 @@ mod tests {
             None,
             noop_progress,
         )
-        .unwrap();
+        .unwrap()
+        .path;
 
         assert_eq!(status_line(&path), "status: draft");
     }
@@ -773,5 +978,48 @@ mod tests {
         let content = update_reviewed(tmp.path(), "", "abc123");
 
         assert!(content.contains("reviewed: abc123"), "got: {content}");
+    }
+
+    // RFC-074 AC7: `write_part` overwrites an existing part's file byte for
+    // byte (no frontmatter to preserve around it).
+    #[test]
+    fn write_part_overwrites_an_existing_part() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs/RFC-001-change");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nparent\n",
+        )
+        .unwrap();
+        fs::write(dir.join("design.md"), "old design\n").unwrap();
+        let config = Config::default();
+        let store = Store::load(tmp.path(), &config).unwrap();
+
+        let path = write_part(tmp.path(), &store, "RFC-001", "design", "new design").unwrap();
+
+        assert_eq!(path, dir.join("design.md"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new design\n");
+    }
+
+    // RFC-074 AC7: `--part` with no existing part of that name creates one
+    // beside the parent's `index.md`.
+    #[test]
+    fn write_part_creates_an_absent_part_beside_index() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs/RFC-001-change");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nparent\n",
+        )
+        .unwrap();
+        let config = Config::default();
+        let store = Store::load(tmp.path(), &config).unwrap();
+
+        let path = write_part(tmp.path(), &store, "RFC-001", "tasks", "new tasks").unwrap();
+
+        assert_eq!(path, dir.join("tasks.md"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new tasks\n");
     }
 }

@@ -967,6 +967,8 @@ pub(crate) fn fallback_meta(issue: &GhIssue, ctx: &IssueContext) -> DocMeta {
         assignee: None,
         attributes: Default::default(),
         id: String::new(),
+        parts: Vec::new(),
+        sidecars: Vec::new(),
     }
 }
 
@@ -3498,6 +3500,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: id.to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

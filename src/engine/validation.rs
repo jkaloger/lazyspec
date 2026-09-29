@@ -3,6 +3,7 @@ use crate::engine::config::{
 };
 use crate::engine::document::{AttrValue, DocMeta, DocType, Status};
 use crate::engine::git_ref::{GitCli, GitRefOps};
+use crate::engine::hooks::{self, HookEnv};
 use crate::engine::staleness::{cannot_be_stale, compute, Band, Staleness, StalenessTerms};
 use crate::engine::staleness_cache::StalenessCache;
 use globset::{Glob, GlobMatcher};
@@ -14,7 +15,7 @@ use std::sync::LazyLock;
 /// Where a file a rotted `governs` glob used to match went, as
 /// `validate --json` publishes it (RFC-068): named fields, not a positional
 /// pair, so a consumer reads `from`/`to` rather than array indices.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Rename {
     pub from: String,
     pub to: String,
@@ -29,7 +30,7 @@ impl From<(String, String)> for Rename {
 /// The derived `Serialize` is the variant's own fields and nothing else; the
 /// finding an agent consumes is [`ValidationIssue::to_json`], which adds the
 /// [`rule`](ValidationIssue::rule) slug and the rendered `message`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(strum::EnumCount))]
 #[serde(untagged)]
 pub enum ValidationIssue {
@@ -159,6 +160,33 @@ pub enum ValidationIssue {
         path: PathBuf,
         staleness: Staleness,
     },
+    /// A file a document's type directory template declares (other than
+    /// `index.md`) that the document's own folder lacks (RFC-074 AC1): a
+    /// part or a sidecar the bundle is missing. `part` is the declared file's
+    /// name, e.g. `"design.md"` or `"notes.yaml"`. Always a warning (AC3);
+    /// there is no per-part severity to read instead. Fires for a document
+    /// whose type's template only later became a directory just as it does
+    /// for one scaffolded against today's template -- there is no migration
+    /// step and nothing to ignore (AC4).
+    MissingPart {
+        path: PathBuf,
+        part: String,
+    },
+    /// A finding a `validate` hook reported (RFC-075). `hook` names the hook that
+    /// raised it; `id`, `part` and `line` locate it when the hook could. Severity
+    /// is the hook's own, carried beside the issue like every other rule's.
+    Hook {
+        hook: String,
+        id: Option<String>,
+        part: Option<String>,
+        line: Option<u32>,
+        message: String,
+    },
+    /// `validate` hooks are configured but not trusted, so none ran (RFC-075
+    /// Trust). One warning per validation, naming the hooks it skipped.
+    HooksUntrusted {
+        hooks: Vec<String>,
+    },
 }
 
 impl ValidationIssue {
@@ -194,6 +222,9 @@ impl ValidationIssue {
             ValidationIssue::GovernsNoMatch { .. } => "governs-no-match",
             ValidationIssue::GovernsUnowned { .. } => "governs-unowned",
             ValidationIssue::Stale { .. } => "stale",
+            ValidationIssue::MissingPart { .. } => "missing-part",
+            ValidationIssue::Hook { .. } => "hook",
+            ValidationIssue::HooksUntrusted { .. } => "hooks-untrusted",
         }
     }
 
@@ -208,7 +239,7 @@ impl ValidationIssue {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ValidationResult {
     pub errors: Vec<ValidationIssue>,
     pub warnings: Vec<ValidationIssue>,
@@ -497,6 +528,41 @@ impl std::fmt::Display for ValidationIssue {
             }
             ValidationIssue::Stale { path, staleness } => {
                 write!(f, "{} is {}", path.display(), staleness)
+            }
+            ValidationIssue::MissingPart { path, part } => {
+                write!(
+                    f,
+                    "{} is missing declared part \"{}\"",
+                    path.display(),
+                    part
+                )
+            }
+            ValidationIssue::Hook {
+                hook,
+                id,
+                part,
+                line,
+                message,
+            } => {
+                write!(f, "hook {hook}: ")?;
+                if let Some(id) = id {
+                    write!(f, "{id}")?;
+                    if let Some(part) = part {
+                        write!(f, " {part}")?;
+                    }
+                    if let Some(line) = line {
+                        write!(f, ":{line}")?;
+                    }
+                    write!(f, ": ")?;
+                }
+                write!(f, "{message}")
+            }
+            ValidationIssue::HooksUntrusted { hooks } => {
+                write!(
+                    f,
+                    "hooks skipped until trusted ({}); run `lazyspec hook trust` to trust them",
+                    hooks.join(", ")
+                )
             }
         }
     }
@@ -1429,6 +1495,110 @@ fn declared_lifecycle_cannot_be_the_boards(
         .is_some_and(|board| board.states != type_def.lifecycle.states)
 }
 
+/// `missing-part` (RFC-074 AC1): every document of a type whose template is a
+/// directory, checked against every file that directory declares other than
+/// `index.md`. A declared part or sidecar absent from the document's own
+/// folder is a warning; nothing about the check depends on when the document
+/// was created (AC4) or on the document's own frontmatter -- `parts` and
+/// `sidecars` are exactly what the loader already scanned its folder into.
+///
+/// A misconfigured directory template (no `index.md`, `subdirectory = false`)
+/// is [`resolve_template_kind`]'s error to raise, on `create` and `config
+/// --json`; this rule reads it as "not a directory template" and finds
+/// nothing for that type, rather than surfacing the config error a second
+/// time here.
+pub struct MissingPartRule;
+
+impl Checker for MissingPartRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let mut issues = Vec::new();
+        let templates_dir = config
+            .docs_root(store.root())
+            .join(&config.filesystem.templates.dir);
+
+        for type_def in &config.documents.types {
+            let Ok(super::template::TemplateKind::Directory) =
+                super::template::resolve_template_kind(&templates_dir, type_def)
+            else {
+                continue;
+            };
+
+            let declared =
+                super::template::directory_template_declared_files(&templates_dir, &type_def.name);
+            if declared.is_empty() {
+                continue;
+            }
+
+            let mut docs = store.list(&super::store::Filter {
+                doc_type: Some(DocType::new(&type_def.name)),
+                ..Default::default()
+            });
+            docs.sort_by(|a, b| a.path.cmp(&b.path));
+
+            for doc in docs {
+                if doc.validate_ignore {
+                    continue;
+                }
+                // A declared part that carries frontmatter loads as its own
+                // child document (AC3) rather than a part of the one whose
+                // folder it sits in. That child is a distinct `DocMeta`, of
+                // the same directory-templated type when its own `type:`
+                // says so, so it would otherwise be checked here too and
+                // raise a `missing-part` warning for every file in the very
+                // folder it already occupies. It is nested under a parent
+                // (`store.parent_of` finds one), so skip it here: its
+                // presence is counted via the parent's own check below. A
+                // flat document with no parent -- predating the type's
+                // directory template (AC4) -- is not nested under anyone and
+                // still gets checked in full.
+                if store.parent_of(&doc.path).is_some() {
+                    continue;
+                }
+
+                // Presence is decided by the file names actually in the
+                // folder: parts and sidecars the loader already classified,
+                // plus any child document's file name -- covering a declared
+                // part that accidentally grew frontmatter and loaded as a
+                // child instead.
+                let child_file_names: std::collections::HashSet<&str> = store
+                    .children_of(&doc.path)
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|f| f.to_str()))
+                    .collect();
+
+                for file_name in &declared {
+                    let present = match file_name.strip_suffix(".md") {
+                        Some(stem) => {
+                            doc.parts.iter().any(|p| p.name == stem)
+                                || child_file_names.contains(file_name.as_str())
+                        }
+                        None => {
+                            doc.sidecars.iter().any(|s| {
+                                s.file_name().and_then(|f| f.to_str()) == Some(file_name.as_str())
+                            }) || child_file_names.contains(file_name.as_str())
+                        }
+                    };
+                    if !present {
+                        issues.push((
+                            Severity::Warning,
+                            ValidationIssue::MissingPart {
+                                path: doc.path.clone(),
+                                part: file_name.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+}
+
 pub struct UnknownRelationshipRule;
 
 impl Checker for UnknownRelationshipRule {
@@ -1649,6 +1819,28 @@ fn check_project_field(
     }
 }
 
+/// `validate` hooks (RFC-075): findings from the project's own commands.
+pub struct HookRule {
+    env: HookEnv,
+}
+
+impl HookRule {
+    pub fn new(env: HookEnv) -> Self {
+        Self { env }
+    }
+}
+
+impl Checker for HookRule {
+    fn check(
+        &self,
+        store: &super::store::Store,
+        config: &Config,
+    ) -> Vec<(Severity, ValidationIssue)> {
+        let docs: Vec<&DocMeta> = store.docs.values().collect();
+        hooks::validate_issues(&self.env, store.root(), &docs, config)
+    }
+}
+
 /// Every rule but [`StaleRule`], the one that shells out to git per document.
 /// What a caller on a render path runs (STORY-276 AC2): it also reads no memo
 /// file, since only that rule has one.
@@ -1665,30 +1857,58 @@ fn checkers_without_stale() -> Vec<Box<dyn Checker>> {
         Box::new(AttributeSchemaChecker),
         Box::new(GovernsNoMatchRule::new(Box::new(GitCli))),
         Box::new(GovernsUnownedRule),
+        Box::new(MissingPartRule),
     ]
 }
 
 /// `root` is the docs root, which only [`StaleRule`] needs: its `(reviewed,
 /// HEAD)` memo is filed under it.
-fn default_checkers(root: &Path) -> Vec<Box<dyn Checker>> {
+fn default_checkers(root: &Path, hooks: &HookEnv) -> Vec<Box<dyn Checker>> {
     let mut checkers = checkers_without_stale();
     checkers.push(Box::new(StaleRule::new(
         Box::new(GitCli),
         StalenessCache::load(root),
     )));
+    checkers.push(Box::new(HookRule::new(hooks.clone())));
     checkers
 }
 
-pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
-    run_checkers(default_checkers(store.root()), store, config)
+/// `hooks` is supplied by the caller so `--no-hooks` and a test's fake runner
+/// reach the `validate` hooks.
+pub fn validate_full(
+    store: &super::store::Store,
+    config: &Config,
+    hooks: &HookEnv,
+) -> ValidationResult {
+    run_checkers(default_checkers(store.root(), hooks), store, config)
 }
 
 /// [`validate_full`] without [`StaleRule`], for a caller that cannot afford a
 /// git subprocess per document where it runs -- the TUI's validation refresh,
-/// which answers `stale` from a worker instead (STORY-276 AC2). A skipped rule,
-/// not a suppressed one: nothing is banded and no memo is read.
-pub fn validate_without_stale(store: &super::store::Store, config: &Config) -> ValidationResult {
-    run_checkers(checkers_without_stale(), store, config)
+/// which answers `stale` and the `validate` hooks from a worker instead
+/// (STORY-276 AC2, STORY-295 AC6). A skipped rule, not a suppressed one: nothing
+/// is banded, no memo is read and no hook is touched: `hook_findings` is what the
+/// last full pass found.
+pub fn validate_without_stale(
+    store: &super::store::Store,
+    config: &Config,
+    hook_findings: &ValidationResult,
+) -> ValidationResult {
+    let mut result = run_checkers(checkers_without_stale(), store, config);
+    result.merge(hook_findings.clone());
+    result
+}
+
+/// The `validate` hooks' findings over `docs`: one full pass that spawns each
+/// trusted hook. What a worker or `hook run validate` calls, and what feeds
+/// [`validate_without_stale`] afterwards.
+pub fn hook_findings(
+    env: &HookEnv,
+    root: &Path,
+    docs: &[&DocMeta],
+    config: &Config,
+) -> ValidationResult {
+    hooks::validate_issues(env, root, docs, config).into()
 }
 
 fn run_checkers(
@@ -1742,6 +1962,8 @@ mod attr_schema_tests {
             assignee: None,
             id: "STORY-001".to_string(),
             attributes,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -1784,7 +2006,7 @@ mod attr_schema_tests {
             "estimate".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("notanumber".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .errors
             .iter()
@@ -1805,7 +2027,7 @@ mod attr_schema_tests {
             "priority".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("urgent".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .errors
             .iter()
@@ -1816,7 +2038,11 @@ mod attr_schema_tests {
     #[test]
     fn missing_required_is_error() {
         let config = config_with_story_attrs(vec![attr("owner", AttrKind::Str, true, &[])]);
-        let result = validate_full(&store_with(story_doc(BTreeMap::new())), &config);
+        let result = validate_full(
+            &store_with(story_doc(BTreeMap::new())),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(result
             .errors
             .iter()
@@ -1832,7 +2058,7 @@ mod attr_schema_tests {
             "mystery".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("x".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .warnings
             .iter()
@@ -1907,7 +2133,11 @@ mod attr_schema_tests {
             "PROJECT-1.Status".to_string(),
             AttrValue::Str("Frozen".to_string()),
         );
-        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        let result = validate_full(
+            &store_with_root(story_doc(attrs), root),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(
             result
                 .errors
@@ -1936,7 +2166,11 @@ mod attr_schema_tests {
             "PROJECT-1.Status".to_string(),
             AttrValue::Str("In Progress".to_string()),
         );
-        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        let result = validate_full(
+            &store_with_root(story_doc(attrs), root),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(!result
             .errors
             .iter()
@@ -1953,7 +2187,7 @@ mod attr_schema_tests {
         let config = config_with_story_attrs(vec![attr("estimate", AttrKind::Int, true, &[])]);
         let mut attrs = BTreeMap::new();
         attrs.insert("estimate".to_string(), AttrValue::Int(5));
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(!result.errors.iter().any(|e| matches!(
             e,
             ValidationIssue::AttributeKindMismatch { .. }
@@ -1996,6 +2230,8 @@ mod unknown_relationship_tests {
             assignee: None,
             id: "MILESTONE-001".to_string(),
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -2309,6 +2545,8 @@ mod edge_tests {
             assignee: None,
             id: id.to_string(),
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -2422,6 +2660,7 @@ mod edge_tests {
             let result = validate_full(
                 &store,
                 &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+                &HookEnv::disabled(),
             );
 
             assert!(
@@ -2447,6 +2686,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         let found = unsatisfied_edges(&result);
@@ -2486,6 +2726,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -2513,6 +2754,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -2536,6 +2778,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Warning))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(unsatisfied_edges(&result).len(), 1);
@@ -2560,7 +2803,11 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_implement_work(None)));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(None)),
+            &HookEnv::disabled(),
+        );
 
         assert!(
             unsatisfied_edges(&result).is_empty(),
@@ -2584,6 +2831,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert!(
@@ -2624,7 +2872,11 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_need_some_relation()),
+            &HookEnv::disabled(),
+        );
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -2659,7 +2911,11 @@ mod edge_tests {
                 ),
             ]);
 
-            let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+            let result = validate_full(
+                &store,
+                &config_with_edge(iterations_need_some_relation()),
+                &HookEnv::disabled(),
+            );
 
             assert!(
                 unsatisfied_edges(&result).is_empty(),
@@ -2681,7 +2937,11 @@ mod edge_tests {
             vec![rel("related-to", "STORY-404")],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_need_some_relation()),
+            &HookEnv::disabled(),
+        );
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -2724,6 +2984,7 @@ mod edge_tests {
             let result = validate_full(
                 &store,
                 &config_with_edge(iterations_reach_stories_either_way()),
+                &HookEnv::disabled(),
             );
 
             assert!(
@@ -2751,6 +3012,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_reach_stories_either_way()),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -2772,7 +3034,7 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(edge));
+        let result = validate_full(&store, &config_with_edge(edge), &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(found.len(), 1, "got: {found:?}");
@@ -2912,7 +3174,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(
@@ -2962,7 +3224,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(
@@ -3000,7 +3262,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -3032,7 +3294,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -3118,7 +3380,7 @@ mod hierarchy_from_edges_tests {
     fn a_chain_edge_row_alone_reports_a_rejected_parent() {
         let (_tmp, store) = story_linked_to_rejected_rfc("implements");
 
-        let result = validate_full(&store, &stories_implement_rfcs());
+        let result = validate_full(&store, &stories_implement_rfcs(), &HookEnv::disabled());
 
         assert!(
             result
@@ -3135,7 +3397,7 @@ mod hierarchy_from_edges_tests {
     fn a_relation_no_chain_row_covers_is_not_a_parent_link() {
         let (_tmp, store) = story_linked_to_rejected_rfc("blocks");
 
-        let result = validate_full(&store, &stories_implement_rfcs());
+        let result = validate_full(&store, &stories_implement_rfcs(), &HookEnv::disabled());
 
         assert!(
             !result
@@ -3448,7 +3710,7 @@ mod governs_no_match_tests {
     fn the_finding_reaches_validate_full_as_a_warning() {
         let (_tmp, store) = store_pinning(&["src/nope/**"]);
 
-        let result = validate_full(&store, &Config::default());
+        let result = validate_full(&store, &Config::default(), &HookEnv::disabled());
 
         assert!(
             result
@@ -3564,7 +3826,7 @@ mod governs_unowned_tests {
         let config = governs_config(&["src/**"], Some(Severity::Error));
         let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert_eq!(
             result
@@ -3591,7 +3853,7 @@ mod governs_unowned_tests {
         let config = governs_config(&["src/**"], Some(Severity::Warning));
         let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert!(
             result
@@ -3625,6 +3887,184 @@ mod governs_unowned_tests {
 
         assert_eq!(reported.len(), 1, "got {reported:?}");
         assert!(reported[0].contains("src/cli/show.rs"), "got {reported:?}");
+    }
+}
+
+#[cfg(test)]
+mod missing_part_tests {
+    use super::*;
+    use crate::engine::config::{StoreBackend, TypeDef};
+    use crate::engine::store::test_support::store_from_with_config;
+
+    /// A `change` type whose template is a directory declaring `design.md`
+    /// (a part) and `notes.yaml` (a sidecar) beside `index.md`.
+    fn config_with_directory_template_type() -> Config {
+        let mut config = Config::default();
+        config.documents.types.push(TypeDef {
+            subdirectory: true,
+            ..TypeDef::test_fixture("change", StoreBackend::Filesystem)
+        });
+        config
+    }
+
+    fn change_bundle(title: &str) -> String {
+        format!(
+            "---\ntitle: \"{title}\"\ntype: change\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\n{title} body\n"
+        )
+    }
+
+    fn missing_part_findings(
+        store: &super::super::store::Store,
+        config: &Config,
+    ) -> Vec<(String, String)> {
+        MissingPartRule
+            .check(store, config)
+            .into_iter()
+            .map(|(severity, issue)| {
+                assert_eq!(severity, Severity::Warning, "got {issue:?}");
+                match issue {
+                    ValidationIssue::MissingPart { path, part } => {
+                        (path.display().to_string(), part)
+                    }
+                    other => panic!("unexpected finding {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    // AC1: a declared part (`design.md`) or sidecar (`notes.yaml`) absent
+    // from the document's own folder is a warning naming the file.
+    #[test]
+    fn a_declared_part_or_sidecar_missing_from_the_folder_is_reported() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-001-alpha/index.md",
+                    &change_bundle("Alpha"),
+                ),
+                ("docs/change/CHANGE-001-alpha/design.md", "design body"),
+                // notes.yaml is declared but absent.
+            ],
+            &config,
+        );
+
+        let findings = missing_part_findings(&store, &config);
+
+        assert_eq!(
+            findings,
+            vec![(
+                "docs/change/CHANGE-001-alpha/index.md".to_string(),
+                "notes.yaml".to_string()
+            )]
+        );
+    }
+
+    // AC3: a bundle carrying every declared part and sidecar, plus an extra
+    // undeclared part, produces no finding at all.
+    #[test]
+    fn a_complete_bundle_with_an_extra_part_produces_no_finding() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-002-beta/index.md",
+                    &change_bundle("Beta"),
+                ),
+                ("docs/change/CHANGE-002-beta/design.md", "design body"),
+                ("docs/change/CHANGE-002-beta/notes.yaml", "note: 2"),
+                ("docs/change/CHANGE-002-beta/extra.md", "extra body"),
+            ],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
+    }
+
+    // STORY-292 AC1/AC3 regression: a declared part that carries frontmatter
+    // loads as a child document instead of a part (AC3). The parent must
+    // still see it as present (not a false `missing-part`), and the child
+    // itself -- of the same directory-templated type -- must not be checked
+    // a second time and raise a warning for every file in the folder it
+    // already sits in.
+    #[test]
+    fn a_declared_part_that_grew_frontmatter_counts_as_present_and_is_not_checked_itself() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                (
+                    "docs/change/CHANGE-004-gamma/index.md",
+                    &change_bundle("Gamma"),
+                ),
+                (
+                    "docs/change/CHANGE-004-gamma/design.md",
+                    &change_bundle("Design"),
+                ),
+                ("docs/change/CHANGE-004-gamma/notes.yaml", "note: 4"),
+            ],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
+    }
+
+    // AC4: a document predating the type's directory template -- a flat
+    // `.md` file with no folder at all -- is checked against every declared
+    // file just the same, with no migration and nothing to ignore.
+    #[test]
+    fn a_flat_document_predating_the_directory_template_is_reported_for_every_declared_file() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[
+                (".lazyspec/templates/change/index.md", "index"),
+                (".lazyspec/templates/change/design.md", "design"),
+                (".lazyspec/templates/change/notes.yaml", "note: 1"),
+                ("docs/change/CHANGE-003-old.md", &change_bundle("Old")),
+            ],
+            &config,
+        );
+
+        let mut findings = missing_part_findings(&store, &config);
+        findings.sort();
+
+        assert_eq!(
+            findings,
+            vec![
+                (
+                    "docs/change/CHANGE-003-old.md".to_string(),
+                    "design.md".to_string()
+                ),
+                (
+                    "docs/change/CHANGE-003-old.md".to_string(),
+                    "notes.yaml".to_string()
+                ),
+            ]
+        );
+    }
+
+    // AC3: a type with no directory template (a flat-file template) never
+    // produces a finding, however incomplete its documents look.
+    #[test]
+    fn a_flat_file_template_type_never_produces_a_finding() {
+        let config = config_with_directory_template_type();
+        let (_tmp, store) = store_from_with_config(
+            &[(
+                "docs/rfcs/RFC-001-plain.md",
+                "---\ntitle: \"Plain\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-04-01\ntags: []\nrelated: []\n---\n\nbody\n",
+            )],
+            &config,
+        );
+
+        assert!(missing_part_findings(&store, &config).is_empty());
     }
 }
 
@@ -3852,7 +4292,7 @@ mod stale_tests {
         let config = config_with(StalenessFinding::Warning);
         let (_tmp, store) = store_with_one_of_each_band(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert!(
             result.warnings.iter().any(|i| i.rule() == "stale"),
@@ -3991,6 +4431,20 @@ mod finding_shape_tests {
                         deletions: 85,
                     },
                 },
+            },
+            ValidationIssue::MissingPart {
+                path: path(),
+                part: "design.md".to_string(),
+            },
+            ValidationIssue::Hook {
+                hook: "required-sections".to_string(),
+                id: Some("STORY-001".to_string()),
+                part: None,
+                line: Some(14),
+                message: "missing ## Goals".to_string(),
+            },
+            ValidationIssue::HooksUntrusted {
+                hooks: vec!["required-sections".to_string()],
             },
         ]
     }

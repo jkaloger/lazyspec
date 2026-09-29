@@ -281,6 +281,8 @@ pub(crate) fn task_to_doc(task: &ClickupTask, type_def: &TypeDef, id: &str) -> (
         assignee: task.assignees.first().map(|a| a.username.clone()),
         id: id.to_string(),
         attributes,
+        parts: Vec::new(),
+        sidecars: Vec::new(),
     };
 
     (meta, body)

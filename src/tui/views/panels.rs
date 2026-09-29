@@ -20,13 +20,13 @@ use crate::engine::config::{
 use crate::engine::document::{AttrValue, DocMeta, Status};
 use crate::engine::git_status::GitFileStatus;
 use crate::tui::state::{
-    anchor_to_flat, App, ConfigDep, DocListNode, EdgeKey, EditableField, FieldEditor, FieldPath,
-    FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
+    anchor_to_flat, App, ConfigDep, DocListNode, DocRowKind, EdgeKey, EditableField, FieldEditor,
+    FieldPath, FilterField, GraphNode, PreviewTab, RelKey, TypeKey,
 };
 
 use crate::engine::staleness::Staleness;
 
-use super::colors::{band_color, status_color, tag_color, StatusPalette};
+use super::colors::{band_color, bundle_part_row_style, status_color, tag_color, StatusPalette};
 use super::layout::{calculate_image_height, wrapped_line_count, wrapped_lines_total};
 
 /// Rounded panel border shared by the doc list, graph, and sidebars. `focused`
@@ -789,6 +789,26 @@ fn doc_row_cells_expanded(
     cells
 }
 
+/// The id-and-title-onward cells for a bundle part row (STORY-294 AC2):
+/// `§ <name>` (or `§ <name> (missing)` for a ghost row), dimmed, with the id
+/// cell and every configured column cell left blank -- a part carries none
+/// of those (RFC-074: it shares its parent's id, status, tags, etc.
+/// entirely). Mirrors `doc_row_cells`'s id-then-title-then-columns shape so a
+/// caller can splice it straight after the gutter/tree cells.
+fn bundle_part_row_cells(name: &str, missing: bool, columns: &[String]) -> Vec<Cell<'static>> {
+    let text = if missing {
+        format!("§ {name} (missing)")
+    } else {
+        format!("§ {name}")
+    };
+    let mut cells = vec![
+        Cell::from(""),
+        Cell::new(Span::styled(text, bundle_part_row_style())),
+    ];
+    cells.extend(columns.iter().map(|_| Cell::from("")));
+    cells
+}
+
 fn doc_row_for_node(
     app: &App,
     node: &DocListNode,
@@ -822,6 +842,21 @@ fn doc_row_for_node(
     ));
 
     let gutter_cell = git_gutter_cell(app, &node.path);
+
+    // A part row does not go through the doc-cell machinery below, which
+    // reads off `app.store.get(&node.path)` and would find nothing for a
+    // part (or, worse, something unrelated for a missing row's synthetic
+    // path).
+    if let DocRowKind::Part { name, .. } | DocRowKind::MissingPart { name, .. } = &node.kind {
+        let missing = matches!(node.kind, DocRowKind::MissingPart { .. });
+        let mut cells = vec![gutter_cell, tree_cell];
+        cells.extend(bundle_part_row_cells(
+            name,
+            missing,
+            &config.ui.table.columns,
+        ));
+        return Row::new(cells).style(bundle_part_row_style());
+    }
 
     let doc = app.store.get(&node.path);
     let tags = doc.map(|doc| doc.tags.clone()).unwrap_or_default();
@@ -1064,8 +1099,11 @@ pub fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, colors: &StatusPal
         .title(preview_title);
 
     let doc = app.selected_doc_meta().cloned();
+    let node = app.doc_tree.get(app.selected_doc).cloned();
     match app.preview_tab {
-        PreviewTab::Preview => render_document_preview(f, app, area, block, doc.as_ref(), colors),
+        PreviewTab::Preview => {
+            render_document_preview(f, app, area, block, doc.as_ref(), node.as_ref(), colors)
+        }
         PreviewTab::Relations => {
             render_relationship_sections(f, app, area, block, doc.as_ref(), colors)
         }
@@ -1190,12 +1228,43 @@ pub(super) fn build_preview_header_lines(
     lines
 }
 
+/// The body, its cache key, and whether it is still expanding, for the
+/// currently previewed row (STORY-294 AC3): the parent's concatenated body
+/// for a `Doc` row (or when there is no row, e.g. the Filters view's flat
+/// list) cached under the parent's own path, a single part's own expanded
+/// body for a `Part` row cached under the part's own path
+/// (`App::request_expansion` dispatches and caches under this same key), and
+/// a fixed message for a `MissingPart` ghost row -- there is nothing on disk
+/// to read or expand (AC5), so it is never "in flight".
+fn resolve_preview_body(
+    app: &App,
+    doc: &DocMeta,
+    node: Option<&DocListNode>,
+) -> (String, PathBuf, bool) {
+    let body_key = node.map_or_else(|| doc.path.clone(), |n| n.path.clone());
+    if let Some(DocRowKind::MissingPart { name, .. }) = node.map(|n| &n.kind) {
+        return (
+            format!("This part (`{name}`) has not been created yet."),
+            body_key,
+            false,
+        );
+    }
+    let body = app
+        .expanded_body_cache
+        .get(&body_key)
+        .cloned()
+        .unwrap_or_default();
+    let expanding = app.expansion_in_flight.as_ref() == Some(&body_key);
+    (body, body_key, expanding)
+}
+
 pub fn render_document_preview(
     f: &mut Frame,
     app: &mut App,
     area: Rect,
     block: Block,
     doc: Option<&DocMeta>,
+    node: Option<&DocListNode>,
     colors: &StatusPalette,
 ) {
     let Some(doc) = doc else {
@@ -1206,20 +1275,14 @@ pub fn render_document_preview(
         return;
     };
 
-    let body = app
-        .expanded_body_cache
-        .get(&doc.path)
-        .cloned()
-        .unwrap_or_default();
-
-    let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
+    let (body, body_key, expanding) = resolve_preview_body(app, doc, node);
     let header_lines =
         build_preview_header_lines(doc, expanding, colors, app.staleness_for(&doc.path));
     let mut lines = header_lines.clone();
 
     let body_hash = crate::engine::cache::DiskCache::body_hash(&body);
     let diagram_blocks = match &app.diagram_blocks_cache {
-        Some((p, h, b)) if p == &doc.path && *h == body_hash => b.clone(),
+        Some((p, h, b)) if p == &body_key && *h == body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&body),
     };
     let panel_width = area.width.saturating_sub(2);
@@ -1384,6 +1447,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusP
     let Some(doc) = app.selected_doc_meta() else {
         return;
     };
+    let node = app.doc_tree.get(app.selected_doc);
 
     let mut header_spans = vec![
         Span::styled(
@@ -1409,13 +1473,8 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusP
     let header = Line::from(header_spans);
     f.render_widget(Paragraph::new(header), layout[0]);
 
-    let body = app
-        .expanded_body_cache
-        .get(&doc.path)
-        .cloned()
-        .unwrap_or_default();
-
-    let expanding = app.expansion_in_flight.as_ref() == Some(&doc.path);
+    // STORY-294 AC3: same row-keyed body as the split-pane preview.
+    let (body, body_key, expanding) = resolve_preview_body(app, doc, node);
     let display_body = if expanding {
         format!("[expanding refs...]\n\n{}", body)
     } else {
@@ -1428,7 +1487,7 @@ pub fn render_fullscreen_document(f: &mut Frame, app: &mut App, colors: &StatusP
 
     let display_body_hash = crate::engine::cache::DiskCache::body_hash(&display_body);
     let fullscreen_blocks = match &app.diagram_blocks_cache {
-        Some((p, h, b)) if p == &doc.path && *h == display_body_hash => b.clone(),
+        Some((p, h, b)) if p == &body_key && *h == display_body_hash => b.clone(),
         _ => crate::tui::content::diagram::extract_diagram_blocks(&display_body),
     };
     let segments = crate::tui::content::diagram::build_preview_segments(
@@ -1665,7 +1724,7 @@ pub fn render_filter_panel(
 
     match app.preview_tab {
         PreviewTab::Preview => {
-            render_document_preview(f, app, right[1], block, doc.as_ref(), colors)
+            render_document_preview(f, app, right[1], block, doc.as_ref(), None, colors)
         }
         PreviewTab::Relations => {
             render_relationship_sections(f, app, right[1], block, doc.as_ref(), colors)
@@ -2925,6 +2984,58 @@ mod tests {
         format!("{:?}", cell)
     }
 
+    // STORY-294 AC2: a present part row is `§ <name>`, styled with the named
+    // `bundle_part_row_style` (DICTUM-007 -- no hardcoded colour in the view
+    // module), with a blank id cell and a blank cell for every configured
+    // column (status, tags, ...) -- not just the visible text.
+    #[test]
+    fn bundle_part_row_cells_present_part_is_dimmed_with_blank_id_and_columns() {
+        let columns = vec!["status".to_string(), "tags".to_string()];
+        let cells = bundle_part_row_cells("design", false, &columns);
+
+        // id, title, then one cell per column.
+        assert_eq!(cells.len(), 2 + columns.len());
+
+        let id_dbg = cell_text(&cells[0]);
+        assert_eq!(id_dbg, cell_text(&Cell::from("")), "id cell must be blank");
+
+        let title_dbg = cell_text(&cells[1]);
+        assert_eq!(
+            title_dbg,
+            cell_text(&Cell::new(Span::styled(
+                "§ design",
+                bundle_part_row_style()
+            ))),
+            "the title cell must read `§ design`, dimmed with bundle_part_row_style"
+        );
+
+        for (i, column) in columns.iter().enumerate() {
+            let col_dbg = cell_text(&cells[2 + i]);
+            assert_eq!(
+                col_dbg,
+                cell_text(&Cell::from("")),
+                "column cell {i} ({column}) must be blank, got: {col_dbg}"
+            );
+        }
+    }
+
+    // STORY-294 AC5: a missing part row carries the `(missing)` suffix, with
+    // the same blank id/columns and dim style as a present one.
+    #[test]
+    fn bundle_part_row_cells_missing_part_appends_missing_suffix() {
+        let cells = bundle_part_row_cells("arch", true, &[]);
+
+        assert_eq!(cells.len(), 2, "id and title only -- no configured columns");
+        let title_dbg = cell_text(&cells[1]);
+        assert_eq!(
+            title_dbg,
+            cell_text(&Cell::new(Span::styled(
+                "§ arch (missing)",
+                bundle_part_row_style()
+            )))
+        );
+    }
+
     #[test]
     fn doc_row_cells_appends_provenance_cell() {
         let provenance = vec!["Alice".to_string()];
@@ -3267,6 +3378,8 @@ mod tests {
             virtual_doc: false,
             assignee: None,
             attributes: Default::default(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

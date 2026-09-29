@@ -180,6 +180,16 @@ pub struct Relation {
     pub target: String,
 }
 
+/// A part of a bundled document (RFC-074): a frontmatter-less `.md` file
+/// living alongside a document's `index.md`. A part shares its parent's id,
+/// status and relations entirely -- it carries only a `name` (its file stem)
+/// and the `path` it lives at, relative to the project root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 /// A typed custom frontmatter attribute value. Declared attributes are coerced
 /// to their `kind`; undeclared keys are preserved as [`AttrValue::Raw`].
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +345,14 @@ pub struct DocMeta {
     /// attributes carry a coerced [`AttrValue`]; undeclared keys are preserved as
     /// [`AttrValue::Raw`].
     pub attributes: BTreeMap<String, AttrValue>,
+    /// Parts of this document (RFC-074): frontmatter-less `.md` files in the
+    /// same folder as an `index.md`, in template-declared order then extra
+    /// parts alphabetically. Empty for a document that is not a bundle.
+    pub parts: Vec<Part>,
+    /// Sidecar files of this document (RFC-074): non-`.md` files in the same
+    /// folder as an `index.md`, copied from the template on create and never
+    /// parsed. Empty for a document that is not a bundle.
+    pub sidecars: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -506,6 +524,8 @@ impl DocMeta {
             virtual_doc: false,
             id: String::new(),
             attributes,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         })
     }
 
@@ -546,6 +566,8 @@ mod tests {
             virtual_doc: false,
             id: String::new(),
             attributes: BTreeMap::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -1065,6 +1087,8 @@ Body.
             virtual_doc: false,
             id: String::new(),
             attributes: BTreeMap::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

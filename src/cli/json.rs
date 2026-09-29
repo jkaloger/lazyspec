@@ -1,6 +1,7 @@
-use crate::engine::document::{AttrValue, DocMeta};
+pub use crate::engine::doc_json::doc_to_json;
+use crate::engine::document::DocMeta;
 use crate::engine::store::Store;
-use crate::engine::store_dispatch::{percent_complete, PushOutcome};
+use crate::engine::store_dispatch::PushOutcome;
 use serde_json::Value;
 
 /// Fold a backend [`PushOutcome`] into a mutation's JSON object: always record
@@ -40,50 +41,6 @@ pub fn merge_push_outcomes(value: &mut Value, outcomes: &[PushOutcome]) {
             );
         }
     }
-}
-
-/// Read a milestone's `open_issues`/`closed_issues` count attributes (set when a
-/// milestone document is materialized) and compute progress. `None` for any doc
-/// without both counts -- i.e. every non-milestone document.
-fn computed_percent_complete(doc: &DocMeta) -> Option<u8> {
-    let as_u64 = |k: &str| match doc.attributes.get(k) {
-        Some(AttrValue::Int(n)) if *n >= 0 => Some(*n as u64),
-        _ => None,
-    };
-    let open = as_u64("open_issues")?;
-    let closed = as_u64("closed_issues")?;
-    percent_complete(open, closed)
-}
-
-pub fn doc_to_json(doc: &DocMeta) -> Value {
-    let mut value = serde_json::json!({
-        "id": doc.id,
-        "path": doc.path.to_string_lossy(),
-        "title": doc.title,
-        "type": format!("{}", doc.doc_type).to_lowercase(),
-        "status": format!("{}", doc.status),
-        "author": doc.author,
-        "date": doc.date.to_string(),
-        "tags": doc.tags,
-        "assignee": doc.assignee,
-        "provenance": doc.provenance,
-        "governs": doc.governs,
-        "reviewed": doc.reviewed,
-        "related": doc.related.iter().map(|r| {
-            serde_json::json!({
-                "type": format!("{}", r.rel_type),
-                "target": r.target,
-            })
-        }).collect::<Vec<_>>(),
-        "validate_ignore": doc.validate_ignore,
-        "attributes": doc.attributes,
-    });
-    if let Some(pct) = computed_percent_complete(doc) {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("percent_complete".to_string(), Value::from(pct));
-        }
-    }
-    value
 }
 
 pub fn doc_to_json_with_family(doc: &DocMeta, store: &Store) -> Value {
@@ -128,7 +85,7 @@ pub fn doc_to_json_with_family(doc: &DocMeta, store: &Store) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::document::{DocType, Status};
+    use crate::engine::document::{AttrValue, DocType, Status};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -153,6 +110,8 @@ mod tests {
             assignee: None,
             attributes,
             id: "MILESTONE-1".to_string(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 
@@ -173,6 +132,44 @@ mod tests {
         let json = doc_to_json(&meta);
         assert_eq!(json["id"], serde_json::json!("ISSUE-42"));
         assert!(!json["id"].is_null());
+    }
+
+    // RFC-074 AC6: a bundle document's parts/sidecars serialize as name/path
+    // objects and bare path strings respectively.
+    #[test]
+    fn doc_to_json_carries_parts_and_sidecars() {
+        use crate::engine::document::Part;
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+        meta.parts = vec![Part {
+            name: "design".to_string(),
+            path: PathBuf::from("docs/changes/CHANGE-1/design.md"),
+        }];
+        meta.sidecars = vec![PathBuf::from("docs/changes/CHANGE-1/index.yaml")];
+
+        let json = doc_to_json(&meta);
+
+        assert_eq!(
+            json["parts"],
+            serde_json::json!([{"name": "design", "path": "docs/changes/CHANGE-1/design.md"}])
+        );
+        assert_eq!(
+            json["sidecars"],
+            serde_json::json!(["docs/changes/CHANGE-1/index.yaml"])
+        );
+    }
+
+    // RFC-074 AC6: a non-bundle document still carries both keys as empty
+    // arrays, matching `governs`'s always-present-but-empty convention.
+    #[test]
+    fn doc_to_json_carries_empty_parts_and_sidecars_when_not_a_bundle() {
+        let mut meta = meta_with_counts(0, 0);
+        meta.attributes.clear();
+
+        let json = doc_to_json(&meta);
+
+        assert_eq!(json["parts"], serde_json::json!([]));
+        assert_eq!(json["sidecars"], serde_json::json!([]));
     }
 
     // STORY-265 AC5: a pinned document carries its globs and review anchor, in

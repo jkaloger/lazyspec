@@ -117,7 +117,7 @@ fn ignore_then_validate_skips_document() {
 
     // Verify the error exists before ignoring
     let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     assert!(
         result.errors.iter().any(|e| {
             let msg = format!("{:?}", e);
@@ -140,7 +140,7 @@ fn ignore_then_validate_skips_document() {
 
     // Reload store and validate again
     let store = fixture.store_with(&config);
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     assert!(
         !result.errors.iter().any(|e| {
             let msg = format!("{:?}", e);

@@ -18,7 +18,7 @@ fn init_creates_config_and_directories() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     assert!(root.join(".lazyspec.toml").exists());
     assert!(root.join("docs/rfcs").is_dir());
@@ -41,7 +41,7 @@ fn init_does_not_overwrite_existing_config() {
     let sentinel = "# custom config";
     fs::write(root.join(".lazyspec.toml"), sentinel).unwrap();
 
-    let result = lazyspec::cli::init::run(root);
+    let result = lazyspec::cli::init::run(root, false);
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("already exists"),
@@ -58,7 +58,7 @@ fn init_writes_relationships_block() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config = parse_written_config(root);
 
@@ -100,7 +100,7 @@ fn init_related_to_is_symmetric_no_inverse() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config = parse_written_config(root);
     let related_to = config
@@ -141,7 +141,7 @@ fn init_writes_edges_and_no_rules() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config = parse_written_config(root);
     assert_eq!(
@@ -195,7 +195,7 @@ fn init_states_traversal_only_on_edges() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config = parse_written_config(root);
     for rel in &config.relationships {
@@ -234,7 +234,7 @@ fn the_starter_wildcard_and_concrete_chain_rows_are_not_a_contradiction() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
     let config = Config::parse(&content).expect("the five-row starter set must strict-load");
@@ -267,7 +267,7 @@ fn init_project_loads_strict_and_validates_clean() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     // Strict load of the written config must succeed.
     let content = fs::read_to_string(root.join(".lazyspec.toml")).unwrap();
@@ -302,7 +302,7 @@ fn init_project_loads_strict_and_validates_clean() {
     // Validate over the freshly scaffolded project: only the convention/dictum
     // skeletons exist, so there must be no errors at all.
     let store = Store::load(root, &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     assert!(
         result.errors.is_empty(),
         "fresh project should validate with no errors, got: {:?}",
@@ -316,7 +316,7 @@ fn init_project_loads_strict_and_validates_clean() {
 fn story_context_after_linking(from: &str, relation: &str, to: &str) -> serde_json::Value {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config = parse_written_config(root);
     let mut store = Store::load(root, &config).unwrap();
@@ -409,7 +409,7 @@ fn init_config_accepts_an_appended_edges_block() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let config_path = root.join(".lazyspec.toml");
     let content = fs::read_to_string(&config_path).unwrap();
@@ -458,7 +458,7 @@ fn init_creates_convention_skeleton_files() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let index = root.join("docs/convention/convention/index.md");
     let example = root.join("docs/convention/convention/example.md");
@@ -498,7 +498,7 @@ fn init_does_not_overwrite_existing_convention_files() {
     fs::create_dir_all(&convention_dir).unwrap();
     fs::write(convention_dir.join("index.md"), "# my custom convention").unwrap();
 
-    lazyspec::cli::init::run(root).unwrap();
+    lazyspec::cli::init::run(root, false).unwrap();
 
     let content = fs::read_to_string(convention_dir.join("index.md")).unwrap();
     assert_eq!(content, "# my custom convention");

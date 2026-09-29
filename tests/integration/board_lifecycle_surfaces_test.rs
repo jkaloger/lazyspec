@@ -121,7 +121,11 @@ fn validate_json_reports_no_error_for_a_board_bound_type() {
     let config = Config::parse(BOARD_BOUND_CONFIG).unwrap();
     let store = Store::load(tmp.path(), &config).unwrap();
 
-    let json = lazyspec::cli::validate::run_json(&store, &store.validate_full(&config), &[]);
+    let json = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled()),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert!(
@@ -142,7 +146,11 @@ fn validate_json_reports_a_lifecycle_the_nominated_board_cannot_own() {
     let config = Config::parse(DECLARED_EDGES_CONFIG).unwrap();
     let store = Store::load(tmp.path(), &config).unwrap();
 
-    let json = lazyspec::cli::validate::run_json(&store, &store.validate_full(&config), &[]);
+    let json = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled()),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     let errors = parsed["errors"].as_array().unwrap();
@@ -1222,11 +1230,12 @@ fn update_status_rejects_a_value_the_authority_board_has_no_column_for() {
     let store = Store::load(tmp.path(), &config).unwrap();
 
     let err = lazyspec::engine::ops::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         tmp.path(),
         &store,
         "TICKET-42",
         &[("status", "Blocked")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap_err()
@@ -1481,7 +1490,11 @@ fn validate_json_errors(config_src: &str) -> Vec<String> {
     let config = Config::parse(config_src).unwrap();
     let store = Store::load(tmp.path(), &config).unwrap();
 
-    let json = lazyspec::cli::validate::run_json(&store, &store.validate_full(&config), &[]);
+    let json = lazyspec::cli::validate::run_json(
+        &store,
+        &store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled()),
+        &[],
+    );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     parsed["errors"]
         .as_array()

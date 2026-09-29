@@ -7,6 +7,7 @@ pub mod config;
 pub mod config_write;
 pub mod context;
 pub mod credentials;
+pub mod doc_json;
 pub mod document;
 pub mod fs;
 pub mod fs_ops;
@@ -22,11 +23,13 @@ pub mod github;
 pub mod github_url;
 pub mod graph;
 pub mod hashing;
+pub mod hooks;
 pub mod issue_body;
 pub mod issue_cache;
 pub mod issue_map;
 pub mod milestone_cache;
 pub mod ops;
+pub mod pre_transition;
 pub mod prompt;
 pub mod provenance;
 pub mod refs;
@@ -45,3 +48,46 @@ pub mod template;
 pub mod traversal;
 pub mod validation;
 pub mod watch;
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+/// User-local lazyspec state (trust, cache, credentials): `$LAZYSPEC_STATE_DIR`,
+/// else `$HOME/.lazyspec`. `None` when neither is set: a relative fallback
+/// would land inside whatever repository the process runs in, where a
+/// repository could ship its own trust.
+pub fn user_state_dir() -> Option<PathBuf> {
+    resolve_state_dir(
+        std::env::var_os("LAZYSPEC_STATE_DIR"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn resolve_state_dir(state_dir: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    if let Some(dir) = state_dir {
+        return Some(PathBuf::from(dir));
+    }
+    Some(PathBuf::from(home?).join(".lazyspec"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_dir_override_wins_over_home() {
+        let dir = resolve_state_dir(Some("/state".into()), Some("/home/me".into()));
+        assert_eq!(dir, Some(PathBuf::from("/state")));
+    }
+
+    #[test]
+    fn state_dir_defaults_under_home() {
+        let dir = resolve_state_dir(None, Some("/home/me".into()));
+        assert_eq!(dir, Some(PathBuf::from("/home/me/.lazyspec")));
+    }
+
+    #[test]
+    fn no_state_dir_without_override_or_home() {
+        assert_eq!(resolve_state_dir(None, None), None);
+    }
+}

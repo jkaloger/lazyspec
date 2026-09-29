@@ -2328,6 +2328,8 @@ mod tests {
                 assignee: None,
                 attributes: Default::default(),
                 id: "RFC-001".to_string(),
+                parts: Vec::new(),
+                sidecars: Vec::new(),
             };
             crate::engine::issue_body::serialize(&doc, "RFC body text.")
         };
@@ -2455,6 +2457,8 @@ mod tests {
                 assignee: None,
                 attributes: Default::default(),
                 id: "RFC-001".to_string(),
+                parts: Vec::new(),
+                sidecars: Vec::new(),
             };
             crate::engine::issue_body::serialize(&doc, "REMOTE PROSE LINE")
         };

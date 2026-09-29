@@ -1699,6 +1699,8 @@ mod tests {
             assignee: None,
             id: path.to_string(),
             attributes: attrs,
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 

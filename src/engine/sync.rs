@@ -1550,6 +1550,8 @@ mod tests {
             assignee: None,
             attributes: Default::default(),
             id: String::new(),
+            parts: Vec::new(),
+            sidecars: Vec::new(),
         };
         crate::engine::issue_body::serialize(&meta, "body")
     }

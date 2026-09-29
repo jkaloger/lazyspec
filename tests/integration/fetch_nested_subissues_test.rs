@@ -413,6 +413,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
     let flat_status = json_array(&lazyspec::cli::status::run_json(
         &flat_store,
         &config,
+        &lazyspec::engine::hooks::HookEnv::process(false),
         flat_root,
         &flat_gh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
@@ -420,6 +421,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
     let nested_status = json_array(&lazyspec::cli::status::run_json(
         &nested_store,
         &config,
+        &lazyspec::engine::hooks::HookEnv::process(false),
         nested_root,
         &nested_gh,
         &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
@@ -445,6 +447,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             flat_root,
             &flat_gh,
             &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+            false,
         )
         .unwrap(),
     )
@@ -460,6 +463,7 @@ fn fetch_cli_json_shape_unchanged_by_nesting() {
             nested_root,
             &nested_gh,
             &lazyspec::engine::git_ref::test_support::MockGitRefClient::new(),
+            false,
         )
         .unwrap(),
     )

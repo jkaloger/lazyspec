@@ -21,11 +21,12 @@ fn transition_rejects_off_edge_move() {
 
     // draft -> accepted is not an edge in the default lifecycle (only draft->review).
     let err = lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "RFC-001",
         &[("status", "accepted")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap_err();
@@ -44,11 +45,12 @@ fn transition_accepts_on_edge_move() {
     let config = fixture.config();
 
     lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "RFC-001",
         &[("status", "review")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap();
@@ -65,11 +67,12 @@ fn transition_wildcard_edge_allows_move_from_any_state() {
     let config = fixture.config();
 
     lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "RFC-001",
         &[("status", "superseded")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap();
@@ -89,11 +92,12 @@ fn transition_no_op_to_same_status_is_allowed() {
     let config = fixture.config();
 
     lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "RFC-001",
         &[("status", "draft")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap();
@@ -110,11 +114,12 @@ fn transition_check_skipped_for_non_status_updates() {
     let config = fixture.config();
 
     lazyspec::cli::update::run_with_config(
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "RFC-001",
         &[("title", "Renamed")],
-        Some(&config),
+        &config,
         &MockGitRefClient::new(),
     )
     .unwrap();

@@ -1,6 +1,7 @@
 mod common;
 
 mod board_lifecycle_surfaces_test;
+mod bundle_document_test;
 mod cli_child_context_test;
 mod cli_child_test;
 mod cli_completions_test;
@@ -22,14 +23,18 @@ mod cli_git_ref_show_test;
 mod cli_git_ref_status_test;
 mod cli_git_ref_validate_test;
 mod cli_govern_test;
+mod cli_hooks_test;
 mod cli_ignore_test;
 mod cli_init_greeting_test;
+mod cli_init_template_test;
 mod cli_init_test;
 mod cli_json_test;
 mod cli_lifecycle_seed_test;
 mod cli_link_test;
+mod cli_missing_part_test;
 mod cli_mutate_test;
 mod cli_no_config_test;
+mod cli_pre_transition_test;
 mod cli_query_test;
 mod cli_spinner_parity_test;
 mod cli_status_test;

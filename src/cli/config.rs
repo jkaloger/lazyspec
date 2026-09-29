@@ -210,6 +210,13 @@ pub struct EdgeEdit {
 /// Each type also carries `resolved_dir`, the engine's [`doc_root`] against
 /// `root` (STORY-283). It is injected here rather than held on `TypeDef`, which
 /// round-trips to `.lazyspec.toml` through every config writer.
+///
+/// Each type also carries `template`, `"file"` or `"directory"` (RFC-074 AC1):
+/// whether its template resolves to a `{type}.md` file or a `{type}/`
+/// directory of parts. A directory template that declares no `index.md`, or
+/// that sits on a type with `subdirectory = false`, is a config error and
+/// fails the whole command -- the same way a misconfigured `[numbering]`
+/// table fails `create` rather than being silently reported as fine.
 pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
     let mut value = serde_json::to_value(config)?;
     if let Some(object) = value.as_object_mut() {
@@ -224,6 +231,9 @@ pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
             },
         );
     }
+    let templates_dir = config
+        .docs_root(root)
+        .join(&config.filesystem.templates.dir);
     if let Some(types) = value
         .get_mut("types")
         .and_then(serde_json::Value::as_array_mut)
@@ -233,6 +243,18 @@ pub fn run_show_json(root: &Path, config: &Config) -> Result<String> {
                 object.insert(
                     "resolved_dir".to_string(),
                     serde_json::to_value(doc_root(config, root, type_def))?,
+                );
+                let kind = crate::engine::template::resolve_template_kind(&templates_dir, type_def)
+                    .with_context(|| format!("resolving template for type '{}'", type_def.name))?;
+                object.insert(
+                    "template".to_string(),
+                    serde_json::Value::String(
+                        match kind {
+                            crate::engine::template::TemplateKind::File => "file",
+                            crate::engine::template::TemplateKind::Directory => "directory",
+                        }
+                        .to_string(),
+                    ),
                 );
             }
         }
@@ -1412,6 +1434,58 @@ inverse = "implemented-by"
         assert_eq!(rfc["lifecycle"]["states"][0], "draft");
         assert_eq!(rfc["lifecycle"]["edges"][0]["from"], "draft");
         assert_eq!(rfc["lifecycle"]["edges"][0]["to"], "review");
+    }
+
+    // RFC-074 AC1: a type with no `{type}/` template directory reports
+    // `template: "file"`.
+    #[test]
+    fn show_json_reports_file_template_when_no_directory_template_exists() {
+        let json = show(SRC);
+        assert_eq!(type_named(&json, "rfc")["template"], "file");
+    }
+
+    // RFC-074 AC1: a directory template (declaring `index.md`, on a type with
+    // `subdirectory = true`) reports `template: "directory"`.
+    #[test]
+    fn show_json_reports_directory_template_when_index_md_present() {
+        let (_dir, path, _fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        std::fs::create_dir_all(root.join(".lazyspec/templates/story")).unwrap();
+        std::fs::write(root.join(".lazyspec/templates/story/index.md"), "index").unwrap();
+
+        let mut config = Config::parse(SRC).unwrap();
+        config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == "story")
+            .unwrap()
+            .subdirectory = true;
+
+        let json: Value = serde_json::from_str(&run_show_json(root, &config).unwrap()).unwrap();
+        assert_eq!(type_named(&json, "story")["template"], "directory");
+    }
+
+    // RFC-074 AC1: a directory template with no `index.md` fails `config show`.
+    #[test]
+    fn show_json_errors_when_directory_template_has_no_index_md() {
+        let (_dir, path, _fs) = fixture(SRC);
+        let root = path.parent().unwrap();
+        std::fs::create_dir_all(root.join(".lazyspec/templates/story")).unwrap();
+        std::fs::write(root.join(".lazyspec/templates/story/design.md"), "x").unwrap();
+
+        let mut config = Config::parse(SRC).unwrap();
+        config
+            .documents
+            .types
+            .iter_mut()
+            .find(|t| t.name == "story")
+            .unwrap()
+            .subdirectory = true;
+
+        let err = run_show_json(root, &config).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("index.md"), "got: {msg}");
     }
 
     // AC2: the relationships array serializes out. Guards against a future

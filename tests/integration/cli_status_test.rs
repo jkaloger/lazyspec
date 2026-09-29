@@ -26,6 +26,7 @@ fn status_json_has_documents_and_validation() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -48,6 +49,7 @@ fn status_json_includes_all_documents() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -69,6 +71,7 @@ fn status_json_documents_use_full_schema() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -94,6 +97,7 @@ fn status_json_documents_have_attributes() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -137,6 +141,7 @@ fn status_json_includes_parse_errors() {
     let output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -158,6 +163,7 @@ fn status_empty_project() {
     let json_output = lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -188,6 +194,7 @@ fn status_json_findings_have_the_same_shape_as_validate_json() {
     let status: serde_json::Value = serde_json::from_str(&lazyspec::cli::status::run_json(
         &store,
         &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::process(false),
         fixture.root(),
         &crate::common::NoopGh,
         &no_git(),
@@ -195,7 +202,10 @@ fn status_json_findings_have_the_same_shape_as_validate_json() {
     .unwrap();
     let validate: serde_json::Value = serde_json::from_str(&lazyspec::cli::validate::run_json(
         &store,
-        &store.validate_full(&fixture.config()),
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
         &[],
     ))
     .unwrap();

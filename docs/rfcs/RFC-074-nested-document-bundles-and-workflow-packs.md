@@ -1,7 +1,7 @@
 ---
 title: Nested document bundles and workflow packs
 type: rfc
-status: draft
+status: in-progress
 author: Jack Kaloger
 date: 2026-09-28
 tags: []
@@ -9,6 +9,7 @@ related:
 - related-to: RFC-062
 - related-to: RFC-070
 - related-to: BUG-034
+reviewed: a6983d9cb6cbf9c5c2a647cfca0703ff0b38da8b
 ---
 
 ## Summary
