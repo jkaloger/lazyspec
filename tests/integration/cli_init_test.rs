@@ -302,7 +302,7 @@ fn init_project_loads_strict_and_validates_clean() {
     // Validate over the freshly scaffolded project: only the convention/dictum
     // skeletons exist, so there must be no errors at all.
     let store = Store::load(root, &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     assert!(
         result.errors.is_empty(),
         "fresh project should validate with no errors, got: {:?}",

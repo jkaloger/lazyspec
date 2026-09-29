@@ -734,12 +734,12 @@ fn handle_app_event(app: &mut App, event: AppEvent, root: &Path, config: &Config
         } => {
             app.apply_staleness(generation, staleness);
         }
-        AppEvent::StaleFindingsComputed {
+        AppEvent::BackgroundFindingsComputed {
             generation,
             result,
             hook_findings,
         } => {
-            app.apply_stale_findings(generation, result, hook_findings, config);
+            app.apply_background_findings(generation, result, hook_findings, config);
         }
         AppEvent::CreateStarted => {}
         AppEvent::CreateProgress { message, state } => {
@@ -927,40 +927,26 @@ pub fn run(store: Store, config: &Config, no_hooks: bool) -> Result<()> {
         }
     });
 
-    // Background `stale` findings worker (STORY-276): the validation panel's
+    // Background `stale` and hook findings worker (STORY-276): the validation panel's
     // share of the same rule. `refresh_validation` gates it out of the
     // synchronous pass, so this thread is what answers it -- one pass per event
     // that can change what validation says, drained to the newest, results
     // carrying their generation, exactly as the two workers above.
-    let (stale_findings_tx, stale_findings_rx) =
+    let (background_findings_tx, background_findings_rx) =
         crossbeam_channel::unbounded::<crate::tui::state::BackgroundFindingsRequest>();
-    app.stale_findings_tx = stale_findings_tx;
-    let stale_findings_result_tx = tx.clone();
+    app.background_findings_tx = background_findings_tx;
+    let background_findings_result_tx = tx.clone();
     std::thread::spawn(move || {
         let git = crate::engine::git_ref::GitCli;
-        while let Ok(mut req) = stale_findings_rx.recv() {
-            while let Ok(newer) = stale_findings_rx.try_recv() {
+        while let Ok(mut req) = background_findings_rx.recv() {
+            while let Ok(newer) = background_findings_rx.try_recv() {
                 req = newer;
             }
-            let result = crate::engine::validation::stale_findings(
-                &req.governs_root,
-                req.docs.iter(),
-                &req.config,
-                &git,
-                &staleness_cache,
-            );
-            let docs: Vec<&crate::engine::document::DocMeta> = req.docs.iter().collect();
-            let hook_findings = crate::engine::validation::hook_findings(
-                &req.hook_env,
-                &req.root,
-                &docs,
-                &req.config,
-            );
-            staleness_cache.flush();
-            if stale_findings_result_tx
-                .send(AppEvent::StaleFindingsComputed {
+            let (result, hook_findings) = req.compute(&git, &staleness_cache);
+            if background_findings_result_tx
+                .send(AppEvent::BackgroundFindingsComputed {
                     generation: req.generation,
-                    result: result.into(),
+                    result,
                     hook_findings,
                 })
                 .is_err()

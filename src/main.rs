@@ -321,71 +321,26 @@ fn main() -> anyhow::Result<()> {
         }) => {
             let body_content = lazyspec::cli::resolve_body(&body, &body_file)?;
             let store = load_store(&cwd, &config)?;
-
-            if let Some(part_name) = &part {
-                let has_conflicting_flags =
-                    status.is_some() || title.is_some() || assignee.is_some() || !attr.is_empty();
-                let output = lazyspec::cli::update::run_part_cli(
-                    &cwd,
-                    &config,
-                    &store,
-                    &path,
-                    part_name,
-                    body_content.as_deref(),
-                    has_conflicting_flags,
-                    &GitCli,
+            let output = lazyspec::cli::update::run_cli(
+                &hook_env,
+                &cwd,
+                &config,
+                &store,
+                lazyspec::cli::update::UpdateArgs {
+                    path: &path,
+                    status: status.as_deref(),
+                    title: title.as_deref(),
+                    assignee: assignee.as_deref(),
+                    body: body_content.as_deref(),
+                    part: part.as_deref(),
+                    attr: &attr,
                     json,
-                )?;
-                println!("{}", output.message);
-                if let Some(warning) = &output.warning {
-                    eprintln!("{}", warning);
-                }
-                return Ok(());
-            }
-
-            let attr_pairs = lazyspec::cli::update::parse_attr_pairs(&attr)?;
-            let mut updates = Vec::new();
-            if let Some(ref s) = status {
-                updates.push(("status", s.as_str()));
-            }
-            if let Some(ref t) = title {
-                updates.push(("title", t.as_str()));
-            }
-            if let Some(ref a) = assignee {
-                updates.push(("assignee", a.as_str()));
-            }
-            if let Some(ref b) = body_content {
-                updates.push(("body", b.as_str()));
-            }
-            for (key, value) in &attr_pairs {
-                updates.push((key.as_str(), value.as_str()));
-            }
-            let resolved = lazyspec::cli::resolve::resolve_to_path(&store, &path)?;
-            let outcome = match lazyspec::engine::ops::update::run_with_config(
-                &hook_env, &cwd, &store, &path, &updates, &config, &GitCli,
-            ) {
-                Ok(outcome) => outcome,
-                Err(e) => return Err(lazyspec::cli::hook::exit_if_blocked(e, json)),
-            };
-            let push_outcome = outcome.push;
-            if json {
-                let store = load_store(&cwd, &config)?;
-                let doc = lazyspec::cli::resolve::resolve_shorthand_or_path(&store, &path)?;
-                let mut json_val = lazyspec::cli::json::doc_to_json(doc);
-                lazyspec::cli::json::merge_push_outcome(&mut json_val, &push_outcome);
-                if !outcome.findings.is_empty() {
-                    json_val["hook_findings"] =
-                        lazyspec::cli::hook::findings_json(&outcome.findings);
-                }
-                println!("{}", serde_json::to_string_pretty(&json_val)?);
-            } else {
-                println!("Updated {}", resolved.display());
-                for finding in &outcome.findings {
-                    eprintln!("{finding}");
-                }
-                if let Some(warning) = push_outcome.warning() {
-                    eprintln!("{}", warning);
-                }
+                },
+                &GitCli,
+            )?;
+            println!("{}", output.message);
+            for warning in &output.warnings {
+                eprintln!("{warning}");
             }
         }
         Some(Commands::Delete { path, json }) => {
@@ -759,46 +714,10 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Some(Commands::Hook { command }) => {
-            use lazyspec::cli::hook::HookCommand;
-            let trust = lazyspec::engine::hooks::TrustStore::user_local();
-            match command {
-                HookCommand::List { json } => {
-                    println!(
-                        "{}",
-                        lazyspec::cli::hook::run_list(&cwd, &config, &trust, json)
-                    );
-                }
-                HookCommand::Run {
-                    event,
-                    id,
-                    dry_run,
-                    json,
-                } => {
-                    let store = load_store(&cwd, &config)?;
-                    let args = lazyspec::cli::hook::HookRunArgs {
-                        event: &event,
-                        id: &id,
-                        dry_run,
-                        json,
-                    };
-                    match lazyspec::cli::hook::run_hook(
-                        &hook_env, &cwd, &config, &store, &GitCli, args,
-                    ) {
-                        Ok((out, code)) => {
-                            println!("{out}");
-                            if code != 0 {
-                                std::process::exit(code);
-                            }
-                        }
-                        Err(e) => return Err(lazyspec::cli::hook::exit_if_blocked(e, json)),
-                    }
-                }
-                HookCommand::Trust { json } => {
-                    println!(
-                        "{}",
-                        lazyspec::cli::hook::run_trust(&cwd, &config, &trust, json)?
-                    );
-                }
+            let (out, code) = lazyspec::cli::hook::run(command, &hook_env, &cwd, &config, &GitCli)?;
+            println!("{out}");
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Some(Commands::Config { command, json }) => {

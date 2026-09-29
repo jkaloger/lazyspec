@@ -53,19 +53,21 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// User-local lazyspec state (trust, cache, credentials): `$LAZYSPEC_STATE_DIR`,
-/// else `$HOME/.lazyspec`.
-pub fn user_state_dir() -> PathBuf {
+/// else `$HOME/.lazyspec`. `None` when neither is set: a relative fallback
+/// would land inside whatever repository the process runs in, where a
+/// repository could ship its own trust.
+pub fn user_state_dir() -> Option<PathBuf> {
     resolve_state_dir(
         std::env::var_os("LAZYSPEC_STATE_DIR"),
         std::env::var_os("HOME"),
     )
 }
 
-fn resolve_state_dir(state_dir: Option<OsString>, home: Option<OsString>) -> PathBuf {
+fn resolve_state_dir(state_dir: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     if let Some(dir) = state_dir {
-        return PathBuf::from(dir);
+        return Some(PathBuf::from(dir));
     }
-    PathBuf::from(home.unwrap_or_else(|| ".".into())).join(".lazyspec")
+    Some(PathBuf::from(home?).join(".lazyspec"))
 }
 
 #[cfg(test)]
@@ -75,17 +77,17 @@ mod tests {
     #[test]
     fn state_dir_override_wins_over_home() {
         let dir = resolve_state_dir(Some("/state".into()), Some("/home/me".into()));
-        assert_eq!(dir, PathBuf::from("/state"));
+        assert_eq!(dir, Some(PathBuf::from("/state")));
     }
 
     #[test]
     fn state_dir_defaults_under_home() {
         let dir = resolve_state_dir(None, Some("/home/me".into()));
-        assert_eq!(dir, PathBuf::from("/home/me/.lazyspec"));
+        assert_eq!(dir, Some(PathBuf::from("/home/me/.lazyspec")));
     }
 
     #[test]
-    fn state_dir_without_home_is_relative() {
-        assert_eq!(resolve_state_dir(None, None), PathBuf::from("./.lazyspec"));
+    fn no_state_dir_without_override_or_home() {
+        assert_eq!(resolve_state_dir(None, None), None);
     }
 }

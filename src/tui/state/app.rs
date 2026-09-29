@@ -336,6 +336,38 @@ pub struct BackgroundFindingsRequest {
     pub generation: u64,
 }
 
+impl BackgroundFindingsRequest {
+    /// The worker's whole pass, and what the test-only synchronous route runs,
+    /// so both exercise the same code. Returns the `stale` findings and the
+    /// hook findings.
+    pub fn compute(
+        &self,
+        git: &dyn crate::engine::git_ref::GitRefOps,
+        cache: &crate::engine::staleness_cache::StalenessCache,
+    ) -> (
+        crate::engine::validation::ValidationResult,
+        crate::engine::validation::ValidationResult,
+    ) {
+        let stale = crate::engine::validation::stale_findings(
+            &self.governs_root,
+            self.docs.iter(),
+            &self.config,
+            git,
+            cache,
+        )
+        .into();
+        let docs: Vec<&DocMeta> = self.docs.iter().collect();
+        let hooks = crate::engine::validation::hook_findings(
+            &self.hook_env,
+            &self.root,
+            &docs,
+            &self.config,
+        );
+        cache.flush();
+        (stale, hooks)
+    }
+}
+
 pub enum AppEvent {
     Terminal(crossterm::event::KeyEvent),
     FileChange(notify::Event),
@@ -364,7 +396,7 @@ pub enum AppEvent {
         generation: u64,
         staleness: Staleness,
     },
-    StaleFindingsComputed {
+    BackgroundFindingsComputed {
         generation: u64,
         result: crate::engine::validation::ValidationResult,
         hook_findings: crate::engine::validation::ValidationResult,
@@ -698,17 +730,17 @@ pub struct App {
     /// [`App::fold_validation`] the way the gh fetch warnings beside them are.
     /// Unlike `staleness`, this one is a cache: it holds the previous answer
     /// while the next is being computed, so the panel does not flicker.
-    pub stale_findings: crate::engine::validation::ValidationResult,
+    pub background_findings: crate::engine::validation::ValidationResult,
     /// The `validate` hooks' findings from the last worker pass. The quick
     /// refresh folds these in and touches no hook, so the render path does no
     /// hook I/O (STORY-295 AC6).
     pub hook_findings: crate::engine::validation::ValidationResult,
     /// Monotonic id stamped onto each dispatched findings pass; an older
     /// result is dropped, so a slow pass cannot overwrite a newer one.
-    pub stale_findings_generation: u64,
-    pub stale_findings_tx: crossbeam_channel::Sender<BackgroundFindingsRequest>,
-    /// Shared with the findings worker, so the cache a full pass fills is the one
-    /// the render-path refresh reads.
+    pub background_findings_generation: u64,
+    pub background_findings_tx: crossbeam_channel::Sender<BackgroundFindingsRequest>,
+    /// Cloned into each findings request for the worker, and used directly by
+    /// the status picker's transitions. `--no-hooks` lands here.
     pub hook_env: crate::engine::hooks::HookEnv,
     pub show_help: bool,
     pub help_scroll: u16,
@@ -878,7 +910,7 @@ impl App {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
-        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
+        let (background_findings_tx, _background_findings_rx) = crossbeam_channel::unbounded();
         let git_branch = query_git_branch(store.root());
         let git_status_cache = GitStatusCache::new(store.root());
 
@@ -906,10 +938,10 @@ impl App {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
-            stale_findings: Default::default(),
+            background_findings: Default::default(),
             hook_findings: Default::default(),
-            stale_findings_generation: 0,
-            stale_findings_tx,
+            background_findings_generation: 0,
+            background_findings_tx,
             hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
@@ -1083,7 +1115,7 @@ impl App {
     /// here. Reached from every event that can change what validation says.
     pub fn refresh_validation(&mut self, config: &Config) {
         self.fold_validation(config);
-        self.request_stale_findings(config);
+        self.request_background_findings(config);
     }
 
     /// Sums `unpushed` over every existing shared git clone (BUG-032 AC7),
@@ -1116,10 +1148,18 @@ impl App {
         );
         self.validation_errors = result.errors.iter().map(|e| e.to_string()).collect();
         self.validation_warnings = result.warnings.iter().map(|e| e.to_string()).collect();
-        self.validation_errors
-            .extend(self.stale_findings.errors.iter().map(|e| e.to_string()));
-        self.validation_warnings
-            .extend(self.stale_findings.warnings.iter().map(|e| e.to_string()));
+        self.validation_errors.extend(
+            self.background_findings
+                .errors
+                .iter()
+                .map(|e| e.to_string()),
+        );
+        self.validation_warnings.extend(
+            self.background_findings
+                .warnings
+                .iter()
+                .map(|e| e.to_string()),
+        );
         self.validation_warnings
             .extend(self.status_bar_warnings.iter().cloned());
         self.validation_warnings
@@ -4086,7 +4126,7 @@ pub(crate) mod parity_seed {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
-        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
+        let (background_findings_tx, _background_findings_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
         let mut app = App {
             fs: Box::new(crate::engine::fs::RealFileSystem),
@@ -4112,10 +4152,10 @@ pub(crate) mod parity_seed {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
-            stale_findings: Default::default(),
+            background_findings: Default::default(),
             hook_findings: Default::default(),
-            stale_findings_generation: 0,
-            stale_findings_tx,
+            background_findings_generation: 0,
+            background_findings_tx,
             hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
@@ -4516,7 +4556,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (search_tx, _search_rx) = crossbeam_channel::unbounded();
         let (staleness_tx, _staleness_rx) = crossbeam_channel::unbounded();
-        let (stale_findings_tx, _stale_findings_rx) = crossbeam_channel::unbounded();
+        let (background_findings_tx, _background_findings_rx) = crossbeam_channel::unbounded();
         let config = Config::default();
 
         let app = App {
@@ -4543,10 +4583,10 @@ mod tests {
             staleness_generation: 0,
             staleness_key: None,
             staleness_tx,
-            stale_findings: Default::default(),
+            background_findings: Default::default(),
             hook_findings: Default::default(),
-            stale_findings_generation: 0,
-            stale_findings_tx,
+            background_findings_generation: 0,
+            background_findings_tx,
             hook_env: crate::engine::hooks::HookEnv::process(false),
             show_help: false,
             help_scroll: 0,
@@ -4919,11 +4959,15 @@ mod tests {
         );
         // STORY-266 AC4: findings became objects for `--json` consumers; the
         // panel still holds exactly the `message` field of each.
-        let messages: Vec<String> = crate::engine::validation::validate_full(&app.store, &config)
-            .errors
-            .iter()
-            .map(|e| e.to_json()["message"].as_str().unwrap().to_string())
-            .collect();
+        let messages: Vec<String> = crate::engine::validation::validate_full(
+            &app.store,
+            &config,
+            &crate::engine::hooks::HookEnv::disabled(),
+        )
+        .errors
+        .iter()
+        .map(|e| e.to_json()["message"].as_str().unwrap().to_string())
+        .collect();
         assert_eq!(app.validation_errors, messages);
     }
 
@@ -5376,7 +5420,7 @@ mod tests {
     /// same route every other rule takes -- the panel renders each finding's
     /// `message` and knows no rule by name. It arrives from the worker rather
     /// than from `validate_full` since STORY-276, so the route runs through
-    /// `apply_stale_findings`; `run_stale_findings_now` is that route without a
+    /// `apply_background_findings`; `run_background_findings_now` is that route without a
     /// thread.
     #[test]
     fn the_stale_finding_reaches_the_validation_panel() {
@@ -5385,14 +5429,18 @@ mod tests {
 
         let mut app = make_test_app(0);
         app.store = store;
-        app.run_stale_findings_now(&config, &StalenessCache::off());
+        app.run_background_findings_now(&config, &StalenessCache::off());
 
-        let message = crate::engine::validation::validate_full(&app.store, &config)
-            .warnings
-            .iter()
-            .find(|w| w.rule() == "stale")
-            .expect("a 200-day-old document is stale")
-            .to_string();
+        let message = crate::engine::validation::validate_full(
+            &app.store,
+            &config,
+            &crate::engine::hooks::HookEnv::disabled(),
+        )
+        .warnings
+        .iter()
+        .find(|w| w.rule() == "stale")
+        .expect("a 200-day-old document is stale")
+        .to_string();
         assert!(
             app.validation_warnings.contains(&message),
             "expected the stale finding's message in the panel, got: {:?}",
@@ -5419,7 +5467,7 @@ mod tests {
             app.validation_warnings
         );
 
-        app.run_stale_findings_now(&config, &StalenessCache::off());
+        app.run_background_findings_now(&config, &StalenessCache::off());
 
         assert!(
             app.validation_warnings.iter().any(|w| w.contains("stale")),
@@ -5458,7 +5506,7 @@ mod tests {
         assert!(!shown(&app), "no worker pass has run yet");
         assert_eq!(runner.calls(), 0, "the quick refresh spawned");
 
-        app.run_stale_findings_now(&config, &StalenessCache::off());
+        app.run_background_findings_now(&config, &StalenessCache::off());
         assert_eq!(runner.calls(), 1);
         assert!(shown(&app), "got: {:?}", app.validation_errors);
 
@@ -5476,13 +5524,17 @@ mod tests {
         let mut app = make_test_app(0);
         app.store = store;
 
-        app.request_stale_findings(&config);
-        let superseded = app.stale_findings_generation;
-        app.request_stale_findings(&config);
+        app.request_background_findings(&config);
+        let superseded = app.background_findings_generation;
+        app.request_background_findings(&config);
 
-        app.apply_stale_findings(
+        app.apply_background_findings(
             superseded,
-            crate::engine::validation::validate_full(&app.store, &config),
+            crate::engine::validation::validate_full(
+                &app.store,
+                &config,
+                &crate::engine::hooks::HookEnv::disabled(),
+            ),
             Default::default(),
             &config,
         );
@@ -6970,7 +7022,7 @@ mod tests {
         let cache = StalenessCache::load(app.store.root());
 
         app.run_staleness_now(&config, &cache);
-        app.run_stale_findings_now(&config, &cache);
+        app.run_background_findings_now(&config, &cache);
 
         let count = |prefix: &str| {
             calls

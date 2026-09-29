@@ -130,7 +130,7 @@ fn findings(root: &Path) -> BTreeSet<String> {
     // the other date-bearing fixtures spell it.
     config.staleness.finding = StalenessFinding::Off;
     let store = Store::load(root, &config).expect("the store loads");
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
     result
         .errors
         .iter()
@@ -1501,7 +1501,9 @@ fn seeding_a_config_that_declares_no_dag_declares_a_working_hierarchy() {
     .unwrap();
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    let warnings = store.validate_full(&config).warnings;
+    let warnings = store
+        .validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled())
+        .warnings;
     assert!(
         warnings
             .iter()

@@ -1873,13 +1873,9 @@ fn default_checkers(root: &Path, hooks: &HookEnv) -> Vec<Box<dyn Checker>> {
     checkers
 }
 
-pub fn validate_full(store: &super::store::Store, config: &Config) -> ValidationResult {
-    validate_full_with(store, config, &HookEnv::process(false))
-}
-
-/// [`validate_full`] with the hooks' env supplied, so `--no-hooks` and a test's
-/// fake runner reach the `validate` hooks.
-pub fn validate_full_with(
+/// `hooks` is supplied by the caller so `--no-hooks` and a test's fake runner
+/// reach the `validate` hooks.
+pub fn validate_full(
     store: &super::store::Store,
     config: &Config,
     hooks: &HookEnv,
@@ -2010,7 +2006,7 @@ mod attr_schema_tests {
             "estimate".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("notanumber".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .errors
             .iter()
@@ -2031,7 +2027,7 @@ mod attr_schema_tests {
             "priority".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("urgent".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .errors
             .iter()
@@ -2042,7 +2038,11 @@ mod attr_schema_tests {
     #[test]
     fn missing_required_is_error() {
         let config = config_with_story_attrs(vec![attr("owner", AttrKind::Str, true, &[])]);
-        let result = validate_full(&store_with(story_doc(BTreeMap::new())), &config);
+        let result = validate_full(
+            &store_with(story_doc(BTreeMap::new())),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(result
             .errors
             .iter()
@@ -2058,7 +2058,7 @@ mod attr_schema_tests {
             "mystery".to_string(),
             AttrValue::Raw(serde_yaml::Value::String("x".to_string())),
         );
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(result
             .warnings
             .iter()
@@ -2133,7 +2133,11 @@ mod attr_schema_tests {
             "PROJECT-1.Status".to_string(),
             AttrValue::Str("Frozen".to_string()),
         );
-        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        let result = validate_full(
+            &store_with_root(story_doc(attrs), root),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(
             result
                 .errors
@@ -2162,7 +2166,11 @@ mod attr_schema_tests {
             "PROJECT-1.Status".to_string(),
             AttrValue::Str("In Progress".to_string()),
         );
-        let result = validate_full(&store_with_root(story_doc(attrs), root), &config);
+        let result = validate_full(
+            &store_with_root(story_doc(attrs), root),
+            &config,
+            &HookEnv::disabled(),
+        );
         assert!(!result
             .errors
             .iter()
@@ -2179,7 +2187,7 @@ mod attr_schema_tests {
         let config = config_with_story_attrs(vec![attr("estimate", AttrKind::Int, true, &[])]);
         let mut attrs = BTreeMap::new();
         attrs.insert("estimate".to_string(), AttrValue::Int(5));
-        let result = validate_full(&store_with(story_doc(attrs)), &config);
+        let result = validate_full(&store_with(story_doc(attrs)), &config, &HookEnv::disabled());
         assert!(!result.errors.iter().any(|e| matches!(
             e,
             ValidationIssue::AttributeKindMismatch { .. }
@@ -2652,6 +2660,7 @@ mod edge_tests {
             let result = validate_full(
                 &store,
                 &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+                &HookEnv::disabled(),
             );
 
             assert!(
@@ -2677,6 +2686,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         let found = unsatisfied_edges(&result);
@@ -2716,6 +2726,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -2743,6 +2754,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -2766,6 +2778,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Warning))),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(unsatisfied_edges(&result).len(), 1);
@@ -2790,7 +2803,11 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_implement_work(None)));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_implement_work(None)),
+            &HookEnv::disabled(),
+        );
 
         assert!(
             unsatisfied_edges(&result).is_empty(),
@@ -2814,6 +2831,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_implement_work(Some(Severity::Error))),
+            &HookEnv::disabled(),
         );
 
         assert!(
@@ -2854,7 +2872,11 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_need_some_relation()),
+            &HookEnv::disabled(),
+        );
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -2889,7 +2911,11 @@ mod edge_tests {
                 ),
             ]);
 
-            let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+            let result = validate_full(
+                &store,
+                &config_with_edge(iterations_need_some_relation()),
+                &HookEnv::disabled(),
+            );
 
             assert!(
                 unsatisfied_edges(&result).is_empty(),
@@ -2911,7 +2937,11 @@ mod edge_tests {
             vec![rel("related-to", "STORY-404")],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(iterations_need_some_relation()));
+        let result = validate_full(
+            &store,
+            &config_with_edge(iterations_need_some_relation()),
+            &HookEnv::disabled(),
+        );
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -2954,6 +2984,7 @@ mod edge_tests {
             let result = validate_full(
                 &store,
                 &config_with_edge(iterations_reach_stories_either_way()),
+                &HookEnv::disabled(),
             );
 
             assert!(
@@ -2981,6 +3012,7 @@ mod edge_tests {
         let result = validate_full(
             &store,
             &config_with_edge(iterations_reach_stories_either_way()),
+            &HookEnv::disabled(),
         );
 
         assert_eq!(
@@ -3002,7 +3034,7 @@ mod edge_tests {
             vec![],
         )]);
 
-        let result = validate_full(&store, &config_with_edge(edge));
+        let result = validate_full(&store, &config_with_edge(edge), &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(found.len(), 1, "got: {found:?}");
@@ -3142,7 +3174,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(
@@ -3192,7 +3224,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         let found = unsatisfied_edges(&result);
         assert_eq!(
@@ -3230,7 +3262,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -3262,7 +3294,7 @@ mod edge_tests {
             ),
         ]);
 
-        let result = validate_full(&lone_iteration(), &config);
+        let result = validate_full(&lone_iteration(), &config, &HookEnv::disabled());
 
         assert_eq!(
             unsatisfied_edges(&result).len(),
@@ -3348,7 +3380,7 @@ mod hierarchy_from_edges_tests {
     fn a_chain_edge_row_alone_reports_a_rejected_parent() {
         let (_tmp, store) = story_linked_to_rejected_rfc("implements");
 
-        let result = validate_full(&store, &stories_implement_rfcs());
+        let result = validate_full(&store, &stories_implement_rfcs(), &HookEnv::disabled());
 
         assert!(
             result
@@ -3365,7 +3397,7 @@ mod hierarchy_from_edges_tests {
     fn a_relation_no_chain_row_covers_is_not_a_parent_link() {
         let (_tmp, store) = story_linked_to_rejected_rfc("blocks");
 
-        let result = validate_full(&store, &stories_implement_rfcs());
+        let result = validate_full(&store, &stories_implement_rfcs(), &HookEnv::disabled());
 
         assert!(
             !result
@@ -3678,7 +3710,7 @@ mod governs_no_match_tests {
     fn the_finding_reaches_validate_full_as_a_warning() {
         let (_tmp, store) = store_pinning(&["src/nope/**"]);
 
-        let result = validate_full(&store, &Config::default());
+        let result = validate_full(&store, &Config::default(), &HookEnv::disabled());
 
         assert!(
             result
@@ -3794,7 +3826,7 @@ mod governs_unowned_tests {
         let config = governs_config(&["src/**"], Some(Severity::Error));
         let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert_eq!(
             result
@@ -3821,7 +3853,7 @@ mod governs_unowned_tests {
         let config = governs_config(&["src/**"], Some(Severity::Warning));
         let (_tmp, store) = store_with_a_pinned_and_an_unpinned_module(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert!(
             result
@@ -4260,7 +4292,7 @@ mod stale_tests {
         let config = config_with(StalenessFinding::Warning);
         let (_tmp, store) = store_with_one_of_each_band(&config);
 
-        let result = validate_full(&store, &config);
+        let result = validate_full(&store, &config, &HookEnv::disabled());
 
         assert!(
             result.warnings.iter().any(|i| i.rule() == "stale"),

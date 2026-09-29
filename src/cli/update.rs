@@ -1,5 +1,6 @@
 use crate::engine::config::Config;
 use crate::engine::git_ref::GitRefOps;
+use crate::engine::hooks::HookEnv;
 use crate::engine::store::Store;
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
@@ -8,20 +9,97 @@ pub use crate::engine::ops::update::{run_part, run_with_config};
 
 const RESERVED_ATTR_KEYS: &[&str] = &["status", "title", "body", "author", "reviewed", "governs"];
 
-/// What `update <id> --part <name>` prints: `message` always goes to stdout,
-/// `warning` (a git-ref push that landed locally only) to stderr -- the same
-/// split every other command's push-outcome handling uses in main.rs.
-pub struct PartUpdateOutput {
+/// What `update` prints: `message` to stdout, each of `warnings` (a git-ref
+/// push that landed locally only, hook findings on a saved move) to stderr --
+/// the same split every other command's push-outcome handling uses.
+pub struct UpdateOutput {
     pub message: String,
-    pub warning: Option<String>,
+    pub warnings: Vec<String>,
 }
 
-/// The whole `update <id> --part <name> --body|--body-file` command: guards
-/// against combining `--part` with a document-level flag, requires a body,
-/// writes the part, then renders the result for the CLI to print. Lives here
-/// rather than main.rs per DICTUM-006 ("main.rs does wiring only").
+/// The `update` arguments as the user gave them.
+pub struct UpdateArgs<'a> {
+    pub path: &'a str,
+    pub status: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub assignee: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub part: Option<&'a str>,
+    pub attr: &'a [String],
+    pub json: bool,
+}
+
+/// The whole `update` command. Lives here rather than main.rs per DICTUM-006
+/// ("main.rs does wiring only").
+pub fn run_cli(
+    hooks: &HookEnv,
+    cwd: &Path,
+    config: &Config,
+    store: &Store,
+    args: UpdateArgs,
+    git: &dyn GitRefOps,
+) -> Result<UpdateOutput> {
+    let UpdateArgs {
+        path,
+        status,
+        title,
+        assignee,
+        body,
+        part,
+        attr,
+        json,
+    } = args;
+    if let Some(part_name) = part {
+        let has_conflicting_flags =
+            status.is_some() || title.is_some() || assignee.is_some() || !attr.is_empty();
+        return run_part_cli(
+            cwd,
+            config,
+            store,
+            path,
+            part_name,
+            body,
+            has_conflicting_flags,
+            git,
+            json,
+        );
+    }
+
+    let attr_pairs = parse_attr_pairs(attr)?;
+    let updates: Vec<(&str, &str)> = [
+        ("status", status),
+        ("title", title),
+        ("assignee", assignee),
+        ("body", body),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key, value?)))
+    .chain(attr_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+    .collect();
+    let resolved = crate::cli::resolve::resolve_to_path(store, path)?;
+    let outcome = run_with_config(hooks, cwd, store, path, &updates, config, git)
+        .map_err(|e| crate::cli::hook::exit_if_blocked(e, json))?;
+
+    let mut warnings = Vec::new();
+    let message = if json {
+        let store = Store::load(cwd, config)?;
+        let doc = crate::cli::resolve::resolve_shorthand_or_path(&store, path)?;
+        let mut json_val = crate::cli::json::doc_to_json(doc);
+        crate::cli::json::merge_push_outcome(&mut json_val, &outcome.push);
+        if !outcome.findings.is_empty() {
+            json_val["hook_findings"] = crate::cli::hook::findings_json(&outcome.findings);
+        }
+        serde_json::to_string_pretty(&json_val)?
+    } else {
+        warnings.extend(outcome.findings.iter().map(|f| f.to_string()));
+        warnings.extend(outcome.push.warning().map(str::to_string));
+        format!("Updated {}", resolved.display())
+    };
+    Ok(UpdateOutput { message, warnings })
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn run_part_cli(
+fn run_part_cli(
     cwd: &Path,
     config: &Config,
     store: &Store,
@@ -31,7 +109,7 @@ pub fn run_part_cli(
     has_conflicting_flags: bool,
     git: &dyn GitRefOps,
     json: bool,
-) -> Result<PartUpdateOutput> {
+) -> Result<UpdateOutput> {
     if has_conflicting_flags {
         bail!(
             "'--part' cannot be combined with --status, --title, --assignee or --attr; \
@@ -41,7 +119,11 @@ pub fn run_part_cli(
     let body = body.ok_or_else(|| anyhow!("'--part' requires --body or --body-file"))?;
 
     let push_outcome = run_part(cwd, config, store, path, part_name, body, git)?;
-    let warning = push_outcome.warning().map(str::to_string);
+    let warnings = push_outcome
+        .warning()
+        .map(str::to_string)
+        .into_iter()
+        .collect();
 
     let message = if json {
         let store = Store::load(cwd, config)?;
@@ -53,7 +135,7 @@ pub fn run_part_cli(
         format!("Updated part {} of {}", part_name, path)
     };
 
-    Ok(PartUpdateOutput { message, warning })
+    Ok(UpdateOutput { message, warnings })
 }
 
 /// Parse repeatable `--attr key=value` flags into owned `(key, value)` pairs.

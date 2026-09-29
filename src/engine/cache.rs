@@ -7,7 +7,8 @@ const CACHE_VERSION: u32 = 3;
 
 #[derive(Clone)]
 pub struct DiskCache {
-    dir: PathBuf,
+    /// `None` when there is no user state dir: nothing is cached.
+    dir: Option<PathBuf>,
 }
 
 impl Default for DiskCache {
@@ -18,15 +19,17 @@ impl Default for DiskCache {
 
 impl DiskCache {
     pub fn new() -> Self {
-        let dir = crate::engine::user_state_dir().join("cache");
-        let _ = fs::create_dir_all(&dir);
+        let dir = crate::engine::user_state_dir().map(|dir| dir.join("cache"));
+        if let Some(dir) = &dir {
+            let _ = fs::create_dir_all(dir);
+        }
         DiskCache { dir }
     }
 
     #[cfg(test)]
     pub fn with_dir(dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&dir);
-        DiskCache { dir }
+        DiskCache { dir: Some(dir) }
     }
 
     fn path_hash(path: &Path) -> u64 {
@@ -48,19 +51,24 @@ impl DiskCache {
 
     pub fn read(&self, path: &Path, body_hash: u64) -> Option<String> {
         let key = Self::cache_key(path, body_hash);
-        let file = self.dir.join(key);
+        let file = self.dir.as_ref()?.join(key);
         fs::read_to_string(file).ok()
     }
 
     pub fn write(&self, path: &Path, body_hash: u64, expanded: &str) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
         let key = Self::cache_key(path, body_hash);
-        let file = self.dir.join(key);
-        let _ = fs::write(file, expanded);
+        let _ = fs::write(dir.join(key), expanded);
     }
 
     pub fn invalidate(&self, path: &Path) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
         let path_hash_str = format!("{:016x}", Self::path_hash(path));
-        if let Ok(entries) = fs::read_dir(&self.dir) {
+        if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     if name.contains(&path_hash_str) {
@@ -72,7 +80,10 @@ impl DiskCache {
     }
 
     pub fn clear(&self) {
-        if let Ok(entries) = fs::read_dir(&self.dir) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let _ = fs::remove_file(entry.path());
             }

@@ -114,12 +114,12 @@ fn matching_glob<'a>(globs: &'a [(String, GlobMatcher)], relative: &Path) -> Opt
 /// A document's body under `root`, past its frontmatter. What
 /// [`Store::get_body_raw`] reads, for a caller that holds a root but no store
 /// (the TUI's hook worker).
-pub fn read_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+pub(crate) fn read_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
     DocMeta::extract_body(&fs.read_to_string(&root.join(path))?)
 }
 
 /// A part's whole file content under `root`; see [`Store::get_part_body_raw`].
-pub fn read_part_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
+pub(crate) fn read_part_body(root: &Path, path: &Path, fs: &dyn FileSystem) -> Result<String> {
     fs.read_to_string(&root.join(path))
 }
 
@@ -858,8 +858,12 @@ impl Store {
             .unwrap_or(&[])
     }
 
-    pub fn validate_full(&self, config: &Config) -> crate::engine::validation::ValidationResult {
-        crate::engine::validation::validate_full(self, config)
+    pub fn validate_full(
+        &self,
+        config: &Config,
+        hooks: &crate::engine::hooks::HookEnv,
+    ) -> crate::engine::validation::ValidationResult {
+        crate::engine::validation::validate_full(self, config, hooks)
     }
 
     pub fn search(&self, query: &str, fs: &dyn FileSystem) -> Vec<SearchResult<'_>> {

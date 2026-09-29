@@ -163,7 +163,10 @@ fn validate_reports_child_errors_specifically() {
         "---\ntitle: \"Bad Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/nonexistent.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let child_errors: Vec<_> = result
         .errors
@@ -187,7 +190,10 @@ fn validate_parent_unaffected_by_child_error() {
         "---\ntitle: \"Bad Appendix\"\ntype: rfc\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/nonexistent.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     let parent_errors: Vec<_> = result
         .errors

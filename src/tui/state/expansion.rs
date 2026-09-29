@@ -244,31 +244,36 @@ impl App {
     /// Called from `refresh_validation` and nowhere else -- once per event that
     /// can change what validation says, not once per frame -- so no dedupe key:
     /// each of those events is a reason the previous answer may be wrong.
-    pub fn request_stale_findings(&mut self, config: &Config) {
-        self.stale_findings_generation = self.stale_findings_generation.wrapping_add(1);
-        let _ = self.stale_findings_tx.send(BackgroundFindingsRequest {
+    pub fn request_background_findings(&mut self, config: &Config) {
+        self.background_findings_generation = self.background_findings_generation.wrapping_add(1);
+        let request = self.background_findings_request(config);
+        let _ = self.background_findings_tx.send(request);
+    }
+
+    fn background_findings_request(&self, config: &Config) -> BackgroundFindingsRequest {
+        BackgroundFindingsRequest {
             root: self.store.root().to_path_buf(),
             governs_root: self.store.governs_root().to_path_buf(),
             config: config.clone(),
             docs: self.store.docs.values().cloned().collect(),
             hook_env: self.hook_env.clone(),
-            generation: self.stale_findings_generation,
-        });
+            generation: self.background_findings_generation,
+        }
     }
 
     /// Apply a findings pass, dropping one a newer pass has superseded, and fold
     /// it into the panel.
-    pub fn apply_stale_findings(
+    pub fn apply_background_findings(
         &mut self,
         generation: u64,
         result: crate::engine::validation::ValidationResult,
         hook_findings: crate::engine::validation::ValidationResult,
         config: &Config,
     ) {
-        if generation != self.stale_findings_generation {
+        if generation != self.background_findings_generation {
             return;
         }
-        self.stale_findings = result;
+        self.background_findings = result;
         self.hook_findings = hook_findings;
         self.fold_validation(config);
     }
@@ -325,37 +330,18 @@ impl App {
         self.apply_staleness(self.staleness_generation, staleness);
     }
 
-    /// Test-only synchronous `stale` findings, the shape `run_staleness_now` is:
-    /// dispatch, compute inline through `self.git`, apply.
+    /// Test-only synchronous background findings, the shape `run_staleness_now`
+    /// is: dispatch, compute the request inline through `self.git`, apply.
     #[cfg(test)]
-    pub(crate) fn run_stale_findings_now(
+    pub(crate) fn run_background_findings_now(
         &mut self,
         config: &Config,
         cache: &crate::engine::staleness_cache::StalenessCache,
     ) {
-        self.request_stale_findings(config);
-        let docs: Vec<DocMeta> = self.store.docs.values().cloned().collect();
-        let result = crate::engine::validation::stale_findings(
-            self.store.governs_root(),
-            docs.iter(),
-            config,
-            &*self.git,
-            cache,
-        )
-        .into();
-        let hook_findings = crate::engine::validation::hook_findings(
-            &self.hook_env,
-            self.store.root(),
-            &docs.iter().collect::<Vec<_>>(),
-            config,
-        );
-        cache.flush();
-        self.apply_stale_findings(
-            self.stale_findings_generation,
-            result,
-            hook_findings,
-            config,
-        );
+        self.request_background_findings(config);
+        let request = self.background_findings_request(config);
+        let (result, hook_findings) = request.compute(&*self.git, cache);
+        self.apply_background_findings(request.generation, result, hook_findings, config);
     }
 
     pub fn request_diagram_render(

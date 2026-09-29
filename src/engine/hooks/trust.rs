@@ -1,6 +1,6 @@
 use crate::engine::config::Config;
 use crate::engine::hashing::sha256_hex;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -8,17 +8,21 @@ use std::path::{Path, PathBuf};
 /// Trust): a fingerprint of the `[[hooks]]` table and of every file a `run`
 /// names under the docs root, filed under the project root.
 pub struct TrustStore {
-    file: PathBuf,
+    /// `None` when there is no user state dir to keep trust in: nothing is
+    /// ever trusted, rather than trust living somewhere a repository controls.
+    file: Option<PathBuf>,
 }
 
 impl TrustStore {
     pub fn user_local() -> Self {
-        Self::in_dir(&crate::engine::user_state_dir())
+        Self {
+            file: crate::engine::user_state_dir().map(|dir| dir.join("hook-trust.json")),
+        }
     }
 
     pub fn in_dir(dir: &Path) -> Self {
         Self {
-            file: dir.join("hook-trust.json"),
+            file: Some(dir.join("hook-trust.json")),
         }
     }
 
@@ -30,7 +34,10 @@ impl TrustStore {
     }
 
     fn load(&self) -> HashMap<String, String> {
-        std::fs::read_to_string(&self.file)
+        let Some(file) = &self.file else {
+            return HashMap::new();
+        };
+        std::fs::read_to_string(file)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
@@ -41,12 +48,15 @@ impl TrustStore {
     }
 
     pub fn trust(&self, root: &Path, config: &Config) -> Result<()> {
+        let Some(file) = &self.file else {
+            bail!("nowhere to record trust: HOME is not set; set HOME or LAZYSPEC_STATE_DIR");
+        };
         let mut entries = self.load();
         entries.insert(Self::key(root), fingerprint(root, config));
-        if let Some(dir) = self.file.parent() {
+        if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&self.file, serde_json::to_string_pretty(&entries)?)?;
+        std::fs::write(file, serde_json::to_string_pretty(&entries)?)?;
         Ok(())
     }
 }
@@ -75,4 +85,28 @@ fn fingerprint(root: &Path, config: &Config) -> String {
         }
     }
     sha256_hex(&material)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn without_state_dir() -> TrustStore {
+        TrustStore { file: None }
+    }
+
+    #[test]
+    fn without_a_state_dir_nothing_is_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!without_state_dir().is_trusted(tmp.path(), &Config::default()));
+    }
+
+    #[test]
+    fn without_a_state_dir_trusting_fails_with_a_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = without_state_dir()
+            .trust(tmp.path(), &Config::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("HOME is not set"));
+    }
 }

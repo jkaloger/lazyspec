@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(compute_in(&store, &config, &git).band, Band::Stale);
 
         crate::engine::ops::update::run_with_config(
-            &crate::engine::hooks::HookEnv::process(true),
+            &crate::engine::hooks::HookEnv::disabled(),
             tmp.path(),
             &store,
             "RFC-001",

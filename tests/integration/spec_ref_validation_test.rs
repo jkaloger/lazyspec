@@ -11,13 +11,16 @@ fn spec_index_with_refs(refs: &[&str]) -> String {
 
 fn warning_messages(fixture: &TestFixture) -> Vec<String> {
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
     result.warnings.iter().map(|w| format!("{}", w)).collect()
 }
 
 fn warning_messages_with_config(fixture: &TestFixture, config: &Config) -> Vec<String> {
     let store = lazyspec::engine::store::Store::load(fixture.root(), config).unwrap();
-    let result = store.validate_full(config);
+    let result = store.validate_full(config, &lazyspec::engine::hooks::HookEnv::disabled());
     result.warnings.iter().map(|w| format!("{}", w)).collect()
 }
 

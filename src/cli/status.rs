@@ -10,7 +10,7 @@ use crate::engine::hooks::HookEnv;
 use crate::engine::ops::push::{self, CloneGroup};
 use crate::engine::status_colors::StatusColors;
 use crate::engine::store::Store;
-use crate::engine::validation::validate_full_with;
+use crate::engine::validation::validate_full;
 use std::path::Path;
 
 pub fn run_json(
@@ -32,7 +32,7 @@ pub fn run_json(
         })
         .collect();
 
-    let result = validate_full_with(store, config, hooks);
+    let result = validate_full(store, config, hooks);
     let errors: Vec<_> = result.errors.iter().map(|e| e.to_json()).collect();
     let warnings: Vec<_> = result.warnings.iter().map(|w| w.to_json()).collect();
 

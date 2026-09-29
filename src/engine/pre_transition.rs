@@ -218,7 +218,7 @@ fn check_update(
 
 /// Whether every update still describes the document as it is now. Called
 /// again right before saving, because a hook can run for seconds.
-pub fn updates_are_current(
+pub(crate) fn updates_are_current(
     updates: &[PlannedUpdate],
     store: &Store,
     root: &Path,

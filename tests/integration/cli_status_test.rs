@@ -202,7 +202,10 @@ fn status_json_findings_have_the_same_shape_as_validate_json() {
     .unwrap();
     let validate: serde_json::Value = serde_json::from_str(&lazyspec::cli::validate::run_json(
         &store,
-        &store.validate_full(&fixture.config()),
+        &store.validate_full(
+            &fixture.config(),
+            &lazyspec::engine::hooks::HookEnv::disabled(),
+        ),
         &[],
     ))
     .unwrap();

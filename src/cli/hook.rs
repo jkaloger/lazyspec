@@ -145,6 +145,39 @@ fn blocked_exit(error: &anyhow::Error, json: bool) -> Option<String> {
     Some(serde_json::to_string_pretty(&body).expect("findings serialise as JSON"))
 }
 
+/// The whole `hook` command: what to print and the exit code.
+pub fn run(
+    command: HookCommand,
+    env: &HookEnv,
+    root: &Path,
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<(String, i32)> {
+    let trust = TrustStore::user_local();
+    match command {
+        HookCommand::List { json } => Ok((run_list(root, config, &trust, json), 0)),
+        HookCommand::Trust { json } => Ok((run_trust(root, config, &trust, json)?, 0)),
+        HookCommand::Run {
+            event,
+            id,
+            dry_run,
+            json,
+        } => {
+            let store = Store::load(root, config)?;
+            for warning in store.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            let args = HookRunArgs {
+                event: &event,
+                id: &id,
+                dry_run,
+                json,
+            };
+            run_hook(env, root, config, &store, git, args).map_err(|e| exit_if_blocked(e, json))
+        }
+    }
+}
+
 /// The `hook run` arguments as the user gave them.
 pub struct HookRunArgs<'a> {
     pub event: &'a str,
@@ -180,10 +213,11 @@ pub fn run_hook(
     let outcome =
         crate::engine::ops::update::run_hooks_by_hand(env, root, store, id, dry_run, config, git)?;
     if json {
+        let doc = resolve_shorthand_or_path(store, id).map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok((
             serde_json::to_string_pretty(&json!({
                 "event": event,
-                "id": id,
+                "id": doc.id,
                 "dry_run": dry_run,
                 "findings": findings_json(&outcome.findings),
                 "updates": outcome.updates.iter().map(|u| u.to_json()).collect::<Vec<_>>(),
@@ -220,7 +254,7 @@ fn run_validate_hooks(
     if json {
         let body = json!({
             "event": HookEvent::Validate.as_str(),
-            "id": id,
+            "id": doc.id,
             "errors": result.errors.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
             "warnings": result.warnings.iter().map(|w| w.to_json()).collect::<Vec<_>>(),
         });

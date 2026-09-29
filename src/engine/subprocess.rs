@@ -173,8 +173,8 @@ mod tests {
     #[test]
     fn a_timeout_carries_what_the_child_printed_to_stderr() {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo stuck-here >&2; sleep 10"]);
-        let err = output_with_timeout(cmd, Duration::from_millis(500)).unwrap_err();
+        cmd.args(["-c", "echo stuck-here >&2; sleep 1"]);
+        let err = output_with_timeout(cmd, Duration::from_millis(150)).unwrap_err();
         let timed_out = err.downcast_ref::<TimedOut>().expect("a typed timeout");
         assert!(String::from_utf8_lossy(&timed_out.stderr).contains("stuck-here"));
     }

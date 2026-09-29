@@ -45,7 +45,7 @@ fn update(
     updates: &[(&str, &str)],
 ) -> anyhow::Result<()> {
     lazyspec::cli::update::run_with_config(
-        &HookEnv::process(true),
+        &HookEnv::disabled(),
         fixture.root(),
         store,
         doc,
@@ -191,7 +191,7 @@ fn update_github_milestones_type_routes_to_milestone_branch() {
     let store = lazyspec::engine::store::Store::load(fixture.root(), &config).unwrap();
 
     let err = lazyspec::cli::update::run_with_config(
-        &lazyspec::engine::hooks::HookEnv::process(true),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         fixture.root(),
         &store,
         "MILESTONE-1",

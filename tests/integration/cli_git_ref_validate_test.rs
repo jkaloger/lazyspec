@@ -36,7 +36,7 @@ fn validate_catches_issues_in_git_ref_docs() {
     .unwrap();
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     assert!(
         result.errors.iter().any(|e| matches!(
@@ -68,7 +68,7 @@ fn validate_passes_for_valid_git_ref_docs() {
     .unwrap();
 
     let store = Store::load(fixture.root(), &config).unwrap();
-    let result = store.validate_full(&config);
+    let result = store.validate_full(&config, &lazyspec::engine::hooks::HookEnv::disabled());
 
     let iteration_errors: Vec<_> = result
         .errors

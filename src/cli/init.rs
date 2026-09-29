@@ -1032,7 +1032,7 @@ mod tests {
         );
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "scaffolded project should validate clean: {:?}",
@@ -1427,7 +1427,7 @@ mod tests {
         assert_eq!(loaded.edges[0].traversal, Some(Traversal::Chain));
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "a designed edge must not make a fresh project invalid: {:?}",
@@ -1465,7 +1465,7 @@ mod tests {
         );
 
         let store = Store::load(root, &loaded).unwrap();
-        let result = validate_full(&store, &loaded);
+        let result = validate_full(&store, &loaded, &crate::engine::hooks::HookEnv::disabled());
         assert!(
             result.errors.is_empty(),
             "scaffolded from-scratch project should validate clean: {:?}",

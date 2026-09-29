@@ -4,7 +4,7 @@ use crate::engine::config::Config;
 use crate::engine::gh::{AuthStatus, GhAuth, GhCli};
 use crate::engine::hooks::HookEnv;
 use crate::engine::store::Store;
-use crate::engine::validation::{validate_full_with, ValidationIssue, ValidationResult};
+use crate::engine::validation::{validate_full, ValidationIssue, ValidationResult};
 use console::{colors_enabled, Style};
 use std::path::Path;
 
@@ -54,7 +54,7 @@ pub fn run_full(
 ) -> anyhow::Result<i32> {
     let scope = id.map(|id| resolve_scope_path(store, id)).transpose()?;
 
-    let mut result = validate_full_with(store, config, hooks);
+    let mut result = validate_full(store, config, hooks);
     if let Some(target) = &scope {
         scope_to_path(&mut result, target);
     }
@@ -245,7 +245,7 @@ mod stale_tests {
     fn run_json_gives_the_stale_document_its_rule_path_and_staleness() {
         let config = config_with(StalenessFinding::Warning);
         let (_tmp, store) = one_of_each_band(&config);
-        let result = store.validate_full(&config);
+        let result = store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled());
 
         let output: serde_json::Value =
             serde_json::from_str(&run_json(&store, &result, &[])).unwrap();
@@ -280,7 +280,7 @@ mod stale_tests {
         ] {
             let config = config_with(finding);
             let (_tmp, store) = one_of_each_band(&config);
-            let result = store.validate_full(&config);
+            let result = store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled());
 
             let output: serde_json::Value =
                 serde_json::from_str(&run_json(&store, &result, &[])).unwrap();
@@ -333,7 +333,12 @@ mod tests {
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-        let output = run_human(&store, &store.validate_full(&config), true, &extra);
+        let output = run_human(
+            &store,
+            &store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled()),
+            true,
+            &extra,
+        );
         assert!(output.contains("gh CLI is not installed"));
     }
 
@@ -343,7 +348,12 @@ mod tests {
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh CLI is not installed; github-issues types will not sync".to_string()];
-        let output = run_human(&store, &store.validate_full(&config), false, &extra);
+        let output = run_human(
+            &store,
+            &store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled()),
+            false,
+            &extra,
+        );
         assert!(!output.contains("gh CLI is not installed"));
     }
 
@@ -355,8 +365,12 @@ mod tests {
         let config = Config::default();
         let store = Store::load(dir.path(), &config).unwrap();
         let extra = vec!["gh not installed warning".to_string()];
-        let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &extra)).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&run_json(
+            &store,
+            &store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled()),
+            &extra,
+        ))
+        .unwrap();
 
         let warning = &output["warnings"][0];
         assert_eq!(warning["rule"], GH_AUTH_RULE);
@@ -379,8 +393,12 @@ mod tests {
         let config = Config::default();
         let store = Store::load(tmp.path(), &config).unwrap();
 
-        let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &[])).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&run_json(
+            &store,
+            &store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled()),
+            &[],
+        ))
+        .unwrap();
 
         let finding = output["warnings"]
             .as_array()
@@ -418,8 +436,12 @@ mod tests {
         };
         let store = Store::load(tmp.path(), &config).unwrap();
 
-        let output: serde_json::Value =
-            serde_json::from_str(&run_json(&store, &store.validate_full(&config), &[])).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&run_json(
+            &store,
+            &store.validate_full(&config, &crate::engine::hooks::HookEnv::disabled()),
+            &[],
+        ))
+        .unwrap();
 
         let unowned: Vec<&serde_json::Value> = output["warnings"]
             .as_array()

@@ -178,10 +178,10 @@ fn save_together(
         return Ok(PushOutcome::Synced);
     };
     write_doc(root, store, doc_path, status_update, Some(config), git).map_err(|e| {
-        let unrestored = roll_back(&saved, root, store, config, git);
-        if unrestored.is_empty() {
+        if saved.is_empty() {
             return e;
         }
+        let unrestored = roll_back(&saved, root, store, config, git);
         rolled_back_error(e, "saving the status", unrestored)
     })
 }
@@ -217,7 +217,7 @@ pub fn run_with_config(
         .map(|(_, target)| *target)
         .filter(|target| *target != doc.status.as_str());
     let Some(target) = target else {
-        let push = write_doc(root, store, doc_path, updates, Some(config), git)?;
+        let push = write_doc_gated(root, store, doc_path, updates, config, git)?;
         return Ok(TransitionOutcome {
             push,
             findings: Vec::new(),
@@ -319,6 +319,27 @@ fn check_status_gate(root: &Path, type_def: &TypeDef, current: &str, target: &st
     gate_status_transition(type_def, current, board_state.as_deref().unwrap_or(target))
 }
 
+/// [`write_doc`] for a write nothing has gated yet: a `status` in `updates` is
+/// checked against the type's lifecycle first.
+fn write_doc_gated(
+    root: &Path,
+    store: &Store,
+    doc_path: &str,
+    updates: &[(&str, &str)],
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<PushOutcome> {
+    if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
+        let doc = resolve_shorthand_or_path(store, doc_path)?;
+        if let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) {
+            check_status_gate(root, type_def, doc.status.as_str(), target)?;
+        }
+    }
+    write_doc(root, store, doc_path, updates, Some(config), git)
+}
+
+/// Writes without checking the status gate: [`run_with_config`] has already
+/// checked it before the hooks ran, and the update bodies carry no status.
 fn write_doc(
     root: &Path,
     store: &Store,
@@ -331,9 +352,6 @@ fn write_doc(
         let doc = resolve_shorthand_or_path(store, doc_path)?;
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
-            if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
-                check_status_gate(root, type_def, doc.status.as_str(), target)?;
-            }
             // A local transition is a human declaring the document true against
             // the code in front of them, so it resets the staleness clock in the
             // same write as the status -- never a second pass. A status arriving
@@ -442,7 +460,7 @@ mod tests {
         let git = MockGitRefClient::new();
 
         run_with_config(
-            &HookEnv::process(true),
+            &HookEnv::disabled(),
             tmp.path(),
             &store,
             "RFC-001",
@@ -472,7 +490,7 @@ mod tests {
         let git = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
 
         run_with_config(
-            &HookEnv::process(true),
+            &HookEnv::disabled(),
             tmp.path(),
             &store,
             "RFC-001",
@@ -500,7 +518,7 @@ mod tests {
         let git = MockGitRefClient::new().with_head_result(Err(anyhow::anyhow!("no HEAD")));
 
         run_with_config(
-            &HookEnv::process(true),
+            &HookEnv::disabled(),
             tmp.path(),
             &store,
             "RFC-001",
@@ -527,7 +545,7 @@ mod tests {
         let git = MockGitRefClient::new();
 
         run_with_config(
-            &HookEnv::process(true),
+            &HookEnv::disabled(),
             tmp.path(),
             &store,
             "RFC-001",
@@ -761,7 +779,7 @@ mod tests {
 
         let result = save_together(
             &[update],
-            Some(("RFC-001", &[("status", "no-such-status")])),
+            Some(("RFC-999", &[("status", "review")])),
             tmp.path(),
             &store,
             &config,
@@ -769,7 +787,8 @@ mod tests {
             &crate::engine::fs::RealFileSystem,
         );
 
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("nothing was saved"), "{err}");
         let content = doc_on_disk(tmp.path());
         assert!(!content.contains("hooked"), "{content}");
         assert_eq!(content, original);

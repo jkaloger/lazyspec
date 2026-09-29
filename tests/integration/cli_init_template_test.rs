@@ -341,8 +341,6 @@ impl Adopted {
     }
 }
 
-// STORY-297 AC1: the pack's `.lazyspec/hooks/` is copied, nested files
-// included, and listed under `--json`.
 #[test]
 fn init_template_copies_and_lists_nested_hook_files() {
     let pack = pack_with_hook();
@@ -367,7 +365,6 @@ fn init_template_copies_and_lists_nested_hook_files() {
         .is_file());
 }
 
-// STORY-297 AC1: a copied hook script keeps its exec bit.
 #[cfg(unix)]
 #[test]
 fn init_template_keeps_a_hook_scripts_exec_bit() {
@@ -382,7 +379,6 @@ fn init_template_keeps_a_hook_scripts_exec_bit() {
     assert!(mode & 0o111 != 0, "hook script stays executable");
 }
 
-// STORY-297 AC2: the adopted hooks start untrusted.
 #[test]
 fn init_template_hooks_start_untrusted() {
     let pack = pack_with_hook();
@@ -394,7 +390,6 @@ fn init_template_hooks_start_untrusted() {
     assert_eq!(hooks[0]["trust"], "untrusted");
 }
 
-// STORY-297 AC2: `--json` names the command that trusts the hooks.
 #[test]
 fn init_template_json_names_the_trust_command() {
     let pack = pack_with_hook();
@@ -403,7 +398,6 @@ fn init_template_json_names_the_trust_command() {
     assert_eq!(adopted.json()["trust"], "lazyspec hook trust");
 }
 
-// STORY-297 AC2: plain output prints the trust command too.
 #[test]
 fn init_template_prints_the_trust_hint() {
     let pack = pack_with_hook();
@@ -430,20 +424,20 @@ fn init_template_hints_trust_for_hooks_run_from_elsewhere() {
     assert_eq!(adopted.json()["trust"], "lazyspec hook trust");
 }
 
-// A pack without hooks prints no trust hint.
 #[test]
 fn init_template_without_hooks_has_no_trust_hint() {
     let dir = TempDir::new().unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lazyspec"))
-        .args([
+    let state = TempDir::new().unwrap();
+    let output = Adopted::bin_in(
+        dir.path(),
+        state.path(),
+        &[
             "init",
             "--template",
             openspec_pack().to_str().unwrap(),
             "--json",
-        ])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+        ],
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json.get("trust").is_none());
 }

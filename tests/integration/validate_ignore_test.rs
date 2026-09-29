@@ -9,7 +9,10 @@ fn ignored_document_with_broken_link_produces_no_error() {
         "---\ntitle: \"Ignored ADR\"\ntype: adr\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nvalidate-ignore: true\nrelated:\n- implements: docs/rfcs/NONEXISTENT.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(
         !result
@@ -35,7 +38,10 @@ fn non_ignored_documents_still_report_errors() {
         "---\ntitle: \"Normal ADR\"\ntype: adr\nstatus: accepted\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\nrelated:\n- implements: docs/rfcs/ALSO-NONEXISTENT.md\n---\n",
     );
     let store = fixture.store();
-    let result = store.validate_full(&fixture.config());
+    let result = store.validate_full(
+        &fixture.config(),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
+    );
 
     assert!(
         result.errors.iter().any(|e| matches!(

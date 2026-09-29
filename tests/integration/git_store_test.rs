@@ -219,7 +219,7 @@ fn update_tag_provenance_and_delete_each_commit_locally_once() {
     let mut expected = commit_count(&clone, "HEAD");
 
     lazyspec::engine::ops::update::run_with_config(
-        &lazyspec::engine::hooks::HookEnv::process(true),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         root,
         &store,
         "RFC-001",
@@ -704,7 +704,7 @@ fn rebase_onto_remote_conflict_aborts_and_keeps_the_local_commit() {
     let clone = identify_clone(root, remote.path(), Some("next"));
 
     lazyspec::engine::ops::update::run_with_config(
-        &lazyspec::engine::hooks::HookEnv::process(true),
+        &lazyspec::engine::hooks::HookEnv::disabled(),
         root,
         &store,
         "RFC-001",

@@ -195,20 +195,27 @@ pub(crate) fn parse_reply(
 pub(crate) fn hook_document(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> Value {
     let mut json = doc_to_json(doc);
     let body = read_body(root, &doc.path, fs).unwrap_or_default();
-    let mut hashed = body.clone();
+    let mut hashed = Vec::new();
+    push_field(&mut hashed, body.as_bytes());
     if let Some(entries) = json.get_mut("parts").and_then(|p| p.as_array_mut()) {
         for (part, entry) in doc.parts.iter().zip(entries.iter_mut()) {
             let part_body = read_part_body(root, &part.path, fs).unwrap_or_default();
-            hashed.push_str(&part.name);
-            hashed.push_str(&part_body);
+            push_field(&mut hashed, part.name.as_bytes());
+            push_field(&mut hashed, part_body.as_bytes());
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert("body".to_string(), Value::String(part_body));
             }
         }
     }
     json["body"] = Value::String(body);
-    json["content_hash"] = Value::String(sha256_hex(hashed.as_bytes()));
+    json["content_hash"] = Value::String(sha256_hex(&hashed));
     json
+}
+
+/// Length-prefixed, so `("ab", "c")` and `("a", "bc")` hash differently.
+fn push_field(hashed: &mut Vec<u8>, field: &[u8]) {
+    hashed.extend((field.len() as u64).to_le_bytes());
+    hashed.extend(field);
 }
 
 fn validate_input(
@@ -260,6 +267,11 @@ impl HookEnv {
             fs: Arc::new(RealFileSystem),
             disabled: no_hooks,
         }
+    }
+
+    /// `--no-hooks`: nothing runs and no trust is read.
+    pub fn disabled() -> Self {
+        Self::process(true)
     }
 }
 
