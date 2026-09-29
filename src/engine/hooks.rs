@@ -46,7 +46,7 @@ pub struct HookFinding {
 }
 
 impl HookFinding {
-    fn error(message: String) -> Self {
+    pub(crate) fn error(message: String) -> Self {
         Self {
             severity: Severity::Error,
             id: None,
@@ -131,16 +131,43 @@ fn with_stderr(message: String, stderr: &str) -> String {
 /// What a hook's run means as findings. Every way a hook can misbehave becomes
 /// one error finding that names it (RFC-075): the caller never sees a `Result`.
 fn interpret(hook: &HookDef, run: Result<HookProcess>) -> Vec<HookFinding> {
+    let reply = match parse_reply(hook, run) {
+        Ok(reply) => reply,
+        Err(finding) => return vec![finding],
+    };
+    if !reply.updates.is_empty() {
+        return vec![HookFinding::error(with_stderr(
+            "returned `updates`, which a validate hook may not".to_string(),
+            &reply.stderr,
+        ))];
+    }
+    reply.findings
+}
+
+/// What a hook that ran cleanly said: its findings, and the updates it asked for
+/// still unchecked.
+pub(crate) struct ParsedReply {
+    pub findings: Vec<HookFinding>,
+    pub updates: Vec<Value>,
+    stderr: String,
+}
+
+/// A hook that timed out, crashed, exited non-zero or printed something that is
+/// not the protocol is one error finding.
+pub(crate) fn parse_reply(
+    hook: &HookDef,
+    run: Result<HookProcess>,
+) -> std::result::Result<ParsedReply, HookFinding> {
     let process = match run {
         Ok(process) => process,
         Err(e) => match e.downcast_ref::<TimedOut>() {
             Some(timed_out) => {
-                return vec![HookFinding::error(with_stderr(
+                return Err(HookFinding::error(with_stderr(
                     format!("timed out after {}s", hook.timeout().as_secs()),
                     &String::from_utf8_lossy(&timed_out.stderr),
-                ))]
+                )))
             }
-            None => return vec![HookFinding::error(format!("could not run: {e}"))],
+            None => return Err(HookFinding::error(format!("could not run: {e}"))),
         },
     };
     if process.code != Some(0) {
@@ -148,37 +175,35 @@ fn interpret(hook: &HookDef, run: Result<HookProcess>) -> Vec<HookFinding> {
             Some(code) => format!("exited with status {code}"),
             None => "was killed by a signal".to_string(),
         };
-        return vec![HookFinding::error(with_stderr(status, &process.stderr))];
+        return Err(HookFinding::error(with_stderr(status, &process.stderr)));
     }
     let reply: Reply = match serde_json::from_str(&process.stdout) {
         Ok(reply) => reply,
         Err(e) => {
-            return vec![HookFinding::error(with_stderr(
+            return Err(HookFinding::error(with_stderr(
                 format!("printed invalid JSON: {e}"),
                 &process.stderr,
-            ))]
+            )))
         }
     };
-    if !reply.updates.is_empty() {
-        return vec![HookFinding::error(with_stderr(
-            "returned `updates`, which a validate hook may not".to_string(),
-            &process.stderr,
-        ))];
-    }
-    reply
-        .findings
-        .into_iter()
-        .map(|f| HookFinding {
-            severity: f.severity,
-            id: f.id,
-            part: f.part,
-            line: f.line,
-            message: f.message,
-        })
-        .collect()
+    Ok(ParsedReply {
+        findings: reply
+            .findings
+            .into_iter()
+            .map(|f| HookFinding {
+                severity: f.severity,
+                id: f.id,
+                part: f.part,
+                line: f.line,
+                message: f.message,
+            })
+            .collect(),
+        updates: reply.updates,
+        stderr: process.stderr,
+    })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -188,7 +213,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// A document as a hook reads it: the `show --json` shape with `body`, each
 /// part with its `body`, and a `content_hash` over all of them -- the value a
 /// `pre-transition` update echoes back to prove the document did not move.
-fn hook_document(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> Value {
+pub(crate) fn hook_document(doc: &DocMeta, root: &Path, fs: &dyn FileSystem) -> Value {
     let mut json = doc_to_json(doc);
     let body = fs
         .read_to_string(&root.join(&doc.path))
@@ -834,5 +859,96 @@ mod tests {
         };
         let findings = interpret(&hook, ProcessRunner.run(&hook, tmp.path(), b"{}"));
         assert_eq!(findings[0].message, "timed out after 1s");
+    }
+}
+
+/// Fakes for the surfaces that run hooks: a runner that answers from a closure
+/// and records what it was called with, and envs with a trust store in the
+/// project's temp dir.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    type Answer = Box<dyn Fn(&str, &Value) -> String + Send + Sync>;
+
+    pub(crate) struct ScriptedRunner {
+        answer: Answer,
+        called: Mutex<Vec<(String, Value)>>,
+        pub(crate) count: AtomicUsize,
+    }
+
+    impl ScriptedRunner {
+        pub(crate) fn new(
+            answer: impl Fn(&str, &Value) -> String + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                answer: Box::new(answer),
+                called: Mutex::new(Vec::new()),
+                count: AtomicUsize::new(0),
+            })
+        }
+
+        pub(crate) fn hooks_called(&self) -> Vec<String> {
+            self.called
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(hook, _)| hook.clone())
+                .collect()
+        }
+
+        pub(crate) fn last_input(&self) -> Value {
+            self.called.lock().unwrap().last().unwrap().1.clone()
+        }
+    }
+
+    impl HookRunner for ScriptedRunner {
+        fn run(&self, hook: &HookDef, _: &Path, input: &[u8]) -> Result<HookProcess> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            let input: Value = serde_json::from_slice(input).unwrap();
+            let stdout = (self.answer)(&hook.name, &input);
+            self.called.lock().unwrap().push((hook.name.clone(), input));
+            Ok(HookProcess {
+                code: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    pub(crate) fn fixture_hook(name: &str, event: HookEvent) -> HookDef {
+        HookDef {
+            name: name.to_string(),
+            event,
+            run: vec![format!(".lazyspec/hooks/{name}")],
+            types: Vec::new(),
+            from: None,
+            to: None,
+            context_types: Vec::new(),
+            timeout: None,
+        }
+    }
+
+    pub(crate) fn untrusted_env(runner: Arc<ScriptedRunner>, tmp: &tempfile::TempDir) -> HookEnv {
+        HookEnv {
+            runner,
+            trust: Arc::new(TrustStore::in_dir(&tmp.path().join(".hook-state"))),
+            cache: Arc::new(HookCache::default()),
+        }
+    }
+
+    pub(crate) fn trusted_env(
+        runner: Arc<ScriptedRunner>,
+        root: &Path,
+        config: &Config,
+    ) -> HookEnv {
+        let trust = TrustStore::in_dir(&root.join(".hook-state"));
+        trust.trust(root, &config.hooks).unwrap();
+        HookEnv {
+            runner,
+            trust: Arc::new(trust),
+            cache: Arc::new(HookCache::default()),
+        }
     }
 }

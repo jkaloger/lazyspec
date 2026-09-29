@@ -232,6 +232,7 @@ pub fn keybinds_for(ctx: KeyContext) -> Vec<KeybindGroup> {
                     ]
                 ),
                 bind!("Enter", "Select", [k(KeyCode::Enter)]),
+                bind!("h", "Run hooks", [k(KeyCode::Char('h'))]),
                 bind!("Esc", "Cancel", [k(KeyCode::Esc)]),
             ],
         }],

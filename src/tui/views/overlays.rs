@@ -543,6 +543,14 @@ pub fn draw_settings_variant_picker(f: &mut Frame, app: &App) {
     f.render_widget(hint, rows[1]);
 }
 
+fn wrapped_height(message: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    message
+        .lines()
+        .map(|line| (line.chars().count() + 2).div_ceil(width).max(1) as u16)
+        .sum()
+}
+
 pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
     let area = f.area();
 
@@ -559,9 +567,17 @@ pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
         .map(|s| Status::new(s))
         .collect();
 
-    let popup_width = 25u16.min(area.width.saturating_sub(4));
+    let message = app
+        .status_picker
+        .error
+        .as_ref()
+        .map(|m| (m, Color::Red))
+        .or_else(|| app.status_picker.notice.as_ref().map(|m| (m, Color::Green)));
+    let popup_width = if message.is_some() { 72 } else { 25 }.min(area.width.saturating_sub(4));
+    let message_height =
+        message.map_or(0, |(m, _)| wrapped_height(m, popup_width.saturating_sub(4)));
     // states + blank line + keybind hint + top/bottom border
-    let content_height = statuses.len() as u16 + 4;
+    let content_height = statuses.len() as u16 + 4 + message_height;
     let popup_height = content_height.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
@@ -586,16 +602,18 @@ pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
         })
         .collect();
 
-    if let Some(ref err) = app.status_picker.error {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", err),
-            Style::default().fg(Color::Red),
-        )));
+    if let Some((message, color)) = message {
+        lines.extend(message.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(color),
+            ))
+        }));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "[j/k] [Enter] [Esc]",
+        "[j/k] [Enter] [h: run hooks] [Esc]",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -606,6 +624,7 @@ pub fn draw_status_picker(f: &mut Frame, app: &App, colors: &StatusPalette) {
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Status "),
     );
+    let paragraph = paragraph.wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(paragraph, popup_area);
 }
 

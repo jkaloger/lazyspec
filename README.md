@@ -39,7 +39,7 @@ Most commands accept `--json`. `lazyspec help <command>` prints the complete opt
 | `validate`                               | Reports document, relationship, staleness, and source ownership findings. `--id <id>` limits document findings to one document.                                                                                               |
 | `fix`                                    | Repairs supported document findings. `--config`, `--governs`, and `--renumber` select other repair modes. `--dry-run` previews changes.                                                                                       |
 | `govern add/remove/list`                 | Manages source file globs on a document.                                                                                                                                                                                      |
-| `hook list` / `hook trust`               | Lists the `[[hooks]]` entries with their event, scope, and trust state / trusts the current hook table. `--no-hooks` (any command) skips every hook.                                                                  |
+| `hook list` / `hook trust` / `hook run <event> <id> [--dry-run]` | Lists the `[[hooks]]` entries with their event, scope, and trust state / trusts the current hook table / fires the `pre-transition` hooks for one document without changing its status (`--dry-run` saves nothing). `--no-hooks` (any command) skips every hook.                                                                  |
 | `pin <id>`                               | Records the current Git commit as the document's review anchor and pins `@ref` directives.                                                                                                                                    |
 | `provenance add/remove/list`             | Manages document citations.                                                                                                                                                                                                   |
 | `fetch` / `push`                         | Refreshes remote documents / publishes commits from `git` stores.                                                                                                                                                             |
@@ -76,6 +76,16 @@ timeout = 30
 `run` is an argv array resolved from the project root, with no shell. `types` defaults to every type. `timeout` is in seconds and defaults to 30. Findings appear in `validate`, `status`, and the terminal interface like built-in findings, and name the hook. A non-zero exit, invalid JSON, a timeout, or any `updates` in the output becomes one error finding that includes the hook's stderr.
 
 Hooks from a cloned repository do not run until you run `lazyspec hook trust`. Trust records a hash of the `[[hooks]]` table and of each `run` file inside the repository, in `~/.lazyspec/hook-trust.json` (or `$LAZYSPEC_STATE_DIR`). Editing either makes the hooks untrusted again, and validation warns until you trust them. The terminal interface reads results cached from the last full validation and never spawns a hook on refresh.
+
+#### pre-transition
+
+`event = "pre-transition"` hooks run when `update --status` or the terminal interface moves a document's status. Scope them with `types`, `from` and `to`; hooks run in declaration order. The hook receives `{"event", "hook", "transition": {"from", "to"}, "documents": [<the document>], "context": [<documents of context_types>]}`, each document in the same shape as for `validate`.
+
+An error finding blocks the move and stops the remaining hooks: `update` exits non-zero and prints the findings (with `--json`, `{"error", "findings"}`), and the terminal interface shows them on the status picker and leaves the status alone. Warnings are reported and the move goes ahead (`hook_findings` in `update --json`). Untrusted hooks and `--no-hooks` skip the event.
+
+A hook can also return `"updates": [{"id", "part", "hash", "body"}]` to rewrite the body of a document or one of its parts. `hash` is the document's `content_hash` as it was sent. Every update is checked (the document exists, the hash still matches, only those four fields) before any is saved, then all are saved with the status through the `update --body` / `--part` path, so it works for every store. If any check or write fails, nothing is saved.
+
+`hook run pre-transition <id>` fires the same hooks with `from` and `to` both set to the current status, saves the updates, and leaves the status. In the terminal interface, press `h` in the status picker. There is no command palette yet.
 
 ### Terminal interface
 

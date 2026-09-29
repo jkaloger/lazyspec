@@ -34,6 +34,7 @@ mod cli_link_test;
 mod cli_missing_part_test;
 mod cli_mutate_test;
 mod cli_no_config_test;
+mod cli_pre_transition_test;
 mod cli_query_test;
 mod cli_spinner_parity_test;
 mod cli_status_test;

@@ -3507,11 +3507,50 @@ impl App {
         self.status_picker.active = true;
     }
 
+    /// `hook run pre-transition` for the document the status picker is open on
+    /// (STORY-296 AC4): saves what the hooks update, leaves the status.
+    pub fn run_hooks_for_picker_doc(&mut self, root: &Path, config: &Config) {
+        let doc_path = self.status_picker.doc_path.to_string_lossy().to_string();
+        self.status_picker.error = None;
+        self.status_picker.notice = None;
+        let outcome = crate::engine::ops::update::run_hooks_by_hand(
+            &self.hook_env,
+            root,
+            &self.store,
+            &doc_path,
+            false,
+            config,
+            &*self.git,
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.status_picker.error = Some(e.to_string());
+                return;
+            }
+        };
+        for path in &outcome.touched {
+            if let Err(e) = self.store.reload_file(root, path, &*self.fs) {
+                self.status_picker.error = Some(e.to_string());
+                self.filtered_docs_cache = None;
+                return;
+            }
+        }
+        self.filtered_docs_cache = None;
+        let mut lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
+        lines.extend(outcome.updates.iter().map(|u| format!("updated {}", u.id)));
+        if lines.is_empty() {
+            lines.push("hooks ran; nothing to report".to_string());
+        }
+        self.status_picker.notice = Some(lines.join("\n"));
+    }
+
     pub fn close_status_picker(&mut self) {
         self.status_picker.active = false;
         self.status_picker.selected = 0;
         self.status_picker.doc_path = PathBuf::new();
         self.status_picker.error = None;
+        self.status_picker.notice = None;
     }
 
     pub fn confirm_status_change(&mut self, root: &Path, config: &Config) -> Result<()> {
@@ -3522,22 +3561,32 @@ impl App {
         let doc_path = self.status_picker.doc_path.clone();
         let doc_path_str = doc_path.to_string_lossy().to_string();
 
-        if let Err(e) = crate::engine::ops::update::run_with_config(
+        let outcome = match crate::engine::ops::update::run_with_hooks(
+            &self.hook_env,
             root,
             &self.store,
             &doc_path_str,
             &[("status", &status.to_string())],
-            Some(config),
+            config,
             &*self.git,
         ) {
-            self.status_picker.error = Some(e.to_string());
-            return Err(e);
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.status_picker.error = Some(e.to_string());
+                return Err(e);
+            }
+        };
+        for path in &outcome.touched {
+            self.store.reload_file(root, path, &*self.fs)?;
         }
-        self.store.reload_file(root, &doc_path, &*self.fs)?;
         self.filtered_docs_cache = None;
         self.build_doc_tree();
         self.status_picker.error = None;
         self.close_status_picker();
+        if !outcome.warnings.is_empty() {
+            let lines: Vec<String> = outcome.warnings.iter().map(|f| f.to_string()).collect();
+            self.open_message = Some(lines.join("\n"));
+        }
         self.recompute_unpushed_count(config);
         Ok(())
     }
@@ -3944,7 +3993,7 @@ impl App {
                 "create_form.author={} create_form.tags={} create_form.related={} ",
                 "delete_confirm.active={} override_key_prompt.active={} override_input={} ",
                 "settings_delete_confirm.active={} settings_impact_confirm.active={} ",
-                "status_picker.active={} status_picker.selected={} ",
+                "status_picker.active={} status_picker.selected={} status_picker.notice={:?} ",
                 "link_editor.active={} link_editor.selected={} link_editor.query_len={} ",
                 "link_editor.rel_type_index={} link_editor.results_len={} ",
                 "provenance_editor.active={} provenance_buf_len={} ",
@@ -3994,6 +4043,7 @@ impl App {
             self.settings_impact_confirm.active,
             self.status_picker.active,
             self.status_picker.selected,
+            self.status_picker.notice,
             self.link_editor.active,
             self.link_editor.selected,
             self.link_editor.query.len(),
@@ -5728,6 +5778,109 @@ mod tests {
             app.status_picker.error.is_none(),
             "the error is cleared on success"
         );
+    }
+
+    // STORY-296 AC2: a pre-transition hook's error finding shows on the picker and
+    // the status stays as it was.
+    #[test]
+    fn a_blocking_hook_leaves_the_status_and_shows_its_findings() {
+        use crate::engine::config::HookEvent;
+        use crate::engine::hooks::test_support::{fixture_hook, trusted_env, ScriptedRunner};
+
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = Config {
+            hooks: vec![fixture_hook("gate", HookEvent::PreTransition)],
+            ..Config::default()
+        };
+        let runner = ScriptedRunner::new(|_, _| {
+            r#"{"findings":[{"severity":"error","message":"needs a goal"}]}"#.to_string()
+        });
+        app.hook_env = trusted_env(runner, &root, &config);
+        app.status_picker.active = true;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
+        app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.status_picker.selected = 1;
+
+        assert!(app.confirm_status_change(&root, &config).is_err());
+
+        assert!(app.status_picker.active);
+        let shown = app.status_picker.error.clone().unwrap();
+        assert!(shown.contains("needs a goal"), "{shown}");
+        let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
+        assert!(content.contains("status: draft"), "{content}");
+    }
+
+    fn picker_on_rfc_001(app: &mut App, root: &Path, config: &Config, reply: String) {
+        use crate::engine::hooks::test_support::{trusted_env, ScriptedRunner};
+        let runner = ScriptedRunner::new(move |_, _| reply.clone());
+        app.hook_env = trusted_env(runner, root, config);
+        app.status_picker.active = true;
+        app.status_picker.states = crate::engine::config::default_lifecycle().states;
+        app.status_picker.doc_path = PathBuf::from("docs/rfcs/RFC-001-a.md");
+        app.status_picker.selected = 1;
+    }
+
+    fn hook_config() -> Config {
+        use crate::engine::config::HookEvent;
+        use crate::engine::hooks::test_support::fixture_hook;
+        Config {
+            hooks: vec![fixture_hook("gate", HookEvent::PreTransition)],
+            ..Config::default()
+        }
+    }
+
+    // STORY-296 AC2: a warning does not block the move, and the TUI shows it.
+    #[test]
+    fn a_warning_finding_is_shown_after_the_move_happens() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = hook_config();
+        let reply = r#"{"findings":[{"severity":"warning","message":"consider a goal"}]}"#;
+        picker_on_rfc_001(&mut app, &root, &config, reply.to_string());
+
+        app.confirm_status_change(&root, &config).unwrap();
+
+        assert!(!app.status_picker.active);
+        let shown = app.open_message.clone().unwrap();
+        assert!(shown.contains("consider a goal"), "{shown}");
+        let content = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
+        assert!(content.contains("status: review"), "{content}");
+    }
+
+    // STORY-296 AC4: `h` in the picker runs the hooks, saves what they update,
+    // leaves the status, and reports what it did.
+    #[test]
+    fn h_in_the_picker_saves_the_hooks_updates_and_keeps_the_status() {
+        let (_tmp, mut app) = bare_app();
+        populate_docs(&mut app);
+        let root = app.store.root.clone();
+        let config = hook_config();
+        let hash = crate::engine::hooks::hook_document(
+            app.store.resolve_shorthand("RFC-002").unwrap(),
+            &root,
+            &crate::engine::fs::RealFileSystem,
+        )["content_hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let reply = serde_json::json!({
+            "updates": [{"id": "RFC-002", "hash": hash, "body": "rewritten by hook"}]
+        })
+        .to_string();
+        picker_on_rfc_001(&mut app, &root, &config, reply);
+
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::NONE, &root, &config);
+
+        let updated = std::fs::read_to_string(root.join("docs/rfcs/RFC-002-a.md")).unwrap();
+        assert!(updated.contains("rewritten by hook"), "{updated}");
+        let unchanged = std::fs::read_to_string(root.join("docs/rfcs/RFC-001-a.md")).unwrap();
+        assert!(unchanged.contains("status: draft"), "{unchanged}");
+        assert!(app.status_picker.active);
+        let notice = app.status_picker.notice.clone().unwrap();
+        assert!(notice.contains("updated RFC-002"), "{notice}");
     }
 
     // STORY-274 AC2: a status change from the TUI resets the staleness clock the

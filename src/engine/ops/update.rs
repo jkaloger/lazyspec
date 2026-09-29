@@ -3,11 +3,13 @@ use crate::engine::config::{Config, StoreBackend, TypeDef};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::fs_ops;
 use crate::engine::git_ref::GitRefOps;
+use crate::engine::hooks::HookEnv;
 use crate::engine::ops::resolve::resolve_shorthand_or_path;
+use crate::engine::pre_transition::{self, updates_are_current, PlannedUpdate, ReportedFinding};
 use crate::engine::store::Store;
 use crate::engine::store_dispatch::{DocumentStore, PushOutcome};
 use anyhow::{anyhow, bail, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `update <id> --part <name> --body|--body-file` (STORY-291 AC7): write a
 /// part's whole body, creating the part if the document has none by that
@@ -88,6 +90,196 @@ pub fn run(
     run_with_config(root, store, doc_path, updates, None, git)
 }
 
+/// What a move that ran hooks did: the outcome of saving it, the findings that
+/// did not block it, and every file it wrote, so a surface holding the store
+/// can reload them.
+pub struct TransitionOutcome {
+    pub push: PushOutcome,
+    pub warnings: Vec<ReportedFinding>,
+    pub updates: Vec<PlannedUpdate>,
+    pub touched: Vec<PathBuf>,
+}
+
+/// Put back what `saved` replaced, newest first. A store that refuses a
+/// restore leaves that one document as the hook made it; those are returned
+/// as `"<id> (<reason>)"` so the caller can name them.
+fn roll_back(
+    saved: &[&PlannedUpdate],
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Vec<String> {
+    saved
+        .iter()
+        .rev()
+        .filter_map(|update| {
+            write_update(update, &update.original, root, store, config, git)
+                .err()
+                .map(|e| format!("{} ({e})", update.id))
+        })
+        .collect()
+}
+
+/// `failure` with the outcome of rolling back: "nothing was saved" only when
+/// every restore worked, otherwise the documents left changed.
+fn rolled_back_error(
+    failure: anyhow::Error,
+    context: &str,
+    unrestored: Vec<String>,
+) -> anyhow::Error {
+    if unrestored.is_empty() {
+        return failure.context(format!("{context}; nothing was saved"));
+    }
+    failure.context(format!(
+        "{context}; rolling back failed, so these documents are left changed by the hooks: {}",
+        unrestored.join(", ")
+    ))
+}
+
+fn write_update(
+    update: &PlannedUpdate,
+    body: &str,
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<()> {
+    match &update.part {
+        Some(part) => run_part(root, config, store, &update.id, part, body, git).map(|_| ()),
+        None => run_with_config(
+            root,
+            store,
+            &update.id,
+            &[("body", body)],
+            Some(config),
+            git,
+        )
+        .map(|_| ()),
+    }
+}
+
+/// Save `updates`, then `status`, through the `update --body` / `--part` path.
+/// A failure part-way puts back what was already written, so nothing is saved.
+fn save_together(
+    updates: &[PlannedUpdate],
+    status: Option<(&str, &[(&str, &str)])>,
+    root: &Path,
+    store: &Store,
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<PushOutcome> {
+    if !updates_are_current(updates, store, root) {
+        bail!("a document a hook updated changed while the hooks ran; nothing was saved");
+    }
+    let mut saved: Vec<&PlannedUpdate> = Vec::new();
+    for update in updates {
+        if let Err(e) = write_update(update, &update.body, root, store, config, git) {
+            let unrestored = roll_back(&saved, root, store, config, git);
+            let context = format!("saving the update to {}", update.id);
+            return Err(rolled_back_error(e, &context, unrestored));
+        }
+        saved.push(update);
+    }
+    let Some((doc_path, status)) = status else {
+        return Ok(PushOutcome::Synced);
+    };
+    run_with_config(root, store, doc_path, status, Some(config), git).map_err(|e| {
+        let unrestored = roll_back(&saved, root, store, config, git);
+        if unrestored.is_empty() {
+            return e;
+        }
+        rolled_back_error(e, "saving the status", unrestored)
+    })
+}
+
+fn touched(doc_path: &Path, updates: &[PlannedUpdate]) -> Vec<PathBuf> {
+    let mut paths = vec![doc_path.to_path_buf()];
+    for update in updates {
+        if !paths.contains(&update.path) {
+            paths.push(update.path.clone());
+        }
+    }
+    paths
+}
+
+/// `update` with `pre-transition` hooks (STORY-296): when `updates` moves the
+/// status, run the hooks that match the move, and save what they ask to update
+/// together with the status. An error finding surfaces as [`TransitionBlocked`].
+pub fn run_with_hooks(
+    env: &HookEnv,
+    root: &Path,
+    store: &Store,
+    doc_path: &str,
+    updates: &[(&str, &str)],
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<TransitionOutcome> {
+    let doc = resolve_shorthand_or_path(store, doc_path)?;
+    let target = updates
+        .iter()
+        .find(|(k, _)| *k == "status")
+        .map(|(_, target)| *target)
+        .filter(|target| *target != doc.status.as_str());
+    let Some(target) = target else {
+        let push = run_with_config(root, store, doc_path, updates, Some(config), git)?;
+        return Ok(TransitionOutcome {
+            push,
+            warnings: Vec::new(),
+            updates: Vec::new(),
+            touched: vec![doc.path.clone()],
+        });
+    };
+    if let Some(type_def) = config.type_by_name(doc.doc_type.as_str()) {
+        check_status_gate(root, type_def, doc.status.as_str(), target)?;
+    }
+    let cleared =
+        pre_transition::check(env, root, store, config, doc, doc.status.as_str(), target)?;
+    let push = save_together(
+        &cleared.updates,
+        Some((doc_path, updates)),
+        root,
+        store,
+        config,
+        git,
+    )?;
+    Ok(TransitionOutcome {
+        push,
+        warnings: cleared.warnings,
+        touched: touched(&doc.path, &cleared.updates),
+        updates: cleared.updates,
+    })
+}
+
+/// `hook run pre-transition <id>` (STORY-296 AC4): fire the hooks with `from`
+/// and `to` both the current status. Saves their updates unless `dry_run`; never
+/// touches the status.
+pub fn run_hooks_by_hand(
+    env: &HookEnv,
+    root: &Path,
+    store: &Store,
+    doc_id: &str,
+    dry_run: bool,
+    config: &Config,
+    git: &dyn GitRefOps,
+) -> Result<TransitionOutcome> {
+    let doc = resolve_shorthand_or_path(store, doc_id)?;
+    let status = doc.status.as_str();
+    let cleared = pre_transition::check(env, root, store, config, doc, status, status)?;
+    let mut push = PushOutcome::Synced;
+    let mut touched_paths = Vec::new();
+    if !dry_run {
+        push = save_together(&cleared.updates, None, root, store, config, git)?;
+        touched_paths = touched(&doc.path, &cleared.updates);
+    }
+    Ok(TransitionOutcome {
+        push,
+        warnings: cleared.warnings,
+        updates: cleared.updates,
+        touched: touched_paths,
+    })
+}
+
 /// The commit to stamp `reviewed` with when `updates` moves the status, or
 /// `None` when it does not, when the type's backend cannot hold an anchor, or
 /// when `HEAD` cannot be read (RFC-069, STORY-274 AC6): a repository with no
@@ -120,6 +312,17 @@ fn review_stamp(
     git.head(store.governs_root()).ok()
 }
 
+/// A type whose lifecycle is an authority board's columns is gated on the state
+/// that board column resolves to, and rejects a value naming no column at all --
+/// both offline, from the cached schema snapshot, before any store (and so any
+/// client) is built. That is what makes the rejection reachable with no network.
+fn check_status_gate(root: &Path, type_def: &TypeDef, current: &str, target: &str) -> Result<()> {
+    let board_state =
+        crate::engine::store_dispatch::resolve_authority_status_write(root, type_def, target)?
+            .map(|write| write.state);
+    gate_status_transition(type_def, current, board_state.as_deref().unwrap_or(target))
+}
+
 pub fn run_with_config(
     root: &Path,
     store: &Store,
@@ -133,20 +336,7 @@ pub fn run_with_config(
         let type_name = doc.doc_type.as_str();
         if let Some(type_def) = config.type_by_name(type_name) {
             if let Some((_, target)) = updates.iter().find(|(k, _)| *k == "status") {
-                // A type whose lifecycle is an authority board's columns is gated
-                // on the state that board column resolves to, and rejects a value
-                // naming no column at all -- both offline, from the cached schema
-                // snapshot, before any store (and so any client) is built. That is
-                // what makes the rejection reachable with no network.
-                let board_state = crate::engine::store_dispatch::resolve_authority_status_write(
-                    root, type_def, target,
-                )?
-                .map(|write| write.state);
-                gate_status_transition(
-                    type_def,
-                    doc.status.as_str(),
-                    board_state.as_deref().unwrap_or(target),
-                )?;
+                check_status_gate(root, type_def, doc.status.as_str(), target)?;
             }
             // A local transition is a human declaring the document true against
             // the code in front of them, so it resets the staleness clock in the
@@ -516,5 +706,120 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("clickup"), "{err}");
+    }
+
+    fn planned_body(store: &Store, root: &Path, body: &str, hash: Option<&str>) -> PlannedUpdate {
+        let doc = store.resolve_shorthand("RFC-001").unwrap();
+        let snap =
+            crate::engine::hooks::hook_document(doc, root, &crate::engine::fs::RealFileSystem);
+        PlannedUpdate {
+            id: doc.id.clone(),
+            path: doc.path.clone(),
+            part: None,
+            body: body.to_string(),
+            hash: hash
+                .map(str::to_string)
+                .unwrap_or_else(|| snap["content_hash"].as_str().unwrap().to_string()),
+            original: snap["body"].as_str().unwrap().to_string(),
+        }
+    }
+
+    /// STORY-296 AC3: a document that moved since the hook read it saves nothing,
+    /// not even the status.
+    #[test]
+    fn a_stale_update_saves_neither_the_body_nor_the_status() {
+        let config = Config::default();
+        let (tmp, store) = fs_store(None, &config);
+        let git = MockGitRefClient::new();
+        let update = planned_body(&store, tmp.path(), "hooked", Some("stale"));
+
+        let err = save_together(
+            &[update],
+            Some(("RFC-001", &[("status", "review")])),
+            tmp.path(),
+            &store,
+            &config,
+            &git,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("nothing was saved"), "{err}");
+        let content = doc_on_disk(tmp.path());
+        assert!(content.contains("status: draft") && !content.contains("hooked"));
+    }
+
+    /// STORY-296 AC3: a status that cannot be saved takes the hook's updates
+    /// back out.
+    #[test]
+    fn a_failed_status_write_puts_the_updated_body_back() {
+        let config = Config::default();
+        let (tmp, store) = fs_store(None, &config);
+        let git = MockGitRefClient::new();
+        let original = doc_on_disk(tmp.path());
+        let update = planned_body(&store, tmp.path(), "hooked", None);
+
+        let result = save_together(
+            &[update],
+            Some(("RFC-001", &[("status", "no-such-status")])),
+            tmp.path(),
+            &store,
+            &config,
+            &git,
+        );
+
+        assert!(result.is_err());
+        let content = doc_on_disk(tmp.path());
+        assert!(!content.contains("hooked"), "{content}");
+        assert_eq!(content, original);
+    }
+
+    /// STORY-296 AC3: the second of two updates failing puts the first back.
+    #[test]
+    fn a_failed_second_update_restores_the_first() {
+        let config = Config::default();
+        let (tmp, store) = fs_store(None, &config);
+        let git = MockGitRefClient::new();
+        let original = doc_on_disk(tmp.path());
+        let first = planned_body(&store, tmp.path(), "hooked", None);
+        let second = PlannedUpdate {
+            id: "RFC-404".to_string(),
+            path: PathBuf::from("docs/rfcs/RFC-404-missing.md"),
+            part: None,
+            body: "hooked".to_string(),
+            hash: String::new(),
+            original: String::new(),
+        };
+
+        let err = save_together(&[first, second], None, tmp.path(), &store, &config, &git);
+
+        let message = format!("{:#}", err.unwrap_err());
+        assert!(message.contains("nothing was saved"), "{message}");
+        assert_eq!(doc_on_disk(tmp.path()), original);
+    }
+
+    /// STORY-296 AC3: a restore the store refuses is named, and the error does
+    /// not claim nothing was saved.
+    #[test]
+    fn a_failed_restore_names_the_document_left_changed() {
+        let config = Config::default();
+        let (tmp, store) = fs_store(None, &config);
+        let git = MockGitRefClient::new();
+        let gone = PlannedUpdate {
+            id: "RFC-404".to_string(),
+            path: PathBuf::from("docs/rfcs/RFC-404-missing.md"),
+            part: None,
+            body: "hooked".to_string(),
+            hash: String::new(),
+            original: "old".to_string(),
+        };
+
+        let unrestored = roll_back(&[&gone], tmp.path(), &store, &config, &git);
+        assert_eq!(unrestored.len(), 1);
+        assert!(unrestored[0].starts_with("RFC-404"), "{unrestored:?}");
+
+        let err = rolled_back_error(anyhow!("boom"), "saving the update to RFC-001", unrestored);
+        let message = format!("{err:#}");
+        assert!(message.contains("RFC-404"), "{message}");
+        assert!(!message.contains("nothing was saved"), "{message}");
     }
 }
