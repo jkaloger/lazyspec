@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/jkaloger/lazyspec/compare/v0.14.0...v0.15.0) - 2026-09-29
+
+### Added
+
+- *(engine)* document bundles, workflow packs, and hooks ([#111](https://github.com/jkaloger/lazyspec/pull/111))
+
+### Other
+
+- RFC-074 stories
+- nested-document rough edges and bundle RFC
+
 ## [0.14.0](https://github.com/jkaloger/lazyspec/compare/v0.13.0...v0.14.0) - 2026-09-24
 
 ### Fixed
