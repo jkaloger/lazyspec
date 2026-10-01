@@ -72,6 +72,7 @@ jobs:
     needs: publish-release
     if: needs.publish-release.outputs.releases_created == 'true'
     runs-on: ${{ matrix.runner }}
+    environment: release
     permissions:
       contents: read
     strategy:
