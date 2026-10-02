@@ -1,0 +1,1956 @@
+{
+  "created_at": "2026-09-29T04:24:22Z",
+  "heads": {
+    "binary-language": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "criteria: speed, binary size, compiler-enforced lockdown of agent-written code. Rust and OCaml lead on lockdown, Rust and Go on corpus, only Rust links the lazyspec engine crate. TS runtimes fail speed and size for per-tool-call hooks. jev is one HTTP call and does not need the AI SDK.",
+        "rejected": [
+          {
+            "option": "Zig",
+            "why_not": "~10x smaller binary but loses borrow checker and exhaustive matching, thin corpus, no engine crate"
+          },
+          {
+            "option": "Go",
+            "why_not": "best sandbox story but weak types (nil, no sums) let agents write wrong code the compiler accepts"
+          },
+          {
+            "option": "TypeScript on Bun/Deno compile",
+            "why_not": "50-100 MB, 10-50 ms cold start, unacceptable on PreToolUse"
+          },
+          {
+            "option": "C, Nim, OCaml, Haskell, Swift",
+            "why_not": "size/corpus/tooling worse than Rust on at least two criteria"
+          }
+        ],
+        "text": "Rust, size-tuned: opt-level z, fat LTO, codegen-units 1, panic abort, stripped. Link lazyspec's engine as a crate rather than spawning the CLI. Target 1-2 MB, sub-millisecond start."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3CR7JDYY72QEVAZC6QV",
+      "parent": "binary-or-not",
+      "prior": null,
+      "question": "If there is a binary: Rust (matches lazyspec and hydra, single static binary) or TypeScript/Bun (matches spec-judge, easier jev/AI SDK access)?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "binary-language",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:35:26Z"
+    },
+    "binary-or-not": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by identity",
+        "rejected": [],
+        "text": "Yes, a hooks-only binary. It does what shell scripts cannot: testable guardrail logic with one JSON contract, one file under the trust hash."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3CJ9MXA657EGRCVE14Y",
+      "parent": "identity",
+      "prior": null,
+      "question": "Does it need its own binary at all? What would a binary do that hook scripts in .lazyspec/hooks/ plus lazyspec itself cannot?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "binary-or-not",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:31:33Z"
+    },
+    "change-unit": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by dt-change-representation",
+        "rejected": [],
+        "text": "Yes: a change document, point-in-time, the unit of in-flight work. Bundle parts (design, tasks) optional. Replaces the rfc+story+iteration chain as the change unit."
+      },
+      "blocked_by": [
+        "dt-change-representation"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3ER3XJ5205TGE1F17NG",
+      "parent": "document-types",
+      "prior": null,
+      "question": "Is there a change document (an OpenSpec-style delta bundle proposing spec+code changes together), or do story/iteration already serve as the unit of change?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "change-unit",
+      "status": "answered",
+      "updated_at": "2026-09-30T00:14:49Z"
+    },
+    "code-change-policies": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "stated by the user for fix, chore, refactor, spike; build is the planned case and inherits the iteration document as its approach",
+        "rejected": [],
+        "text": "Fix: credible diagnosis and regression evidence where practical; plan only if complex, risky or crossing significant boundaries.\nChore: direct execution with relevant automated checks; escalate when it affects compatibility, security or production behaviour.\nRefactor: preserve the observable behavioural contract; require characterisation tests or other evidence where existing behaviour is insufficiently verified.\nSpike: agree the question, the time or cost boundary and the evidence needed; keep experimental code isolated and disposable.\nBuild: the planned case; the iteration document is the reviewed approach and its ACs name the verification."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:27:44Z",
+      "id": "01M3NXJ22ST6AKHXV8CH0WWZZY",
+      "parent": "governing-principle",
+      "prior": null,
+      "question": "What is the planning and verification policy for each code-changing workflow (build, fix, chore, refactor, spike)?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "code-change-policies",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:27:44Z"
+    },
+    "code-refs": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "The test symbol already anchors the claim to code and wf-volatility puts narrowing on the agent. Per-claim precision is earned by dogfood evidence, not argued in.",
+        "rejected": [
+          {
+            "option": "required per-claim implementation @ref",
+            "why_not": "doubles refs, ages under refactoring, pushes specs back toward describing structure"
+          }
+        ],
+        "text": "Governs only in v1; optional per-claim implementation @ref is the back-pocket amendment.\nThe spec's governs globs are the implementation reference. A claim carries its test receipt and nothing else. Drift is spec-wide: any change under the globs stales every receipt in the spec and the agent narrows by reading. If spec-wide staleness proves noisy in dogfooding, add an optional `@ref impl#symbol` per claim that narrows freshness to that symbol plus its test, falling back to governs where absent."
+      },
+      "blocked_by": [
+        "spec-truth"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3E1GQWGW3NZSNYFAWCW",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "Is governs (coarse module globs + reviewed sha) sufficient as the spec-to-implementation reference, or does a requirement need an explicit implementation file list as the notes proposed?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "code-refs",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:30:46Z"
+    },
+    "contract-refs": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by receipt-model",
+        "rejected": [],
+        "text": "@ref lines under the tagged claim, in the document. Frontmatter lists and bundle parts rejected as detached from the claim."
+      },
+      "blocked_by": [
+        "receipt-model",
+        "requirement-unit"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3DN8QN70GD8HE5W9EEH",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "How does a requirement point at its executable contracts (tests, schemas, CI jobs): lazyspec @ref code refs, a frontmatter acceptance list, a bundle part, or a naming convention in the test suite?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "contract-refs",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:11:47Z"
+    },
+    "contract-verification": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by evidence-ingestion",
+        "rejected": [],
+        "text": "Validate hook checks each receipt resolves and is fresh; pre-transition to complete errors on missing, unresolved or stale receipts. Tests are run by the codebase, never by the framework."
+      },
+      "blocked_by": [
+        "contract-refs",
+        "evidence-ingestion"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3DVJEBN9QG6BKK315S8",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "What checks that referenced contracts exist and pass: a validate hook (exists), a pre-transition hook that runs the tests before complete, CI only, or the agent on its honour?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "contract-verification",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:11:47Z"
+    },
+    "derive-from-code": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "receipt-model made the document canonical and tests annotation-free; the agent that writes the test knows the symbol, so the only recurring chore is re-pinning after drift, which position already promised costs ten seconds.",
+        "rejected": [
+          {
+            "option": "suggest-never-write subcommand scanning test diffs for candidate @refs",
+            "why_not": "heuristic matcher ahead of a second use; second-slice candidate alongside JUnit ingestion"
+          },
+          {
+            "option": "derive receipts from test annotations or naming",
+            "why_not": "contradicts receipt-model, two sources drift against each other"
+          }
+        ],
+        "text": "Hand-maintained in v1; the binary checks and re-pins, never writes receipts.\nThe agent writes the @ref line when it writes the test. The one mechanical subcommand is re-pin, scoped to a document, updating receipt shas after drift is resolved. Receipt suggestion is deferred to the second slice, gated on dogfood evidence that agents fumble the @ref line."
+      },
+      "blocked_by": [
+        "spec-truth"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3EC92DNAE5HCWSM6NQW",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "Should acceptance and implementation references be derived from code (test names, annotations, governs drift) rather than maintained by hand, and in v1 or later?",
+      "rev": 1,
+      "seq": 6,
+      "slug": "derive-from-code",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:40:09Z"
+    },
+    "dev-workflow": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "synthesis of six answered children; no row conflicts; the shared sentence is what a future session should read first",
+        "rejected": [],
+        "text": "Human reviews and decides at status transitions; agent authors and produces evidence. Six activities, per the children.\nPrompting: any prompt; no artefact; workflow inferred from two structural signals (in-progress doc? cross-governs diff?); human never declares a workflow. Creating specs: specify router over idea | tree | prompt mints a spec shell (Intent only, rationale linked); agent authors, human reviews and activates. Tracking ideas: idea record open -> promoted | dropped; agent drafts and links, human promotes or drops. Reporting bugs: bug record; agent diagnoses, writes the regression test, pins the receipt, or spawns a change on escalation; human reports and decides wontfix. Volatility: governed code moved -> stale findings; agent resolves drift relevant to its task before completing; human edits freely, never blocked. Verifying: pre-transition, Stop, CI check receipts under claims; agent writes tests and @refs; human signs off intent-only claims; CI owns pass/fail."
+      },
+      "blocked_by": [
+        "spec-intent"
+      ],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31CF72NG36HGVXARBJQA",
+      "parent": null,
+      "prior": null,
+      "question": "What is the developer workflow, activity by activity? Six activities: prompting Claude, creating specs, tracking ideas, reporting bugs, managing codebase volatility, verifying correctness. For each: what triggers it, what artefact it produces, what the agent does versus the human.",
+      "rev": 1,
+      "seq": 16,
+      "slug": "dev-workflow",
+      "status": "answered",
+      "updated_at": "2026-09-30T10:06:37Z"
+    },
+    "distribution": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "no new tooling; each piece uses its native channel. Trust-by-path for an out-of-repo binary and cross-piece version agreement are pushed to lazyspec-boundary and a new version-coherence head.",
+        "rejected": [
+          {
+            "option": "binary vendored into the pack",
+            "why_not": "per-platform binaries in git or a download step lazyspec lacks"
+          },
+          {
+            "option": "binary bootstraps the rest via an init verb",
+            "why_not": "bends the nobody-types-it rule"
+          }
+        ],
+        "text": "Three native channels, one repo: `lazyspec init --template <repo-url>` for the pack, `claude plugin install` from the repo's marketplace for skills and Claude hooks, `cargo install` for the hooks binary."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3CYHFZRQRNBT5PBT7MM",
+      "parent": "identity",
+      "prior": null,
+      "question": "How is it installed into a project: lazyspec init --template <url> plus a Claude Code plugin marketplace entry, cargo/bun install, or a single bootstrap command?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "distribution",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:41:27Z"
+    },
+    "document-types": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "synthesis of the children plus the two intake heads; audit dropped because a finding is a bug or idea and a clean run is a fact about a date, not the system (dt-inventory rule: a document earns its place only when the agent cannot reconstruct it from code, tests, git)",
+        "rejected": [
+          {
+            "option": "audit as an eighth point-in-time type",
+            "why_not": "a container for links; cheap to add later if clean-run records prove to matter in dogfooding"
+          },
+          {
+            "option": "audit folded into decision",
+            "why_not": "bends supersede-never-edit into a log entry"
+          },
+          {
+            "option": "this repo full set (rfc/story/iteration/adr/audit/bug)",
+            "why_not": "rfc = idea + hydra tree + change; story/iteration = claim subsets of a change; adr = decision"
+          }
+        ],
+        "text": "Seven types in two families. Evergreen (drift-stale via governs, never driven): spec, convention, dictum. Point-in-time (age-stale): change (the only /lazy-driven type), decision (supersede, never edit), bug and idea (intake, never driven). No audit type: findings are filed as bugs or ideas.\nSpec is written only by the change archive hook. rfc/story/iteration/adr are not carried over; glossary may fold into the convention."
+      },
+      "blocked_by": [
+        "wf-reporting-bugs",
+        "wf-tracking-ideas"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3EJGRBSDX8YBGVH7WJC",
+      "parent": null,
+      "prior": null,
+      "question": "What is the minimal document type set: OpenSpec-style evergreen specs plus change deltas, this repo's rfc/story/iteration/adr/audit/bug set, or something between? Which are point-in-time and which are evergreen?",
+      "rev": 1,
+      "seq": 6,
+      "slug": "document-types",
+      "status": "answered",
+      "updated_at": "2026-09-30T09:59:29Z"
+    },
+    "dogfood": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "hydra gives the cleanest signal: greenfield adoption exercises the init-from-template channel honestly, receipts point at real cargo test symbols, a full change lifecycle runs end to end in days, and the author can tell framework friction from a code problem. The framework repo cannot go first because there is nothing to enforce with on day one.",
+        "rejected": [
+          {
+            "option": "lazyspec itself first",
+            "why_not": "existing rfc/story/iteration document graph needs migrating, and because the hooks binary links the lazyspec engine, engine bugs and policy bugs would land in one repo and muddy the evidence"
+          },
+          {
+            "option": "fresh toy app like dom-test",
+            "why_not": "dom-test already gave its lessons; toy evidence will not move any back-pocket decision"
+          },
+          {
+            "option": "real client project",
+            "why_not": "a blocking Stop hook on a shared client repo is premature, and the Inlight pack is not a v1 input"
+          }
+        ],
+        "text": "hydra first; the framework's own repo self-hosts second, as soon as its binary runs; lazyspec joins after the pack has survived two adopters and the migration from the old chain is understood."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "identity"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3HNY537PTMJMB3WGDGP",
+      "parent": null,
+      "prior": null,
+      "question": "Which repo adopts it first: lazyspec itself, hydra, a fresh toy app like dom-test, or a real client project?",
+      "rev": 1,
+      "seq": 12,
+      "slug": "dogfood",
+      "status": "answered",
+      "updated_at": "2026-10-02T03:27:05Z"
+    },
+    "dt-change-representation": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "parallel changes must not edit the spec file (merge conflicts) and a change must be buildable without the whole spec. Stable claim ids from receipt-model make the fold deterministic; lazyspec pre-transition hooks can already return body updates for other documents (RFC-075 names fold-into-another as a use case), so no push-down.",
+        "rejected": [
+          {
+            "option": "A/C direct edit of spec",
+            "why_not": "textual conflicts between parallel changes; agent needs the whole spec"
+          },
+          {
+            "option": "B OpenSpec text deltas",
+            "why_not": "merge by heading text is fragile; MODIFIED conflicts surface only at archive"
+          },
+          {
+            "option": "D spec branch",
+            "why_not": "addresses neither concern"
+          }
+        ],
+        "text": "B': id-keyed delta folded on archive. The change document carries claims as tagged list items exactly as they will appear in the spec; fresh id adds, existing id replaces, struck id removes. Receipts live under the claim in the change while in flight. complete requires every claim to have a receipt; the transition to archived runs a hook that appends/replaces/deletes spec lines by id and moves receipts. The spec is written only by that hook. Ids are namespaced by the change (e.g. AC-C17-1) so parallel changes never collide; two in-flight changes touching the same id is a validate finding. Semantic drift inside a replaced claim remains a review concern."
+      },
+      "blocked_by": [
+        "dt-granularity"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K14229RP69XQ1KSZVR8",
+      "parent": "document-types",
+      "prior": null,
+      "question": "How is a change to an evergreen spec expressed: a delta micro-format merged on archive (OpenSpec ADDED/MODIFIED/REMOVED), editing the spec directly in the same PR as the code (git is the delta), a proposal that references the sections it will change, or a spec branch?",
+      "rev": 1,
+      "seq": 6,
+      "slug": "dt-change-representation",
+      "status": "answered",
+      "updated_at": "2026-09-30T00:14:49Z"
+    },
+    "dt-granularity": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "intent has one home per capability; governs carries the many-to-many to code; why <path> returning several specs is correct because that file serves several capabilities. Matches this repo: specs capability-shaped, dictums module-shaped.",
+        "rejected": [
+          {
+            "option": "A capability without accepting the many-to-many",
+            "why_not": "treats why <path> lists as a limitation"
+          },
+          {
+            "option": "B module-shaped specs",
+            "why_not": "drift into structure, split user-facing intent across layers"
+          },
+          {
+            "option": "D no rule",
+            "why_not": "mapping to governs undefined"
+          }
+        ],
+        "text": "C: one evergreen spec per capability; governs lists every code area that implements it. Overlapping globs are expected; drift means \"something under you moved\". Dictums stay module-shaped."
+      },
+      "blocked_by": [
+        "dt-inventory"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K0TGP8MB9VMYKA5T89A",
+      "parent": "document-types",
+      "prior": null,
+      "question": "What is the unit of an evergreen spec: a capability (OpenSpec), a module or governs area, a user-facing feature, a bounded context? What decides where a requirement lives, and how does the unit map onto governs globs?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "dt-granularity",
+      "status": "answered",
+      "updated_at": "2026-09-30T00:07:37Z"
+    },
+    "dt-inventory": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "a document earns its place only when the memoryless agent cannot reconstruct the information from code, tests and git. User accepted the table as mostly right; refinements land in the child heads.",
+        "rejected": [],
+        "text": "Six durable homes: intent and constraints (non-goals included); rationale and rejected alternatives; structural rules; work in flight; defect triage state; ideas. Planned behaviour is durable only until a test settles it. Not documented: current tested behaviour (the test suite), interfaces (@ref), verification evidence (CI plus the receipt @ref), operational knowledge (README, not spec). Glossary is small and may fold into the convention."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K06G2DWHKZVRSAWHF9A",
+      "parent": "document-types",
+      "prior": null,
+      "question": "What pieces of information need a durable home at all? For each: who writes it, who reads it, when it changes, when it dies. Candidates: intent/purpose, requirements/planned behaviour, interfaces, rationale and rejected alternatives, structural rules (how we build), domain glossary, work-in-flight, defects, ideas, verification evidence, operational runbooks.",
+      "rev": 1,
+      "seq": 3,
+      "slug": "dt-inventory",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:43:39Z"
+    },
+    "dt-rationale-home": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "quiz Floaty: user chose a decision record over intent+verified-by, commit message, or ignored test. Rationale outranks sign-off.",
+        "rejected": [],
+        "text": "A point-in-time decision record type, one per consequential choice, linked to the spec it affects; supersede, never edit. Hydra trees are the long-form rationale and are referenced, not restated. Commit messages carry nothing durable."
+      },
+      "blocked_by": [
+        "dt-inventory"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K1F8S9ABJB0Q3CFEP7B",
+      "parent": "document-types",
+      "prior": null,
+      "question": "Where do decisions and rejected alternatives live long-term so the memoryless agent finds them: a Decisions section inside the evergreen spec, the archived change, a separate decision type, committed hydra trees, commit messages, or several with one canonical?",
+      "rev": 1,
+      "seq": 7,
+      "slug": "dt-rationale-home",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:20:25Z"
+    },
+    "dt-structure-rules": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Reuses the claim/receipt model exactly, so enforceable-vs-advisory is structural and measurable with the same [intent] marker and info finding already trialled for unverifiable claims. Nothing new to learn.",
+        "rejected": [
+          {
+            "option": "convention + dictums as free prose, enforcement silent",
+            "why_not": "cannot tell wishes from enforced rules; deleting a lint rule stales nothing"
+          },
+          {
+            "option": "CLAUDE.md as single home",
+            "why_not": "no governs, no drift, unbounded growth, every agent pays for every rule"
+          },
+          {
+            "option": "lint/arch tests only with dictums as a thin index",
+            "why_not": "cannot express idiom rules like early returns or fakes-at-seams; no rationale for a cold agent"
+          }
+        ],
+        "text": "Convention + module-shaped dictums; a dictum rule is a tagged claim whose receipt is its enforcer.\nThe convention holds the principles and is injected as the prompt preamble; CLAUDE.md shrinks to that injection. Dictums carry governs and go stale on drift like any evergreen node. Their rules are tagged claims in a Behaviour section: a rule the codebase enforces carries an @ref receipt to the lint config, clippy rule or architecture test that enforces it; a rule with no enforcer is marked [intent]. Enforceable versus advisory is therefore structural, and the intent-only ratio is visible in the same validate info finding as for specs."
+      },
+      "blocked_by": [
+        "dt-inventory"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K21DR7WDH2EQN499NHZ",
+      "parent": "document-types",
+      "prior": null,
+      "question": "Where do structural rules (how we build: layering, idioms, test doubles policy) live: convention + dictum types with governs, CLAUDE.md, a section of each spec, or the codebase's own lint config? What makes them enforceable versus advisory?",
+      "rev": 1,
+      "seq": 9,
+      "slug": "dt-structure-rules",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:41:48Z"
+    },
+    "dt-survey": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "README-level survey plus user reading; details in .local/metaframework-survey-frameworks.md",
+        "rejected": [],
+        "text": "Take: OpenSpec's capability-scoped evergreen spec and explicit change unit; doctrine's first-class rationale and its memory kind (typed records anchored to code); dom-test's mechanised principles and hydra tree as rationale record; this repo's convention/dictums with governs. Memory records and structured requirements are both modelled as typed nodes in the lazyspec context graph with governs, not new machinery. Leave: delta micro-syntax, data-model/contracts files that restate code, nine-kind lifecycles, the rfc+story+iteration chain."
+      },
+      "blocked_by": [
+        "dt-inventory"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K0G2QJD87C1NZ1Q5G55",
+      "parent": "document-types",
+      "prior": null,
+      "question": "How do OpenSpec, Spec Kit, doctrine, this repo, and dom-test (SPEC.md + PLAN.md + hydra) each carve the inventory into artefacts, and where does each one violate spec-intent (restating code, burying rationale, no home for X)?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "dt-survey",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:53:34Z"
+    },
+    "dt-work-home": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Only the multi-agent clause changed: lazyspec has no leases; see multi-agent head.",
+        "rejected": [],
+        "text": "C: the change document. Claims (receipts) are the only gating progress; an optional tasks part holds non-claim work (scaffolding, migrations) as a scratchpad no hook reads. Session sizing is choosing a claim subset, not minting a document. Multi-agent: separate changes per agent in v1; disjoint claim sets in one change deferred (see multi-agent)."
+      },
+      "blocked_by": [
+        "dt-change-representation"
+      ],
+      "created_at": "2026-09-29T06:39:29Z",
+      "id": "01M3NY7K1QPG13Y4GTQB7KTMHS",
+      "parent": "document-types",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "quiz Year-on: specs, change archive, decisions; no iterations directory. Claims are progress; anything else is a scratch tasks part nothing reads.",
+        "rejected": [
+          {
+            "option": "D separate iteration documents",
+            "why_not": "another type and chain; session sizing is picking claims"
+          },
+          {
+            "option": "A tasks part as gating progress",
+            "why_not": "second signal beside receipts"
+          }
+        ],
+        "text": "C: the change document. Claims (receipts) are the only gating progress; an optional tasks part holds non-claim work (scaffolding, migrations) as a scratchpad no hook reads. Session sizing is choosing a claim subset, not minting a document. Multi-agent: disjoint claim sets in one change, or separate changes, with leases on the change document."
+      },
+      "question": "Where does work-in-flight live: a tasks part of the change, separate iteration documents, GitHub issues, the PR itself, or nowhere durable? What must survive a context reset versus what can be reconstructed?",
+      "rev": 2,
+      "seq": 8,
+      "slug": "dt-work-home",
+      "status": "answered",
+      "updated_at": "2026-10-02T03:17:01Z"
+    },
+    "enforcement-points": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "B is the minimum that makes hooks matter; CI stops the design being a Claude Code feature. pre-push duplicates CI. PreToolUse edit gate stays back-pocket.",
+        "rejected": [
+          {
+            "option": "A lazyspec events only",
+            "why_not": "cross-governs bound has no home; an agent that never transitions is never checked"
+          },
+          {
+            "option": "B without CI",
+            "why_not": "guardrail is Claude-specific"
+          },
+          {
+            "option": "pre-push",
+            "why_not": "duplicates CI, slows every push"
+          },
+          {
+            "option": "D PreToolUse edit gate",
+            "why_not": "per-edit cost, tightest Claude coupling; deferred"
+          }
+        ],
+        "text": "C: validate (warns, continuous), pre-transition to complete (blocks), Stop (cross-governs bound + validate on session-touched docs, blocks on error findings, with its own escape), and a CI required check running the same binary's validate. No pre-push, no PreToolUse in v1."
+      },
+      "blocked_by": [
+        "evidence-ingestion"
+      ],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CBXM05NZYF83FRBJDQY",
+      "parent": "verification",
+      "prior": null,
+      "question": "Where is verification enforced: validate (continuous findings, never blocks), pre-transition to complete (gate), Stop (bounds and \"report is current for this tree\"), git pre-push, CI step running the same binary? Which block and which warn?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "enforcement-points",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:13:39Z"
+    },
+    "escalation-triggers": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by oracle-per-workflow; sensitive-path lists and diff-size ceilings were deleted with the strawman",
+        "rejected": [],
+        "text": "One checkable trigger in v1: the diff spans more than one governs area and no in-progress document covers it. Everything else (uncertainty, coordination, risk) is agent judgement guided by the dictum."
+      },
+      "blocked_by": [
+        "workflow-classification"
+      ],
+      "created_at": "2026-09-29T06:27:44Z",
+      "id": "01M3NXJ23SCAAT9DQ6V7QFZSMM",
+      "parent": "governing-principle",
+      "prior": null,
+      "question": "What concretely counts as \"uncertainty, coordination or risk warrants a reviewed approach\"? Which signals are checkable by a hook (files outside any governs glob, crossing a governs boundary, touching paths tagged security/prod, diff size, stale governing spec) versus left to agent judgement?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "escalation-triggers",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:35:45Z"
+    },
+    "evidence-ingestion": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "reuses pin/reviewed/staleness; zero project setup; pass/fail stays with CI, consistent with testing being the codebases concern. C is deferred until B shows whether stale receipts are the real failure mode.",
+        "rejected": [
+          {
+            "option": "A existence only",
+            "why_not": "a gutted, never-run test still counts"
+          },
+          {
+            "option": "C report ingestion in v1",
+            "why_not": "per-project report config and sha stamping, per-runner name matching, unversioned working-tree state; second slice, not first"
+          }
+        ],
+        "text": "B: existence plus freshness. @ref pinned at a sha; the receipt is stale when the test file or governed code changed since the pin. Pass/fail is CI's. Report ingestion (JUnit XML) is the planned second slice."
+      },
+      "blocked_by": [
+        "receipt-model"
+      ],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CBNKYG1NVEHYY53GQ0Q",
+      "parent": "verification",
+      "prior": null,
+      "question": "How does the framework learn a receipt passed and is current: existence only (@ref resolves at HEAD), existence plus freshness (@ref pinned at sha, drift makes it stale), or ingesting the codebase's own test report (JUnit/cargo/vitest JSON) matched to @ref symbols with the report sha equal to HEAD? The framework reads results; it never runs tests.",
+      "rev": 1,
+      "seq": 2,
+      "slug": "evidence-ingestion",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:11:38Z"
+    },
+    "fold-target": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Single-target changes are the bulk of the work and get no ceremony; the frontmatter link is the native lazyspec graph edge; multi-target span becomes visible in the document, matching the cross-governs Stop signal.",
+        "rejected": [
+          {
+            "option": "spec id in every claim tag",
+            "why_not": "longer ids, prefix repeated per line, frontmatter link still needed for the graph so two places anyway"
+          },
+          {
+            "option": "subheadings only with no frontmatter link",
+            "why_not": "single-target pays a heading it does not need; change invisible in the graph until derived"
+          }
+        ],
+        "text": "Frontmatter targets are the graph edge; per-spec `### <spec-id>` subheadings in Behaviour only when the change folds into more than one spec. The archive hook never creates a spec.\nThe change carries a typed frontmatter link to each spec it folds into. One target: claims sit directly under Behaviour and all fold there. Several: Behaviour is partitioned by `### <spec-id>` subheadings. validate errors when a subheading names a spec not in frontmatter, or when a multi-target change has unpartitioned claims. A change targeting a new capability creates the spec at draft, with Intent and no Behaviour, and links to it, so folding always appends to an existing node and the new Intent is reviewed before claims land."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-30T02:23:10Z",
+      "id": "01M3R1YZJRM6XN87DJPA0T5NY6",
+      "parent": "dt-change-representation",
+      "prior": null,
+      "question": "How does a claim in a change document name the evergreen spec (and section) it folds into on archive: a per-spec heading in the change doc, a spec id in the claim tag, or frontmatter targets?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "fold-target",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:43:32Z"
+    },
+    "governing-principle": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "the oracle is more important than the plan. A plan without verification proves nothing; verification without a plan still bounds the change.",
+        "rejected": [
+          {
+            "option": "no code without a plan",
+            "why_not": "makes every fix, chore, refactor and spike cost a document, and a plan is not evidence"
+          }
+        ],
+        "text": "No unbounded code changes; no unverified completion.\nAn agent may make a scoped change directly when the intended outcome is clear, the execution permissions are appropriate and relevant verification is available. Require a reviewed technical approach when uncertainty, coordination or risk warrants it."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:27:44Z",
+      "id": "01M3NXJ22806MSYXCESQTE8VR1",
+      "parent": null,
+      "prior": null,
+      "question": "What is the governing principle for when an agent may change code, replacing \"no code without a plan\"?",
+      "rev": 1,
+      "seq": 17,
+      "slug": "governing-principle",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:27:44Z"
+    },
+    "guardrail-catalogue": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Every check enforces a rule an earlier head already stated, on a surface already chosen, and each is structural. Rules the framework states but does not check are the failure the design exists to avoid. lazyspec validate natively covers required sections, relationships, staleness bands and source ownership, so those are not framework guardrails. Contract-mutation detection is taken from the LazyDev comparison (.local/metaframework-lazydev-recommendations.md, rec 2): it turns \"never re-pin to silence a finding\" from advice into a check without running anything.",
+        "rejected": [
+          {
+            "option": "derived catalogue only",
+            "why_not": "leaves governs-on-specs and rationale-required as prose and lets re-pin silence a dead receipt"
+          },
+          {
+            "option": "defer the rationale-link check to the specify skill",
+            "why_not": "authoring-time enforcement does not survive a hand-edited spec"
+          },
+          {
+            "option": "tests pass before complete",
+            "why_not": "the framework never runs tests; receipts replace it"
+          },
+          {
+            "option": "PreToolUse edit gate",
+            "why_not": "back pocket per oracle-per-workflow and enforcement-points"
+          },
+          {
+            "option": "per-kind expectations such as \"refactors must not change contracts\"",
+            "why_not": "needs a work kind, and workflow-classification settled that nobody classifies"
+          }
+        ],
+        "text": "The v1 catalogue: every check implied by earlier heads plus four: spec without governs, spec without a rationale link, re-pin refused when the symbol no longer resolves, and contract-mutation detection.\nvalidate (continuous): claim without receipt on an in-progress change; receipt does not resolve; receipt stale by sha; two in-flight changes touching one claim id; fold target does not resolve; count of [intent] claims (info); verified-by / approved-by stale against its sha; evergreen spec with no governs; spec with no rationale link (hydra tree, promoted idea or decision); contract mutation: a file referenced by a receipt changed while no in-progress change replaces or removes the claim that receipt belongs to, naming the affected claims and specs.\npre-transition draft->in-progress: Intent present, at least one claim, fold targets resolve.\npre-transition in-progress->complete: every non-intent claim has a resolving fresh receipt; agent-invoked completion requires a valid approved-by.\npre-transition complete->archived: the fold by id into existing specs only; never creates a spec.\nre-pin subcommand: refused when the referenced test symbol no longer resolves; flagged when it follows a receipt-file change with no matching claim change (the silencing move).\nStop: diff crosses governs areas with no in-progress change; validate on session-touched docs; pending tests (it.todo, #[ignore] without reason) read statically from touched test files; approved-by written this session; contract mutation on session-touched receipt files.\nCI: the same validate as a required check.\nUserPromptSubmit: convention preamble injection; not a guardrail.\nNative lazyspec validate (required sections, relationships, staleness, source ownership) is relied on, not duplicated."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "enforcement-points"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3G6HZMT90EPZBVNWMG4",
+      "parent": "guardrails",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "Every check enforces a rule an earlier head already stated, on a surface already chosen, and each is structural. Rules the framework states but does not check are the failure the design exists to avoid. lazyspec validate natively covers required sections, relationships, staleness bands and source ownership, so those are not framework guardrails.",
+        "rejected": [
+          {
+            "option": "derived catalogue only",
+            "why_not": "leaves governs-on-specs and rationale-required as prose and lets re-pin silence a dead receipt"
+          },
+          {
+            "option": "defer the rationale-link check to the specify skill",
+            "why_not": "authoring-time enforcement does not survive a hand-edited spec"
+          },
+          {
+            "option": "tests pass before complete",
+            "why_not": "the framework never runs tests; receipts replace it"
+          },
+          {
+            "option": "PreToolUse edit gate",
+            "why_not": "back pocket per oracle-per-workflow and enforcement-points"
+          }
+        ],
+        "text": "The v1 catalogue: every check implied by earlier heads plus three: spec without governs, spec without a rationale link, re-pin refused when the symbol no longer resolves.\nvalidate (continuous): claim without receipt on an in-progress change; receipt does not resolve; receipt stale by sha; two in-flight changes touching one claim id; fold target does not resolve; count of [intent] claims (info); verified-by / approved-by stale against its sha; evergreen spec with no governs; spec with no rationale link (hydra tree, promoted idea or decision).\npre-transition draft->in-progress: Intent present, at least one claim, fold targets resolve.\npre-transition in-progress->complete: every non-intent claim has a resolving fresh receipt; agent-invoked completion requires a valid approved-by.\npre-transition complete->archived: the fold by id into existing specs only; never creates a spec.\nre-pin subcommand: refused when the referenced test symbol no longer resolves.\nStop: diff crosses governs areas with no in-progress change; validate on session-touched docs; pending tests (it.todo, #[ignore] without reason) read statically from touched test files; approved-by written this session.\nCI: the same validate as a required check.\nUserPromptSubmit: convention preamble injection; not a guardrail.\nNative lazyspec validate (required sections, relationships, staleness, source ownership) is relied on, not duplicated."
+      },
+      "question": "Which guardrails ship in v1? Candidates: required sections, every AC mechanised, governs coverage, tests pass before complete, no edits outside an in-progress iteration, convention preamble injected.",
+      "rev": 2,
+      "seq": 1,
+      "slug": "guardrail-catalogue",
+      "status": "answered",
+      "updated_at": "2026-09-30T23:56:58Z"
+    },
+    "guardrails": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Verification lives in the graph, and the graph gates are document transitions. Making lazyspec primary means the guarantee holds for any agent that uses lazyspec; Claude Code hooks become a faster surface of the same checks, not the guarantee. Surfaces and severities per surface were settled under enforcement-points; this head records only precedence and the UserPromptSubmit role.",
+        "rejected": [
+          {
+            "option": "Claude Code Stop primary",
+            "why_not": "only Claude Code sessions are guarded, and Stop has an escape by design, so the primary gate would be the one that can be waved through"
+          },
+          {
+            "option": "CI primary",
+            "why_not": "feedback arrives after the commit; direct-to-main projects have already landed the breach; CI cannot see sessions so the cross-governs bound degrades to diff-since-green"
+          }
+        ],
+        "text": "lazyspec pre-transition hooks are primary; Claude Code Stop is early warning; CI is the backstop; UserPromptSubmit injects context only.\nSurfaces as settled in enforcement-points: validate (warns, continuous), pre-transition to complete (blocks), Stop (cross-governs bound plus validate on session-touched docs, blocks on error, has an escape), CI required check running the same binary's validate. Precedence: the document transition is the truth; it fires for any agent, editor or git flow because it runs inside lazyspec. Stop and CI cover work that never touches a transition. UserPromptSubmit carries the convention preamble and never enforces, so no guardrail depends on a prompt being seen. No PreToolUse, no pre-push in v1."
+      },
+      "blocked_by": [
+        "workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3G1H57441FXRTE0QE3X",
+      "parent": null,
+      "prior": null,
+      "question": "What does \"enforced\" mean: which enforcement surfaces are used -- lazyspec hooks (validate, pre-transition), Claude Code hooks (PreToolUse, UserPromptSubmit, Stop), git hooks, CI -- and which is primary?",
+      "rev": 1,
+      "seq": 8,
+      "slug": "guardrails",
+      "status": "answered",
+      "updated_at": "2026-09-30T23:52:25Z"
+    },
+    "hook-implementation": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by identity: one binary, subcommands, called by both lazyspec [[hooks]] and Claude Code hooks",
+        "rejected": [
+          {
+            "option": "individual scripts in .lazyspec/hooks/",
+            "why_not": "brittle, N files under trust"
+          }
+        ],
+        "text": "Subcommands of the one hooks binary. lazyspec [[hooks]] run entries and Claude Code hook commands both point at it."
+      },
+      "blocked_by": [
+        "binary-or-not"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3GARCJ4637ZHCV21437",
+      "parent": "guardrails",
+      "prior": null,
+      "question": "Are hooks shipped as individual scripts in .lazyspec/hooks/, or as subcommands of one binary that lazyspec [[hooks]] and Claude Code hooks both call?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "hook-implementation",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:31:33Z"
+    },
+    "identity": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "enforcement logic beyond required-sections needs a real language with tests; the binary stays invisible in normal use so lazyspec remains the only interface agents learn",
+        "rejected": [
+          {
+            "option": "pack only",
+            "why_not": "shell hook scripts get brittle; cross-cutting checks need real logic"
+          },
+          {
+            "option": "wrapper CLI",
+            "why_not": "the heavy framework being reacted against; duplicates lazyspec surface and breaks the shared human/agent interface"
+          }
+        ],
+        "text": "Pack plus a hooks binary. The pack carries config, templates, dictums, a Claude Code plugin (skills + hooks). Guardrails are subcommands of one binary invoked only by lazyspec [[hooks]] and Claude Code hooks; nobody types it."
+      },
+      "blocked_by": [
+        "problem"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3CD506TGS32EY5BQSZK",
+      "parent": null,
+      "prior": null,
+      "question": "What is the artefact: a lazyspec pack only (config+templates+hooks+skills plugin), a pack plus its own binary, or a wrapper CLI that fronts lazyspec entirely?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "identity",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:31:33Z"
+    },
+    "intent-vs-regression": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by dt-change-representation and receipt-model",
+        "rejected": [],
+        "text": "An intentional requirement change is a claim replaced or removed by id in an in-flight change document. A regression is a governed-code change with no change document touching the affected claims: the spec's receipts go stale (drift) while its claims are unchanged. The distinction is structural: is there a change doc naming this claim id."
+      },
+      "blocked_by": [
+        "contract-verification"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3E6QW2MHC0AXGSZ0D9P",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "How does an agent distinguish an intentional requirement change from an implementation regression? Is the rule \"spec transition lands before code\" and is it enforced?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "intent-vs-regression",
+      "status": "answered",
+      "updated_at": "2026-09-30T00:14:49Z"
+    },
+    "interview-stage": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "same shape as every other enforcement: a link that exists or does not, surfaced by validate, judgement left to the dictum and the human; tool-agnostic so hydra stays optional; the tree link is what lets specify generate rather than co-write",
+        "rejected": [
+          {
+            "option": "never mandatory",
+            "why_not": "a capability can be minted from a one-line prompt with no trace it was thought through"
+          },
+          {
+            "option": "mandatory hydra tree for new capabilities",
+            "why_not": "names a tool in a rule, needs a checkable definition of new capability, contradicts keeping hydra optional"
+          }
+        ],
+        "text": "Rationale required, form free; interview recommended, never mandated. A spec must link at least one rationale artefact: hydra tree, promoted idea, or decision record.\nvalidate warns on a spec with no rationale link and reports the count of rationale-less specs as an info finding. The dictum recommends a hydra interview for anything worth one; the hook never names the tool. A hydra tree is referenced from the spec, never restated in it."
+      },
+      "blocked_by": [
+        "dev-workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3F9CT1MB3FPBBQ60VAH",
+      "parent": "workflow",
+      "prior": null,
+      "question": "Where does hydra fit: a mandatory interview before any RFC, optional, or is the hydra JSON itself an input the spec references?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "interview-stage",
+      "status": "answered",
+      "updated_at": "2026-09-30T10:11:17Z"
+    },
+    "jev": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "States once what the tree said in wf-verifying, unverifiable-claims and spec-intent, with a rule that makes a bad model call cost only friction, never a false pass. Source: .local/metaframework-lazydev-recommendations.md rec 1.",
+        "rejected": [
+          {
+            "option": "external experiment repo with a hook point only",
+            "why_not": "the [intent] trial never runs unless someone wires it, and the monotonic rule has no enforcer"
+          },
+          {
+            "option": "gate for intent-only claims",
+            "why_not": "a probabilistic call decides acceptance, rejected by spec-intent and wf-verifying; makes an API key a completion requirement"
+          }
+        ],
+        "text": "Yes, inside the framework: advisory, monotonic, landing after the deterministic core is dogfooded.\nMonotonic rule: jev may add a finding, ask for human sign-off, or flag a claim or receipt it thinks is missing. It may never remove a finding, turn a failure into a pass, waive a receipt or complete a document. Output is structured (verdict, confidence, abstain), labelled advisory, never counted as a receipt. Stage: the human gate at complete (review packet) and the [intent] grading trial. Kept off validate's hot path: a separate subcommand, never invoked by validate, pre-transition or CI."
+      },
+      "blocked_by": [
+        "review-stage",
+        "unverifiable-claims"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3GQCNQD4TBEJF96GDX9",
+      "parent": null,
+      "prior": null,
+      "question": "Does jev (probabilistic boolean evaluation, spec-judge style) belong in the framework at all, and if so at which stage?",
+      "rev": 1,
+      "seq": 9,
+      "slug": "jev",
+      "status": "answered",
+      "updated_at": "2026-10-01T00:43:29Z"
+    },
+    "jev-dependency": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "An advisory layer that can only add friction must not be able to stop the deterministic core from running. Matches v1-scope principle: demonstrable with zero AI in the verifier.",
+        "rejected": [
+          {
+            "option": "core dependency",
+            "why_not": "makes an API key a requirement for validate, pre-transition or CI, which the monotonic rule forbids"
+          }
+        ],
+        "text": "Optional. With no API key it does nothing; every deterministic check runs unchanged.\nOffline behaviour is silence, not a finding. The review packet notes jev was unavailable so the human knows the advisory layer did not run."
+      },
+      "blocked_by": [
+        "dev-workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3H45BPZ6N3XV231EW2A",
+      "parent": "jev",
+      "prior": null,
+      "question": "Is jev optional (degrades gracefully without an API key) or a core dependency? What is the offline behaviour?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "jev-dependency",
+      "status": "answered",
+      "updated_at": "2026-10-01T00:43:29Z"
+    },
+    "jev-role": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Follows from the monotonic rule under jev. Grading intent-only claims is the trial unverifiable-claims already scheduled; reviewing the change at the human gate is where advisory output has a reader.",
+        "rejected": [
+          {
+            "option": "requirement-to-code conformance as a gate",
+            "why_not": "receipts are the conformance check; jev output is never a receipt"
+          },
+          {
+            "option": "Stop-hook judgement of agent output",
+            "why_not": "puts a model call on the session hot path with an escape, so it would be both slow and waivable"
+          }
+        ],
+        "text": "jev grades [intent] claims against the diff and reviews the change document at the human completion gate. Never blocking.\nBoth outputs appear in the review packet the human sees when completing, and as advisory findings in validate output. Spec-quality review at specify time is a later trial, not v1."
+      },
+      "blocked_by": [
+        "dev-workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3GYDQWYTV0VSTF4BWQQ",
+      "parent": "jev",
+      "prior": null,
+      "question": "What does jev judge: requirement-to-code conformance, unspecified behaviour, spec quality at review, or agent output at Stop hooks? And is it ever blocking?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "jev-role",
+      "status": "answered",
+      "updated_at": "2026-10-01T00:43:29Z"
+    },
+    "lazyspec-boundary": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "test: if a gamedev pack could want it, it goes down. User expects no push-downs to be needed; the rule exists for the case where one is.",
+        "rejected": [
+          {
+            "option": "lazyspec frozen",
+            "why_not": "accumulates workarounds if a gap appears"
+          },
+          {
+            "option": "framework absorbs mechanism",
+            "why_not": "hooks binary becomes a second lazyspec"
+          }
+        ],
+        "text": "Mechanism in lazyspec, policy in the framework. Expectation: lazyspec already has everything needed (validate + pre-transition hooks, trust, governs, staleness, bundles), so v1 raises no lazyspec RFCs. The rule is for the exception."
+      },
+      "blocked_by": [
+        "identity"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3D4WJ929T5HKT3ZPD7Z",
+      "parent": null,
+      "prior": null,
+      "question": "What belongs in lazyspec proper versus this framework? Which features found during design should push down into lazyspec (e.g. new hook events) and which must stay opinion in the pack?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "lazyspec-boundary",
+      "status": "answered",
+      "updated_at": "2026-09-29T05:27:32Z"
+    },
+    "lifecycle-dag": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Reconfirmed after dt-work-home lease correction; nothing here depended on leases.",
+        "rejected": [],
+        "text": "Types: spec (evergreen, active only), change (draft -> in-progress -> complete -> archived; archive folds claims into specs), decision (proposed -> accepted -> superseded), convention + dictum (existing). /lazy boundaries: change is the unit /lazy drives; spec and decision are never driven, only folded into or created."
+      },
+      "blocked_by": [
+        "change-unit",
+        "dt-work-home"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3EY7RZ4F744DA3EYWSJ",
+      "parent": "document-types",
+      "prior": {
+        "cauterised_by": null,
+        "rationale": "follows from change-unit, dt-work-home, dt-rationale-home and the quiz",
+        "rejected": [],
+        "text": "Types: spec (evergreen, active only), change (draft -> in-progress -> complete -> archived; archive folds claims into specs), decision (proposed -> accepted -> superseded), convention + dictum (existing). /lazy boundaries: change is the unit /lazy drives; spec and decision are never driven, only folded into or created."
+      },
+      "question": "What is the type chain the DAG walks (e.g. interview -> rfc -> story -> iteration -> done) and where are the hard type boundaries /lazy must stop at?",
+      "rev": 2,
+      "seq": 2,
+      "slug": "lifecycle-dag",
+      "status": "answered",
+      "updated_at": "2026-10-02T03:19:04Z"
+    },
+    "multi-agent": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "lazyspec has no leases and orchestrate is sequential by design; nothing in the experiments was blocked by lack of parallelism. Coordination guardrails are built when dogfooding shows two agents actually colliding, per the position head: evidence from the thin slice, not argument.",
+        "rejected": [
+          {
+            "option": "convention-only coordination (owner per claim subset written by orchestrate, validate/Stop checks on ownership)",
+            "why_not": "a new document convention and two guardrails with no demonstrated need"
+          },
+          {
+            "option": "lazyspec lease RFC (document or claim-level lease with owner and expiry)",
+            "why_not": "breaks the v1 no-RFC expectation, mechanism without a concrete second use"
+          }
+        ],
+        "text": "Nothing in v1. One agent per change document; parallelism across changes is separate agents in separate worktrees on separate changes, sequenced by orchestrate as today.\nCollision guards are the already-settled same-claim-id validate finding across in-progress changes, plus git. Intra-change parallelism (disjoint claim sets in one change) is deferred until dogfooding shows a collision; the back-pocket design is orchestrate writing a claim owner into the change document with validate and Stop checking ownership."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "thesis-scope"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3HE5QNMMD0D6197C2WC",
+      "parent": null,
+      "prior": null,
+      "question": "Parallel agents: orchestrate runs units sequentially and lazyspec has no lease mechanism. What, if anything, does the pack add for parallel execution in v1 (claim ownership, lease config, worktree conventions), or is it nothing?",
+      "rev": 1,
+      "seq": 11,
+      "slug": "multi-agent",
+      "status": "answered",
+      "updated_at": "2026-10-02T03:17:01Z"
+    },
+    "naming": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "A claim in a change is a small result proven on the way to a larger one, which is exactly what a lemma is; the metaphor gives the skills one usable word (claims are lemmas) and otherwise leaves the settled vocabulary alone. Math register chosen over unix-like and mythic after both were explored; the user wanted a term, not a creature.",
+        "rejected": [
+          {
+            "option": "delta",
+            "why_not": "the most exact structural match (id-keyed delta folded into the spec) but git-delta already owns the `delta` binary name on most Rust developers' PATH. Kept in the back pocket if lemma proves unavailable"
+          },
+          {
+            "option": "qed",
+            "why_not": "names the governing rule (no box without proof) but reads as a rule, not a thing"
+          },
+          {
+            "option": "mythic names (ladon, argus)",
+            "why_not": "user preferred a term over a creature"
+          },
+          {
+            "option": "unix-like truncations (spck, vouch, rcpt, vrfy, seal)",
+            "why_not": "explored, superseded by the math register"
+          },
+          {
+            "option": "settlement-field names (tally, ledger, settle)",
+            "why_not": "metaphor already carried by the vocabulary; the name did not need to repeat it"
+          },
+          {
+            "option": "harness/rig and lazyspec-prefixed descriptive names",
+            "why_not": "generic, or brands the opinion as part of lazyspec"
+          }
+        ],
+        "text": "lemma. Plugin prefix lemma:, hooks binary lemma, pack repo lemma. The name shapes vocabulary minimally: a claim may be called a lemma; receipts, fold, governs, drift and re-pin stay as settled. delta is the back-pocket alternative if lemma is unavailable on crates.io or GitHub (unverified at decision time; sandbox denied the lookup)."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "identity"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3HV3E7B75N2FPM852K3",
+      "parent": null,
+      "prior": null,
+      "question": "What is it called, and does the name imply a metaphor (harness, doctrine, rig) that shapes the vocabulary of the skills?",
+      "rev": 1,
+      "seq": 13,
+      "slug": "naming",
+      "status": "answered",
+      "updated_at": "2026-10-02T04:45:53Z"
+    },
+    "oracle-per-workflow": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "testing is the codebases concern (pre-commit, just check, CI); a spec tool that re-runs the suite at Stop is neither fast nor lightweight and duplicates an existing gate. Whether a test passes is CIs; whether it exists and is named by the spec is the frameworks. Whole approach is a hypothesis to verify by dogfooding.",
+        "rejected": [
+          {
+            "option": "framework as test runner",
+            "why_not": "[verify] table, tier ladder, Stop-time fix/chore classification, worktree test replay, sensitive paths, max_files -- all deleted"
+          },
+          {
+            "option": "nothing on code",
+            "why_not": "guardrails become advisory and the binary shrinks to a receipt check"
+          }
+        ],
+        "text": "The framework never runs tests; it checks that receipts exist. v1 oracle is structural: (1) at pre-transition to complete, every AC carries an @ref to a test symbol that resolves; (3) at Stop, a diff that crosses governs areas with no in-progress document is flagged. (2) a PreToolUse edit gate bounding edits to the in-progress doc's governs is in the back pocket, pending evidence from practice. Fix, chore, refactor policy is a dictum agents read, enforced by the codebase's own checks."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:27:44Z",
+      "id": "01M3NXJ23AJKCARRT0GQ9J4BSX",
+      "parent": "governing-principle",
+      "prior": null,
+      "question": "The oracle outranks the plan. For each workflow group, what counts as verified completion? Code-changing: which evidence (tests, characterisation tests, typecheck, lint, manual probe) satisfies \"no unverified completion\"? Shaping: what verifies a spec or plan is done? Maintaining: what verifies a reconcile?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "oracle-per-workflow",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:35:45Z"
+    },
+    "plan-gate": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "user chose no friction at start; the bound is enforced at Stop (cross-governs flag) and at complete (receipts). Refines the dev-workflow sentence: the human decision point moves from draft->in-progress to complete; recorded here rather than reopening dev-workflow, whose cascade would reopen six settled children for a one-clause change",
+        "rejected": [
+          {
+            "option": "human advances draft->in-progress, no self-advance",
+            "why_not": "a solo developer approving their own agent draft is a formality"
+          },
+          {
+            "option": "human by default with a project override",
+            "why_not": "a knob deferred until dogfooding shows the formality is real friction"
+          },
+          {
+            "option": "diff-size ceiling, explicit scope declaration, PreToolUse edit gate",
+            "why_not": "all previously rejected or back-pocketed under oracle-per-workflow and enforcement-points"
+          }
+        ],
+        "text": "Bound: a direct change stays within one governs area; crossing areas requires an in-progress change (flagged at Stop). Agent self-advances draft -> in-progress when structural checks pass: Intent present, at least one claim, fold targets resolve.\nHuman review lands at complete, not at plan approval. Consequence: \"no unbounded change\" is enforced after the fact (Stop, complete), not before editing; the PreToolUse gate stays in the back pocket if practice shows that is too late. Amends the dev-workflow sentence to: human reviews and decides at complete and on the shaping track; the agent drives delivery transitions up to complete."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "escalation-triggers"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3FGAEC2BPZR7H1JYPVH",
+      "parent": "workflow",
+      "prior": null,
+      "question": "Given \"no unbounded change; no unverified completion\", what is the bound on a direct change and how is it enforced: a governs-scoped edit gate, a diff-size ceiling, an explicit scope declaration the agent makes before editing, or skill instruction only?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "plan-gate",
+      "status": "answered",
+      "updated_at": "2026-09-30T10:12:51Z"
+    },
+    "position": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "scenario quiz 2026-09-30, six moments. Every answer went to the structured side: tagged claim in the spec (Monday), sha stale banner with completion gate (September), decision record for a playtest outcome (Floaty), change docs folded by id (Merge), stale receipts re-pinned in ten seconds (Rename), specs + change archive + decisions + hydra a year on. \"Done\" answer: all enforcement surfaces at once. Stated preference was lightweight; revealed preference is low friction per action, not few artefact kinds.",
+        "rejected": [
+          {
+            "option": "light (.local/agent-instruction-intent.md)",
+            "why_not": "pending tests as the plan, README intent, no receipts. Rejected by every quiz answer; its C15 (pending tests are plan items) survives as an extra Stop check, and C9/C11/C12 as principles"
+          },
+          {
+            "option": "fourth position",
+            "why_not": "not needed; the quiz resolved to heavy with two amendments"
+          }
+        ],
+        "text": "Heavy, with two amendments. Tagged claims in change documents folded into capability specs by id, @ref receipts pinned by sha, decision records first-class, hydra trees kept. Amendment 1: the Stop hook also reads pending tests statically (it.todo, #[ignore] without a reason) from touched test files, absorbing the strawman's C15 without running anything. Amendment 2: \"lightweight\" is defined as friction per interaction (ten-second re-pin, chores free, human edits never block), not as artefact count. Evidence for further change comes from dogfooding the thin slice, not from more argument."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-30T02:09:25Z",
+      "id": "01M3R15SEGBY7SPQ0YXDB8SXR5",
+      "parent": null,
+      "prior": null,
+      "question": "Three positions exist on one axis, where planned behaviour lives: heavy (tree: tagged claims in change docs folded into capability specs, @ref receipts), middle (lazyspec_workflow_binary_spec.md: tagged claims in evergreen specs, @ref receipts, targeted drift reconciliation), light (.local/agent-instruction-intent.md: pending tests are the plan, README intent, no claims or receipts, rot signal undefined). User is not sure the light position is right. Which position, or a fourth, and decided by what evidence?",
+      "rev": 1,
+      "seq": 19,
+      "slug": "position",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:20:25Z"
+    },
+    "problem": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "the three pains are real and distinct; a pack alone is a starter, a spec model alone is a template, enforcement alone has nothing to enforce. Primary was not declared; v1-scope decides the build order.",
+        "rejected": [
+          {
+            "option": "distribution only",
+            "why_not": "mostly a pack, no new machinery"
+          },
+          {
+            "option": "enforcement only",
+            "why_not": "hooks with no encoded spec opinion"
+          },
+          {
+            "option": "spec model only",
+            "why_not": "opinion without tooling to hold agents to it"
+          }
+        ],
+        "text": "All three, as layers: pack for repeatability, hooks for enforcement, the intent+contracts spec model as the opinion the pack encodes.\nThe repo exists because the pieces are scattered and advisory; layered together they become a workflow agents cannot skip."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3BRC55PMJP4F69TVKRN",
+      "parent": null,
+      "prior": null,
+      "question": "What problem does the metaframework solve that lazyspec + the existing lazyspec plugin skills + per-repo config do not already solve? What is the failure you keep hitting?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "problem",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:27:58Z"
+    },
+    "receipt-model": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "the con on A (agent forgets the doc edit after writing the test) is a behaviour problem, which hooks solve: validate warns continuously, pre-transition errors. The cons on B and C are machinery, which does not go away. @ref resolution, pinning and rename-fix already exist.",
+        "rejected": [
+          {
+            "option": "B, test canonical",
+            "why_not": "per-language annotations, new indexer, raw markdown shows no receipts"
+          },
+          {
+            "option": "C, both with fix --receipts reconciliation",
+            "why_not": "two representations of one fact, the duplication this design is against. Test-side annotation stays back-pocket as an index, never canonical."
+          }
+        ],
+        "text": "Document is canonical. Claims are tagged list items with stable ids (`- [AC-3] ...`); receipts are `@ref path#symbol` lines under the claim. Tests carry nothing. v1 evidence is test symbols only. A claim with no receipt is a validate warning while the doc is in progress and a pre-transition error at complete."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CBBQC5X6K80V7KWDJF7",
+      "parent": "verification",
+      "prior": null,
+      "question": "What is a receipt: a claim (planned behaviour line, AC, requirement) with a stable id, linked by @ref to evidence (test symbol, check command, CI job, recorded probe). How are claim ids kept stable across edits, and what evidence kinds are admissible?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "receipt-model",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:06:15Z"
+    },
+    "requirement-unit": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by receipt-model",
+        "rejected": [],
+        "text": "A tagged list item with a stable id (`- [AC-3] ...`) inside a Behaviour section. Not a heading per claim, not frontmatter, not a bundle part."
+      },
+      "blocked_by": [
+        "spec-truth"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3DFA8GFRYK8CCHVRQ3J",
+      "parent": "spec-model",
+      "prior": null,
+      "question": "What is the smallest addressable requirement: a ## section of a spec (spec-judge assumption), a bundle part file, a frontmatter list entry, or its own document type?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "requirement-unit",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:11:47Z"
+    },
+    "review-stage": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "The gate must read only the document so it survives PR-based and direct-to-main projects alike. A single human gate that the human can move to the front per change gives autonomy without ever removing the gate. Reuses the verified-by sign-off pattern already accepted for unverifiable claims rather than inventing a new mechanism.",
+        "rejected": [
+          {
+            "option": "PR merge as the gate",
+            "why_not": "assumes a PR workflow; some projects commit direct to main, and the framework controls documents not git hosting"
+          },
+          {
+            "option": "fixed human gate at complete",
+            "why_not": "no autonomous completion ever, even for a change the human already read in full"
+          },
+          {
+            "option": "human gate at archive",
+            "why_not": "code lands before any human looks, and it conflates accepting the work with rewriting the spec"
+          },
+          {
+            "option": "human gate at in-progress (reopen plan-gate)",
+            "why_not": "nothing autonomous can start, and the human never verifies the result"
+          },
+          {
+            "option": "mandatory recorded review-work pass",
+            "why_not": "turns an advisory skill into a gate, which wf-verifying rejected"
+          }
+        ],
+        "text": "Human gate at in-progress -> complete by default, movable to the front by pre-approval. Archive is mechanical.\nDefault: the agent drives draft -> in-progress and works until every claim has a receipt; only a human advances to complete. Pre-approval: a human may write `approved-by: <name> @ <sha>` on the change, the sha pinning the claims section. The pre-transition hook to complete accepts an agent completion when the approval is present and the claims are unchanged since the sha; any claim added, replaced or removed after approval stales it and the gate is back at the end. The gate is never absent; the human chooses per change whether to verify intent up front or the result at the end. complete -> archived runs the fold hook with no judgement. \"Ready for review\" is derived (in-progress, all claims receipted, validate clean), not a status. review-work is the agent's advisory self-review before declaring receipts complete; output shown, not stored. The human reviews the change document plus the diff since in-progress. The agent never writes approved-by; the Stop hook flags an approval field written during the agent's own session. PR merge, if the project has one, is orthogonal to the document gate."
+      },
+      "blocked_by": [
+        "dev-workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3FPHZPP9VY7VH3W6TG6",
+      "parent": "workflow",
+      "prior": null,
+      "question": "What is the exit gate for a unit of work: review-work skill, spec-judge conformance, tests green via hook, human approval, or some combination?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "review-stage",
+      "status": "answered",
+      "updated_at": "2026-09-30T23:38:14Z"
+    },
+    "severity-policy": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Keeps the opinion fixed while giving a real project a visible, reasoned, counted escape, matching the [intent] treatment already chosen. Tying contract mutation to approved-by is what makes pre-approval safe: the agent finishes on its own only while the evidence it was approved against has not moved.",
+        "rejected": [
+          {
+            "option": "fixed by surface with no override",
+            "why_not": "the only escape from a false positive is disabling the hook, which is worse than any override"
+          },
+          {
+            "option": "per-check severity table in project config",
+            "why_not": "the opinion becomes negotiable silently and per project; the catalogue is the framework word"
+          }
+        ],
+        "text": "Severity fixed by surface; per-instance in-document waivers with a reason, counted as info; contract-mutation and flagged re-pin revoke approved-by so autonomous completion is impossible until a human completes.\nvalidate: warn. pre-transition: error. Stop: error with its existing escape. CI: same as validate. No config table. A false positive is waived where it occurs, as a line under the claim with a reason; validate counts waivers as an info finding alongside [intent] claims so the ratio stays visible. Contract mutation and a flagged re-pin are warnings at validate and Stop; at the completion gate they invalidate approved-by, returning the gate to the human, who sees the flag when completing."
+      },
+      "blocked_by": [
+        "guardrail-catalogue"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3GH32AE62WQ01JWQRWG",
+      "parent": "guardrails",
+      "prior": null,
+      "question": "Default severity: which guardrails block (error) and which warn? Is there a per-project override or is opinion non-negotiable?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "severity-policy",
+      "status": "answered",
+      "updated_at": "2026-09-30T23:58:40Z"
+    },
+    "skill-granularity": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "Group granularity mirrors workflow-classification: the group (changing code, shaping, verifying, maintaining, operating) is a structural question the agent answers reliably; the workflow within a group (fix vs refactor vs chore) is the dictum-guided judgement call, so it belongs in a reference file, not a trigger description. Six descriptions are cheap in context; reshuffling the provisional 24 touches reference files, not the plugin surface.",
+        "rejected": [
+          {
+            "option": "one skill per workflow (24)",
+            "why_not": "24 competing trigger descriptions in every session, fix/build/refactor overlap and mis-trigger, half the workflows carry no methodology and become near-empty files, every amendment to the provisional set is a plugin change"
+          },
+          {
+            "option": "single router with workflow as argument",
+            "why_not": "one description cannot trigger from symptoms across 24 situations, so it only fires when the human types it; auto-dispatch from a bare prompt is lost"
+          }
+        ],
+        "text": "Six skills: an entry router plus five group skills (shape, change, verify, maintain, operate); the 24 workflows are reference files inside their group skill, loaded on demand. Orientation gets no skill.\nentry is the /lazy analogue: in-progress change doc exists -> resume it under change; otherwise route by what the prompt wants; never classifies fix/chore/refactor. shape: ideate, design (hands to hydra), specify (router over idea | hydra tree | prompt), plan, decide, triage; protocol = Intent required, rationale link before a spec exists, claims as tagged list items, fold targets resolve, decisions supersede never edit. change: build, fix (systematic-debugging absorbed whole), chore, refactor, spike; protocol = pick a claim subset, stay within governs, receipt per claim before complete, [intent] rules, re-pin discipline. verify: test, conform (review-work's three stages at the completion gate), audit (findings filed as bugs/ideas); protocol = receipts are test symbols, stack testing dictums. maintain: reconcile, housekeep, configure; protocol = wf-volatility rules. operate: ship, orchestrate (lazyspec orchestrate dispatch model, disjoint claim sets with leases), resume; protocol = human gate at in-progress -> complete unless pre-approved, archive fold mechanical. Orientation (explain, orient, investigate, review) is always free and carries no protocol, so it is plain prompting; resume.md may collapse into entry in practice."
+      },
+      "blocked_by": [],
+      "created_at": "2026-10-01T03:58:54Z",
+      "id": "01M3TSTZ4WDP5GN8ZCJF4FYCDR",
+      "parent": "skills",
+      "prior": null,
+      "question": "Skill granularity: one skill per workflow (24), one per workflow group plus a router (6+1), or a single router that reads the workflow as an argument? What does the agent see in its skill list and how does dispatch work?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "skill-granularity",
+      "status": "answered",
+      "updated_at": "2026-10-02T03:13:34Z"
+    },
+    "skills": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "An opinion needs one voice. The lazyspec verbs are generic over any DAG, the one property the framework does not need, and claims, receipts, fold and approval cannot be bolted onto DAG-agnostic prose. One plugin keeps one version and three install channels.",
+        "rejected": [
+          {
+            "option": "reuse the lazyspec plugin plus gap skills",
+            "why_not": "a fourth install channel, a version pair to keep coherent, and two vocabularies in the agent context; execute builds a task breakdown when the unit of progress is the claim"
+          },
+          {
+            "option": "framework skills wrapping lazyspec skills",
+            "why_not": "two layers of prose per task and a cross-plugin dependency, the case Claude Code handles worst"
+          }
+        ],
+        "text": "Framework-owned skills in one plugin, written against the fixed seven-type DAG, adapted from the lazyspec verbs where the shape matches.\nSource material: review-work's three stages, orchestrate's dispatch model, systematic-debugging whole, the authoring ladder where a type has a ceiling. Every code-changing skill speaks claims, receipts, fold and approval directly. The lazyspec plugin is not a dependency. autobots-delivery skills are downstream: methodology for the rfc/story/iteration chain the change unit replaces; an Inlight pack may later be rebuilt on the framework, not a v1 input. Skill granularity (per workflow vs per group plus router) is a separate head."
+      },
+      "blocked_by": [
+        "workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3HAMZRXSESPPJ735ST1",
+      "parent": null,
+      "prior": null,
+      "question": "Which skills ship: reuse the lazyspec plugin skills (lazy, execute, review-work, advance...) as-is, wrap them, or replace them with framework-owned skills? How do the autobots-delivery skills relate?",
+      "rev": 1,
+      "seq": 10,
+      "slug": "skills",
+      "status": "answered",
+      "updated_at": "2026-10-01T03:58:54Z"
+    },
+    "spec-audience": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by spec-intent",
+        "rejected": [],
+        "text": "The agent, at build time and at change time. Brevity and rationale are the quality bar, not completeness; a spec that restates the code is worse than none."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31BX2F89GJJJN4V7EZVJ",
+      "parent": "spec-intent",
+      "prior": null,
+      "question": "Who is the primary reader of a spec: the agent at build time, the human at review time, or the future agent making a change? The primary reader decides what the spec optimises for (completeness, brevity, rationale).",
+      "rev": 1,
+      "seq": 1,
+      "slug": "spec-audience",
+      "status": "answered",
+      "updated_at": "2026-09-29T05:46:40Z"
+    },
+    "spec-intent": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "code says what, tests say what must hold, git says what changed; only the spec can carry intent, constraints, non-goals and rationale. The word is overloaded, so the framework splits the jobs across types and transitions rather than one document.",
+        "rejected": [
+          {
+            "option": "approval artefact",
+            "why_not": "makes specs disposable and wastes governs/staleness"
+          },
+          {
+            "option": "verification oracle",
+            "why_not": "spec-judge premise; requires prose precise enough to grade, which is the duplication problem"
+          },
+          {
+            "option": "decision memory alone",
+            "why_not": "ADRs already do this; framework would be just an ADR type"
+          }
+        ],
+        "text": "A spec carries what code cannot, for an agent that remembers nothing: intent, constraints, non-goals, trade-offs, rationale. Approval is a status transition, the oracle is the test suite, decision records are a separate lightweight type. Every design choice is judged by whether it serves that reader."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31BQ9Q79XCXZ4GZFYB6C",
+      "parent": null,
+      "prior": null,
+      "question": "Why do specifications exist in LLM-driven development? What jobs does a spec do that code, tests and git history cannot, and for whom (the developer now, the agent at build time, the reviewer, the next agent months later)?",
+      "rev": 1,
+      "seq": 15,
+      "slug": "spec-intent",
+      "status": "answered",
+      "updated_at": "2026-09-29T05:46:40Z"
+    },
+    "spec-lifespan": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "the split is already load-bearing in lazyspec (staleness = drift | age per type) and in this repo. It also resolves what spec-truth left open: planned behaviour in an evergreen spec must be settled by a test; in an RFC it never has to be.",
+        "rejected": [
+          {
+            "option": "evergreen only",
+            "why_not": "rewrites away rationale for superseded choices"
+          },
+          {
+            "option": "point-in-time only",
+            "why_not": "nothing tells the agent what the system is now except code"
+          }
+        ],
+        "text": "Both kinds, split by type. Evergreen specs (staleness = drift) describe what the system is now and are re-reviewed when governed code moves. Point-in-time records (RFC, ADR; staleness = age) describe a decision, are never edited after acceptance, only superseded."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31C8E54AZYVZVBAB4M1V",
+      "parent": "spec-intent",
+      "prior": null,
+      "question": "Is a spec a living document kept true to the code (evergreen, drift makes it stale), a point-in-time record of a decision (like an RFC), or does the framework need both kinds?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "spec-lifespan",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:07:29Z"
+    },
+    "spec-model": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "The framework reasons about exactly two things in a spec: intent text and claim location. Enforce those; a required Behaviour section would reintroduce the empty-section filler option 1 was rejected for.",
+        "rejected": [
+          {
+            "option": "fully explicit",
+            "why_not": "fixed Intent/Constraints/Behaviour all required, validate errors on empty; invites filler, rigid for infra capabilities"
+          },
+          {
+            "option": "convention only",
+            "why_not": "no enforcement, claims parsed anywhere; hooks cannot tell intent from claims and the change doc has no structural anchor"
+          }
+        ],
+        "text": "Intent required; Behaviour optional but exclusive.\nSpec template: a required non-empty Intent section (constraints and non-goals fold into it until they earn their own optional heading), and an optional Behaviour section that is the sole legal home for tagged claims. validate errors on a missing or empty Intent, and on a tagged claim outside Behaviour. A pure-intent spec with no Behaviour section is legal, so infra capabilities carry no filler. Other headings (Constraints, Non-goals, Open questions) are template suggestions, never checked."
+      },
+      "blocked_by": [
+        "spec-intent",
+        "thesis"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3DA8QMY680P7TMWABXG",
+      "parent": null,
+      "prior": null,
+      "question": "How does the framework split a spec into intent, executable contracts and change management? Is that split explicit in the document structure or a convention agents follow?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "spec-model",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:25:50Z"
+    },
+    "spec-truth": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "behaviour is authored before it is tested and planning it in prose is valuable; ACs are one useful form among others (scenarios, examples, tables). Interfaces have a code owner from the start so never get prose.",
+        "rejected": [
+          {
+            "option": "strict",
+            "why_not": "spec owns only intent and rationale; behaviour has nowhere to live during planning"
+          },
+          {
+            "option": "spec owns everything, refs illustrative",
+            "why_not": "no guardrail possible"
+          }
+        ],
+        "text": "Spec owns intent, non-goals, constraints, rationale, and planned behaviour. Planned behaviour (ACs, scenarios, examples, whatever form suits) is a promissory note; the test is the settlement; the @ref is the receipt. Interfaces are always @ref, never prose. Structure is dictums; decisions are ADRs; change is git."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31C3AE9C6X55F1MJRAR9",
+      "parent": "spec-intent",
+      "prior": null,
+      "question": "For each kind of fact (intent, rationale, behaviour, interface, structure, decision), what is the source of truth: the spec, the code, the tests, or git? Where does the spec explicitly defer?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "spec-truth",
+      "status": "answered",
+      "updated_at": "2026-09-29T05:59:42Z"
+    },
+    "test-harness": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "The stack-agnostic principles are load-bearing for the receipt model, so they belong in the core pack. The stack-specific rules are the framework strongest evidence from practice but can only be enforced where the stack exists. lazyspec init --template copies a pack whole with no layering, so optional files in one pack is the only form that keeps one version and raises no lazyspec RFC.",
+        "rejected": [
+          {
+            "option": "all in the core pack",
+            "why_not": "a Rust CLI inherits MSW and browser rules whose receipts cannot resolve; teaches adopters dictums are noise"
+          },
+          {
+            "option": "separate layered pack",
+            "why_not": "lazyspec has no pack composition, so this is a lazyspec RFC and a fourth install channel"
+          },
+          {
+            "option": "per-repo choice with dom-test as a referenced example",
+            "why_not": "adopters re-derive the web rules every time and the most tested opinion stays outside the framework"
+          }
+        ],
+        "text": "Core `testing` dictum for stack-agnostic principles; stack-specific dictums (e.g. `testing-web`: MSW-only doubles, real browser) as optional files in the same pack.\nThe core dictum states what the receipt model depends on: every claim is mechanised, doubles only at I/O seams, test through the real boundary. Optional stack dictums live in a directory the pack's setup step prunes: the adopter deletes what does not apply, or the setup skill asks which stack and removes the rest. One repo, one version, no lazyspec change. A second stack's dictum goes in the same optional directory; pack layering is revisited only if that directory outgrows the pruning step."
+      },
+      "blocked_by": [
+        "dev-workflow"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3FT9XD10R9VG0GSWZZA",
+      "parent": "workflow",
+      "prior": null,
+      "question": "Does the dom-test SPEC (mechanised ACs, MSW-only doubles, real browser) become a convention/dictum shipped in the pack, a separate pack layered on top, or stay a per-repo choice?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "test-harness",
+      "status": "answered",
+      "updated_at": "2026-09-30T23:47:19Z"
+    },
+    "thesis": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "A and C are already practised in dom-test (SPEC principles, mechanised ACs). B has no evidence in any repo and risks inventing a manifest format that becomes a second source of truth.",
+        "rejected": [
+          {
+            "option": "all three in scope",
+            "why_not": "forces a machine-readable requirement manifest"
+          },
+          {
+            "option": "A holds, C softened",
+            "why_not": "leaves drift half-solved so spec-judge stays useful"
+          },
+          {
+            "option": "thesis overstated, encode no spec theory",
+            "why_not": "collapses the spec-model layer"
+          }
+        ],
+        "text": "A and C hold; B (deterministic multi-agent reconciliation) is set aside.\nSpecs carry intent, rationale and constraints and reference executable contracts. Anything precisely expressible in code is code, not prose."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3C1R68FMR6TF7MSF8N0",
+      "parent": null,
+      "prior": null,
+      "question": "The earlier notes claim specs should carry intent and reference executable contracts, not restate code. Does that thesis hold for you today, and which of its three goals (easy to specify, deterministic multi-agent reconciliation, no new natural-language programming language) actually matter for this framework?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "thesis",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:29:20Z"
+    },
+    "thesis-scope": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "matches the pattern so far: one experiment repo per idea, promoted only once proven. Keeps the idea alive without shaping this design.",
+        "rejected": [
+          {
+            "option": "out of scope forever",
+            "why_not": "kills parallel-execution questions that orchestrate already raises"
+          },
+          {
+            "option": "deferred within this framework",
+            "why_not": "a vague future obligation that constrains present choices, contrary to convention principle 6"
+          }
+        ],
+        "text": "Separate research thread. Dead for this framework; a candidate standalone experiment repo, like spec-judge was for jev.\nThe multi-agent head narrows to: what does parallel execution via lazyspec leases need from the pack."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3C74ZVD77P7WPWH3K98",
+      "parent": "thesis",
+      "prior": null,
+      "question": "Is deterministic multi-agent reconciliation of spec changes in scope for this framework, out of scope forever, or a separate research thread?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "thesis-scope",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:30:29Z"
+    },
+    "unverifiable-claims": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "both are cheap (one marker, one field) and the question of which gets abused is empirical. jev as a grader for intent-only claims is the natural third trial and is decided under the jev heads.",
+        "rejected": [
+          {
+            "option": "C recorded probe as its own design",
+            "why_not": "a probe is just a file an @ref can already point at; no separate mechanism"
+          }
+        ],
+        "text": "Trial A and B together: an `[intent]` marker excludes a claim from the receipt check, and `verified-by: <name> @ <sha>` records human sign-off as a receipt that goes stale by sha. validate surfaces the count of intent-only claims as an info finding so the ratio is visible. jev grading of intent-only claims is a third trial, scoped under the jev heads."
+      },
+      "blocked_by": [
+        "receipt-model"
+      ],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CC7XWD6X7X7CHAVQQT0",
+      "parent": "verification",
+      "prior": null,
+      "question": "What about claims that cannot have a test (UX quality, performance envelopes, security posture, ops runbooks): recorded probe with output, human sign-off as evidence, jev grading, or excluded from receipts and marked intent-only?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "unverifiable-claims",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:44:11Z"
+    },
+    "v1-scope": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "The position head says evidence comes from dogfooding the thin slice; one release containing everything delays all evidence by months, and enforcement without skills tests an agent that was never told the rules. Release 1 is the smallest loop that makes the thesis checkable in hydra.",
+        "rejected": [
+          {
+            "option": "everything the tree calls v1 in one release",
+            "why_not": "months before any evidence, contradicting the position head"
+          },
+          {
+            "option": "enforcement first, skills later",
+            "why_not": "hooks would fire on an agent never taught claims and receipts; that evidence is about ignorance, not the design"
+          }
+        ],
+        "text": "Release 1 (thin slice): pack with spec, change and decision types, core testing dictum and the fix/chore/refactor dictum; binary with receipt-resolves-and-fresh at complete, fold by id at archive, cross-governs bound plus static pending-test read at Stop, validate continuous, ten-line CI job; skills: entry and change. Acceptance demo in hydra, five steps. Release 2 and later enumerated below.\nRelease 1 demo (acceptance test, in hydra): (1) lazyspec init --template from the lemma repo; (2) one evergreen spec for the reopen cascade, Intent plus governs; (3) a change with two claims, one [intent], built, with @ref receipts to real cargo test symbols; (4) complete blocked while a receipt is missing, passes the human gate once added, archive hook writes spec lines by id; (5) governed-code edit with no change open shows the receipt stale and re-pin clears it; an edit across two governs areas is flagged at Stop.\n\nRelease 2 (the rest of the settled v1 design, on evidence from release 1):\n- Types: idea (open -> promoted | dropped) and bug (open -> closed, reproduction claim, violates link, two close paths); convention and dictum templates with tagged-claim rules whose receipt is the enforcer.\n- Skills: shape (ideate, design -> hydra, specify router over idea | hydra tree | prompt, plan, decide, triage), verify (test, conform = review-work three stages at the completion gate, audit filing bugs/ideas), maintain (reconcile, housekeep, configure), operate (ship, orchestrate sequential dispatch, resume).\n- Guardrail catalogue remainder at validate: two in-flight changes touching one claim id; fold target does not resolve; [intent] count and waiver count as info; verified-by / approved-by stale by sha; evergreen spec without governs; spec without a rationale link; contract mutation naming affected claims and specs.\n- Pre-transition draft -> in-progress: Intent present, at least one claim, fold targets resolve (agent self-advances).\n- Completion gate: approved-by required for agent-invoked completion; contract mutation and flagged re-pin revoke approved-by.\n- re-pin subcommand hardening: refused when the symbol no longer resolves; flagged after a receipt-file change with no matching claim change.\n- Stop additions: approved-by written this session; contract mutation on session-touched receipt files.\n- Severity policy: per-instance in-document waivers with a reason, counted as info; no config table.\n- verified-by human sign-off receipts; [intent] ratio reporting.\n- Optional stack dictums directory (testing-web etc.) pruned by the setup step.\n- UserPromptSubmit convention preamble injection.\n- Second adopter: the lemma repo self-hosts.\n\nRelease 3 and later, each gated on a concrete need shown in dogfooding: jev advisory grading of [intent] claims and change-document review at the completion gate (optional, no API key = no-op); JUnit XML report ingestion as a second evidence kind; PreToolUse edit gate bounding edits to the in-progress document's governs; per-claim implementation @ref; intra-change parallelism via claim ownership written by orchestrate; GitHub issue sync for bugs; lazyspec adoption and migration from the rfc/story/iteration chain; version coherence across pack, plugin and binary."
+      },
+      "blocked_by": [
+        "dogfood",
+        "guardrails",
+        "jev",
+        "position",
+        "skills"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3J0ZJK99FSQHA4W2NXR",
+      "parent": null,
+      "prior": null,
+      "question": "What is the minimum first release: which of pack, skills, hooks, binary, jev are in, and what is the first end-to-end demo that proves it?",
+      "rev": 1,
+      "seq": 14,
+      "slug": "v1-scope",
+      "status": "answered",
+      "updated_at": "2026-10-02T04:47:47Z"
+    },
+    "value-proposition": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "prompting cannot scope context by code locality, cannot know when context has decayed, cannot prove intent was met, and does not keep rationale in the repo. No existing framework has a graph, code anchoring or a decay signal. Value scales with codebase age and session count. User: hooks are crucial, verification must be built into the system.",
+        "rejected": [],
+        "text": "Scoped, decaying, verifiable context for a memoryless agent, as typed nodes anchored to code -- with verification built into the graph and enforced by hooks. Hooks are not a convenience layer; they are how \"no unverified completion\" becomes true."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CAJ1DH0M02STC2BBFZB",
+      "parent": "problem",
+      "prior": null,
+      "question": "What is the utility over existing frameworks and over just prompting Claude with a good CLAUDE.md?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "value-proposition",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:53:34Z"
+    },
+    "verification": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "synthesis of the four children",
+        "rejected": [],
+        "text": "Verification is in the graph, not a runner. Claims are tagged list items with stable ids; receipts are @ref lines to test symbols, pinned by sha and stale on drift; the codebase runs the tests and CI owns pass/fail. Hooks: validate warns, pre-transition blocks, Stop bounds the diff and re-validates touched docs, CI runs the same binary. Untestable claims are marked [intent] or signed off by a human; jev is a trial grader for those."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T06:53:34Z",
+      "id": "01M3NZ1CB3KMGSBQWAMABR8SV3",
+      "parent": null,
+      "prior": null,
+      "question": "How is verification built into the system without the framework running tests: what is a claim, what is evidence, how is the link (receipt) represented, how does the framework learn pass/fail and freshness, and at which hook points is it enforced?",
+      "rev": 1,
+      "seq": 18,
+      "slug": "verification",
+      "status": "answered",
+      "updated_at": "2026-09-29T07:44:11Z"
+    },
+    "version-coherence": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "one version number across all three pieces, released together; no check machinery in v1",
+        "rejected": [
+          {
+            "option": "version stamp checked on every hook",
+            "why_not": "machinery before the mismatch has bitten"
+          },
+          {
+            "option": "validate-hook finding only",
+            "why_not": "same stamp, weaker"
+          }
+        ],
+        "text": "Not in v1. One version number across pack, plugin and binary, released together; release notes carry compatibility."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T04:41:27Z",
+      "id": "01M3NQFERSA8KZ03BX1KREG3EA",
+      "parent": "distribution",
+      "prior": null,
+      "question": "With three install channels, how is a pack/skills/binary version mismatch detected: a version stamp in .lazyspec.toml the binary checks on every hook, a validate-hook finding, or not at all in v1?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "version-coherence",
+      "status": "answered",
+      "updated_at": "2026-09-29T04:42:00Z"
+    },
+    "wf-creating-specs": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "one birthplace for specs regardless of how much thinking preceded it; rationale link is automatic when a tree exists; no change needs to exist before a capability can be described; matches spec-audience (agent-authored, human-reviewed, brief, rationale-bearing). User: a router skill is sensible",
+        "rejected": [
+          {
+            "option": "interview-first, generated only",
+            "why_not": "small capabilities pay for a full interview; mandatory-interview question belongs to interview-stage"
+          },
+          {
+            "option": "change-first, scaffolded from the change Intent",
+            "why_not": "spec inherits one change framing, narrower than the capability"
+          },
+          {
+            "option": "human-written, agent-reviewed",
+            "why_not": "the one activity the framework then does not help with; does not scale past one author"
+          }
+        ],
+        "text": "Spec minted only by the specify workflow, a router skill over three inputs: promoted idea, hydra tree, or prompt.\nThe agent authors Intent, constraints and non-goals at the highest authorship level the input supports (generate from a tree, co-write from an idea or prompt); the human reviews; the spec goes active with an empty Behaviour. The tree or idea is linked as rationale. Claims arrive only by change archive. Whether a hydra tree is required before specify is decided under interview-stage."
+      },
+      "blocked_by": [
+        "document-types"
+      ],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31CXYBRJCCT3FK76XRJ4",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "How are specs created: hydra interview first, then co-write/generate from the tree; agent drafts from a prompt; or the human writes and the agent reviews? What input does a spec start from?",
+      "rev": 1,
+      "seq": 2,
+      "slug": "wf-creating-specs",
+      "status": "answered",
+      "updated_at": "2026-09-30T10:01:45Z"
+    },
+    "wf-prompting": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "prompting cannot be designed as one thing; the framework treats a prompt as an instance of one of these workflows, each with its own planning and verification policy. Set is provisional and amendable.",
+        "rejected": [],
+        "text": "Twenty-four prompt workflows in six groups. Orientation: explain, orient, investigate, review. Shaping: ideate, design, specify, plan, decide, triage. Changing code: build, fix, chore, refactor, spike. Verifying: test, conform, audit. Maintaining: reconcile, housekeep, configure. Operating: ship, orchestrate, resume. Orientation and resume are always free."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31CP87ZBW65F7MVH3P2Q",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "How does the developer prompt Claude? Free prompt with the convention preamble injected; always through /lazy against a document; or a hook that rewrites or blocks prompts without a document anchor?",
+      "rev": 1,
+      "seq": 1,
+      "slug": "wf-prompting",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:27:44Z"
+    },
+    "wf-reporting-bugs": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "tracks bugs durably in the graph without a second work unit; reuses the receipt model instead of adding a lifecycle; keeps the fix policy true (simple fix needs no plan); the delta-off-a-bug trigger is the escalation trigger already decided, not a new rule; spec stays writable only by the archive hook",
+        "rejected": [
+          {
+            "option": "tracker only (GitHub issues)",
+            "why_not": "triage state not in the graph, validate cannot surface open bugs against a claim; conflicts with dt-inventory"
+          },
+          {
+            "option": "every bug spawns a change",
+            "why_not": "repeals the fix policy, two documents per one-line fix, breaks friction-per-interaction definition of lightweight"
+          },
+          {
+            "option": "bug is a change with kind",
+            "why_not": "bug: unfixed bugs pollute work-in-flight as draft changes, wontfix has no natural state"
+          },
+          {
+            "option": "full driven bug type with reported/triaged/in-progress/fixed/wontfix",
+            "why_not": "a second in-flight unit competing with change"
+          }
+        ],
+        "text": "Thin bug record, tracked, never driven; closes by its own regression receipt or by a spawned change resolving it.\nA bug is a point-in-time type (open -> closed, close reason fixed | wontfix). It carries one reproduction claim (tagged list item) and links the spec claim id it violates. Two close paths. Direct fix: the regression test is an @ref receipt on the bug; pre-transition to closed requires the receipt to resolve, or a wontfix reason. Delta: when the violated claim itself was wrong, or the fix trips the existing escalation trigger (cross-governs / complex / risky), the bug spawns a change that resolves it; the change carries the replaced claim and its receipt; the bug closes when the change completes. The bug never amends a spec; only the archive hook writes specs. A closed bug's receipt is graph evidence against the spec claim. Tracker (GitHub issues) sync is out of scope for v1."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31D8CNKP5RX6X7FRSV0J",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "How do bugs enter: a bug document type (this repo has one: reported/triaged/in-progress/fixed/wontfix), GitHub issues synced, or a failing test? How does a bug link to the spec it violates, and does a bug ever amend the spec?",
+      "rev": 1,
+      "seq": 4,
+      "slug": "wf-reporting-bugs",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:55:02Z"
+    },
+    "wf-tracking-ideas": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "same intake pattern as bug: thin, point-in-time, never driven, in the lazyspec graph so links, validate age-staleness and the TUI/web views see it. Hydra is not a dependency concern (user owns it) but its states (open/answered/cauterised) only map to open/promoted/dropped rather than fit, an unpromoted idea is a head with nothing to ask, and a backlog tree holding every interview becomes the whole design history in one file",
+        "rejected": [
+          {
+            "option": "ideas as hydra heads in a backlog tree",
+            "why_not": "richer drop rationale and in-place promotion, but invisible to the lazyspec graph, two intake surfaces, and cross-tree promotion is the same seam as a link anyway"
+          },
+          {
+            "option": "idea as a draft change",
+            "why_not": "drafts become the backlog, dropped has no state, vague idea has no fold target"
+          },
+          {
+            "option": "tracker or nothing",
+            "why_not": "contradicts dt-inventory and the bug precedent"
+          }
+        ],
+        "text": "Thin idea type in the lazyspec graph: open -> promoted | dropped. Intent only; promoted links what it became (a change or a hydra tree).\nNo claims, no receipts. Dropped carries a reason. Promotion to an interview mints a fresh hydra tree and the idea record links it; promotion straight to a change links the change. Bug and idea are the two intake types, same shape; bug adds a reproduction claim, a violates link and a receipt path. Revisit only if hydra grows a backlog mode with non-question heads and cross-tree promotion."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31D1R1MW1MSBGRWSG41M",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "Where do ideas live before they are specs: an idea/proposal document type, hydra heads, GitHub issues, a backlog file, or nowhere (an idea is a draft RFC or it is nothing)?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "wf-tracking-ideas",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:59:13Z"
+    },
+    "wf-verifying": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by oracle-per-workflow; jev and review-work remain open under their own heads",
+        "rejected": [],
+        "text": "Correctness is verified by the codebase's own tests and checks, run by pre-commit and CI, never by the framework. The framework requires receipts: an @ref from each AC to a resolving test symbol before complete. review-work and jev are advisory review, not gates; their exact role is decided under the jev heads."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31DKY8YJ95D3F32WRHV2",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "How is correctness verified: mechanised acceptance criteria (dom-test), tests referenced as contracts, jev conformance grading, review-work skill, human review? Which are required and which are advisory?",
+      "rev": 1,
+      "seq": 6,
+      "slug": "wf-verifying",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:35:56Z"
+    },
+    "wf-volatility": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "taken from lazyspec_workflow_binary_spec.md section 4; position-independent",
+        "rejected": [],
+        "text": "Human edits never break the flow. Drift is detected from changed files against governs. Later agent work in an affected area may start immediately and must resolve only the drift relevant to its task before completing; unrelated drift stays visibly stale. Automation-first: mechanical repairs (renames, moves) where existing lazyspec facilities support them; semantic discrepancies presented for review scoped to the claims relied on. Never re-pin to silence a finding."
+      },
+      "blocked_by": [],
+      "created_at": "2026-09-29T05:44:34Z",
+      "id": "01M3NV31DD87HAKKS8YCG5FHDN",
+      "parent": "dev-workflow",
+      "prior": null,
+      "question": "How is codebase volatility managed: governs globs + reviewed sha + staleness bands surface drift today. What triggers spec re-review, who does it, and what blocks while a governed spec is stale?",
+      "rev": 1,
+      "seq": 5,
+      "slug": "wf-volatility",
+      "status": "answered",
+      "updated_at": "2026-09-30T02:09:25Z"
+    },
+    "workflow": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "matches dev-workflow: human decisions on the shaping track, agent evidence on the delivery track; every hook decided under verification sits on a delivery transition; children slot cleanly (interview-stage = shaping, plan-gate and review-stage = delivery transitions, test-harness = what delivery consumes)",
+        "rejected": [
+          {
+            "option": "one linear pipeline idea->interview->specify->draft->in-progress->complete->archived",
+            "why_not": "small changes visibly skip four stages and the skip becomes the argument"
+          },
+          {
+            "option": "change-centric with entry paths",
+            "why_not": "specs and decisions become side effects of changes; hydra has no slot"
+          }
+        ],
+        "text": "Two tracks joined at the spec. Shaping (human-paced): idea -> optional interview -> specify -> decision. Delivery (agent-paced, hook-enforced): change draft -> in-progress -> complete -> archived.\nA change targets a spec; shaping produces specs and decisions, delivery produces claims and receipts that fold into specs at archive. Bugs enter delivery directly (regression receipt on the bug) or via a spawned change. Artefacts: idea record; hydra tree; spec shell (Intent only); decision record; change with claims; code+tests+receipts; receipted change; spec lines rewritten by id."
+      },
+      "blocked_by": [
+        "dev-workflow",
+        "document-types"
+      ],
+      "created_at": "2026-09-29T04:25:58Z",
+      "id": "01M3NPK3F522H15MWRBYQ3AAY3",
+      "parent": null,
+      "prior": null,
+      "question": "Given the six activities, what is the end-to-end stage sequence from idea to merged code, and what artefact does each stage produce and consume?",
+      "rev": 1,
+      "seq": 7,
+      "slug": "workflow",
+      "status": "answered",
+      "updated_at": "2026-09-30T10:10:19Z"
+    },
+    "workflow-classification": {
+      "answer": {
+        "cauterised_by": null,
+        "rationale": "settled by oracle-per-workflow: classification was the heavy part and is gone",
+        "rejected": [],
+        "text": "Nobody classifies. The framework reads only two structural signals: is there an in-progress document, and does the diff cross governs areas. The fix/chore/refactor/spike distinction lives in a dictum and in the agent's judgement; misjudgement is caught by the codebase's checks and by the cross-governs flag, not by a label."
+      },
+      "blocked_by": [
+        "oracle-per-workflow"
+      ],
+      "created_at": "2026-09-29T06:27:44Z",
+      "id": "01M3NXJ23J2ESDQF4G62Z6TB82",
+      "parent": "governing-principle",
+      "prior": null,
+      "question": "Who decides which workflow a prompt is (agent self-classifies, human declares, hook infers from the diff), and what stops an agent calling a risky change a chore? Is misclassification caught at the prompt, at the edit, or by the oracle at completion?",
+      "rev": 1,
+      "seq": 3,
+      "slug": "workflow-classification",
+      "status": "answered",
+      "updated_at": "2026-09-29T06:35:45Z"
+    }
+  },
+  "intent": "Design a metaframework, in a separate repo from lazyspec, that wraps lazyspec for LLM-driven development: a lazyspec pack, a set of skills, an opinionated workflow, possibly a hooks binary, enforced guardrails/validation/verification, and possibly jev integration. Decide what it is, what it is not, how it relates to lazyspec's packs/hooks/governs, and how it reconciles the \"specs should express intent and reference executable contracts rather than duplicate code\" thesis, drawing on the spec-judge, dom-test and hydra experiments. Output: a design settled enough to write the founding RFC/README for the new repo.",
+  "slug": "metaframework",
+  "version": 1
+}
