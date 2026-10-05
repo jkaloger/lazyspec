@@ -25,11 +25,17 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::engine::fs::RealFileSystem;
 use crate::engine::git_ref::GitRefOps;
 use crate::engine::staleness::Drift;
+use crate::engine::store::ensure_cache_gitignored;
 
-/// Inside `.lazyspec/cache/`, which `lazyspec init` already gitignores.
+/// Inside `.lazyspec/cache/`, which `flush` gitignores before its first write.
 const CACHE_FILE: &str = "staleness.json";
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".lazyspec").join("cache").join(CACHE_FILE)
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Memo {
@@ -53,10 +59,10 @@ struct State {
 
 #[derive(Debug)]
 pub struct StalenessCache {
-    /// Where the memo is read from and written back to. `None` is a memo that
-    /// remembers nothing at all -- what a test uses, so that a git call log is
-    /// the whole story.
-    path: Option<PathBuf>,
+    /// The project whose `.lazyspec/cache/` the memo is read from and written
+    /// back to. `None` is a memo that remembers nothing at all -- what a test
+    /// uses, so that a git call log is the whole story.
+    root: Option<PathBuf>,
     state: Mutex<State>,
 }
 
@@ -65,13 +71,12 @@ impl StalenessCache {
     /// on disk cannot be read in the current shape. A cache miss is never an
     /// error: the answer is a git call away.
     pub fn load(root: &Path) -> Self {
-        let path = root.join(".lazyspec").join("cache").join(CACHE_FILE);
-        let memo = std::fs::read_to_string(&path)
+        let memo = std::fs::read_to_string(cache_path(root))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
         Self {
-            path: Some(path),
+            root: Some(root.to_path_buf()),
             state: Mutex::new(State {
                 memo,
                 ..State::default()
@@ -83,7 +88,7 @@ impl StalenessCache {
     /// lookup reaches git.
     pub fn off() -> Self {
         Self {
-            path: None,
+            root: None,
             state: Mutex::new(State::default()),
         }
     }
@@ -96,7 +101,7 @@ impl StalenessCache {
         root: &Path,
         sha: &str,
     ) -> Result<DateTime<Utc>> {
-        if self.path.is_none() {
+        if self.root.is_none() {
             return git.read_commit_timestamp(root, sha);
         }
         let mut state = self.lock();
@@ -126,7 +131,7 @@ impl StalenessCache {
         from: &str,
         globs: &[String],
     ) -> Result<Drift> {
-        if self.path.is_none() {
+        if self.root.is_none() {
             return git.diff_stat(root, from, "HEAD", globs);
         }
         let mut state = self.lock();
@@ -153,11 +158,15 @@ impl StalenessCache {
     /// they flush after each pass instead. Cheap to call on an unchanged memo --
     /// that is what `dirty` is for -- so a warm cache writes nothing.
     pub fn flush(&self) {
-        let Some(path) = &self.path else {
+        let Some(root) = &self.root else {
             return;
         };
+        let path = cache_path(root);
         let mut state = self.lock();
         if !state.dirty {
+            return;
+        }
+        if ensure_cache_gitignored(root, &RealFileSystem).is_err() {
             return;
         }
         if let Some(dir) = path.parent() {
@@ -250,6 +259,21 @@ mod tests {
             insertions: files,
             deletions: 0,
         }
+    }
+
+    // BUG-037: the first write creates `.lazyspec/cache/`, so it must be
+    // gitignored by then or `git status` lists the memo as untracked.
+    #[test]
+    fn the_first_flush_gitignores_the_cache_directory() {
+        let tmp = TempDir::new().unwrap();
+        let git = git_answering(drift_of(1));
+        let cache = StalenessCache::load(tmp.path());
+        cache.commit_timestamp(&git, tmp.path(), ANCHOR).unwrap();
+
+        cache.flush();
+
+        let ignore = std::fs::read_to_string(tmp.path().join(".lazyspec/.gitignore")).unwrap();
+        assert!(ignore.lines().any(|l| l == "cache/"), "got: {ignore}");
     }
 
     // AC3: the anchor and HEAD both unchanged, so no new subprocess. Across two
