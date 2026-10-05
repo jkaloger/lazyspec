@@ -59,32 +59,189 @@ fn collect_leaves<'a>(node: &Node<'a>, source: &str, out: &mut Vec<String>) {
     }
 }
 
+struct Matcher {
+    declaration_kinds: &'static [&'static str],
+    leading_attributes_and_docs: bool,
+    test_blocks: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Pass {
+    Declarations,
+    TestBlocks,
+}
+
+const TEST_CALLEES: &[&str] = &["it", "test", "describe"];
+const TEST_MODIFIERS: &[&str] = &["skip", "only"];
+
+fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
+    &source[node.start_byte()..node.end_byte()]
+}
+
+fn is_test_callee(callee: Node, source: &str) -> bool {
+    match callee.kind() {
+        "identifier" => TEST_CALLEES.contains(&node_text(callee, source)),
+        "member_expression" => {
+            let (Some(object), Some(property)) = (
+                callee.child_by_field_name("object"),
+                callee.child_by_field_name("property"),
+            ) else {
+                return false;
+            };
+            object.kind() == "identifier"
+                && TEST_CALLEES.contains(&node_text(object, source))
+                && TEST_MODIFIERS.contains(&node_text(property, source))
+        }
+        _ => false,
+    }
+}
+
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some(e @ ('"' | '\'' | '\\' | '`')) => out.push(e),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn literal_title(arg: Node, source: &str) -> Option<String> {
+    if arg.kind() == "template_string" {
+        let mut cursor = arg.walk();
+        let has_substitution = arg
+            .children(&mut cursor)
+            .any(|c| c.kind() == "template_substitution");
+        if has_substitution {
+            return None;
+        }
+    } else if arg.kind() != "string" {
+        return None;
+    }
+    let text = node_text(arg, source);
+    text.get(1..text.len().checked_sub(1)?).map(unescape)
+}
+
+fn call_title(call: Node, source: &str) -> Option<String> {
+    if !is_test_callee(call.child_by_field_name("function")?, source) {
+        return None;
+    }
+    let first_arg = call.child_by_field_name("arguments")?.named_child(0)?;
+    literal_title(first_arg, source)
+}
+
+fn is_comment(node: Node) -> bool {
+    matches!(node.kind(), "line_comment" | "block_comment")
+}
+
+fn is_outer_doc_comment(node: Node) -> bool {
+    is_comment(node) && node.child_by_field_name("outer").is_some()
+}
+
+fn is_inner_doc_comment(node: Node) -> bool {
+    is_comment(node) && node.child_by_field_name("inner").is_some()
+}
+
+// Attributes and outer docs attach to the item across blank lines and plain
+// comments; the range starts at the earliest of them. Inner docs belong to the
+// enclosing module, so the walk stops there.
+fn start_including_leading_decorations(node: Node) -> usize {
+    let mut earliest = node;
+    let mut current = node;
+    while let Some(prev) = current.prev_sibling() {
+        if is_inner_doc_comment(prev) {
+            break;
+        }
+        if prev.kind() == "attribute_item" || is_outer_doc_comment(prev) {
+            earliest = prev;
+        } else if !is_comment(prev) {
+            break;
+        }
+        current = prev;
+    }
+    earliest.start_byte()
+}
+
+fn declaration_name_matches(node: Node, source: &str, symbol: &str) -> bool {
+    node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("type"))
+        .is_some_and(|n| node_text(n, source) == symbol)
+}
+
+fn matched_range(
+    node: Node,
+    source: &str,
+    symbol: &str,
+    matcher: &Matcher,
+    pass: Pass,
+) -> Option<(usize, usize)> {
+    if pass == Pass::Declarations
+        && matcher.declaration_kinds.contains(&node.kind())
+        && declaration_name_matches(node, source, symbol)
+    {
+        let start = if matcher.leading_attributes_and_docs {
+            start_including_leading_decorations(node)
+        } else {
+            node.start_byte()
+        };
+        return Some((start, node.end_byte()));
+    }
+
+    if pass == Pass::TestBlocks
+        && node.kind() == "call_expression"
+        && call_title(node, source).as_deref() == Some(symbol)
+    {
+        let statement = node
+            .parent()
+            .filter(|p| p.kind() == "expression_statement")
+            .unwrap_or(node);
+        return Some((statement.start_byte(), statement.end_byte()));
+    }
+
+    None
+}
+
+// Declarations win over test blocks, wherever each sits in the tree.
+fn find_symbol(root: Node, source: &str, symbol: &str, matcher: &Matcher) -> Option<String> {
+    let found = find_symbol_node(
+        &mut root.walk(),
+        source,
+        symbol,
+        matcher,
+        Pass::Declarations,
+    );
+    if found.is_some() || !matcher.test_blocks {
+        return found;
+    }
+    find_symbol_node(&mut root.walk(), source, symbol, matcher, Pass::TestBlocks)
+}
+
 fn find_symbol_node(
     cursor: &mut TreeCursor,
     source: &str,
     symbol: &str,
-    match_node_types: &[&str],
+    matcher: &Matcher,
+    pass: Pass,
 ) -> Option<String> {
-    let node = cursor.node();
-    let node_type = node.kind();
-
-    if match_node_types.contains(&node_type) {
-        let name_node = node
-            .child_by_field_name("name")
-            .or_else(|| node.child_by_field_name("type"));
-        if let Some(name_node) = name_node {
-            let name = source.get(name_node.start_byte()..name_node.end_byte());
-            if name == Some(symbol) {
-                let start = node.start_byte();
-                let end = node.end_byte();
-                return Some(source[start..end].to_string());
-            }
-        }
+    if let Some((start, end)) = matched_range(cursor.node(), source, symbol, matcher, pass) {
+        return Some(source[start..end].to_string());
     }
 
     if cursor.goto_first_child() {
         loop {
-            if let Some(result) = find_symbol_node(cursor, source, symbol, match_node_types) {
+            if let Some(result) = find_symbol_node(cursor, source, symbol, matcher, pass) {
                 return Some(result);
             }
             if !cursor.goto_next_sibling() {
@@ -112,19 +269,22 @@ impl SymbolExtractor for TypeScriptSymbolExtractor {
         let tree = parser.parse(source, None)?;
         let root = tree.root_node();
 
-        let mut cursor = root.walk();
-        find_symbol_node(
-            &mut cursor,
+        find_symbol(
+            root,
             source,
             symbol,
-            &[
-                "type_alias",
-                "type_alias_declaration",
-                "interface_declaration",
-                "class_declaration",
-                "function_declaration",
-                "enum_declaration",
-            ],
+            &Matcher {
+                declaration_kinds: &[
+                    "type_alias",
+                    "type_alias_declaration",
+                    "interface_declaration",
+                    "class_declaration",
+                    "function_declaration",
+                    "enum_declaration",
+                ],
+                leading_attributes_and_docs: false,
+                test_blocks: true,
+            },
         )
     }
 }
@@ -150,22 +310,25 @@ impl SymbolExtractor for RustSymbolExtractor {
         let tree = parser.parse(source, None)?;
         let root = tree.root_node();
 
-        let mut cursor = root.walk();
-        find_symbol_node(
-            &mut cursor,
+        find_symbol(
+            root,
             source,
             symbol,
-            &[
-                "struct_item",
-                "enum_item",
-                "function_item",
-                "trait_item",
-                "impl_item",
-                "type_item",
-                "const_item",
-                "static_item",
-                "macro_definition",
-            ],
+            &Matcher {
+                declaration_kinds: &[
+                    "struct_item",
+                    "enum_item",
+                    "function_item",
+                    "trait_item",
+                    "impl_item",
+                    "type_item",
+                    "const_item",
+                    "static_item",
+                    "macro_definition",
+                ],
+                leading_attributes_and_docs: true,
+                test_blocks: false,
+            },
         )
     }
 }
@@ -179,6 +342,222 @@ impl Default for RustSymbolExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // BUG-038: leading attributes and doc comments
+    fn rust_extract(source: &str, symbol: &str) -> String {
+        RustSymbolExtractor::new().extract(source, symbol).unwrap()
+    }
+
+    #[test]
+    fn rust_extraction_includes_leading_attributes() {
+        let source = "#[test]\n#[should_panic]\nfn my_test() {}\n";
+        assert_eq!(
+            rust_extract(source, "my_test"),
+            "#[test]\n#[should_panic]\nfn my_test() {}"
+        );
+    }
+
+    #[test]
+    fn rust_extraction_changes_when_attribute_added() {
+        let before = rust_extract("#[test]\nfn t() {}", "t");
+        let after = rust_extract("#[test]\n#[ignore]\nfn t() {}", "t");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn rust_extraction_includes_line_doc_comments() {
+        let source = "/// Adds.\n/// More.\n#[inline]\npub fn add() {}";
+        assert_eq!(rust_extract(source, "add"), source);
+    }
+
+    #[test]
+    fn rust_extraction_stops_at_inner_doc_comments() {
+        assert_eq!(
+            rust_extract("/// Before.\n//! Inner.\n/// After.\nfn f() {}", "f"),
+            "/// After.\nfn f() {}"
+        );
+        assert_eq!(
+            rust_extract("/// Before.\n/*! Inner. */\n/// After.\nfn f() {}", "f"),
+            "/// After.\nfn f() {}"
+        );
+    }
+
+    #[test]
+    fn rust_extraction_excludes_inner_doc_comments() {
+        assert_eq!(rust_extract("//! Inner.\nfn f() {}", "f"), "fn f() {}");
+        assert_eq!(rust_extract("/*! Inner. */\nfn f() {}", "f"), "fn f() {}");
+        assert_eq!(
+            rust_extract("#![allow(unused)]\nfn f() {}", "f"),
+            "fn f() {}"
+        );
+    }
+
+    #[test]
+    fn rust_extraction_includes_block_doc_comments() {
+        let source = "/** Docs. */\nstruct S;";
+        assert_eq!(rust_extract(source, "S"), source);
+    }
+
+    #[test]
+    fn rust_extraction_excludes_plain_comments() {
+        let source = "// plain\n#[test]\nfn f() {}";
+        assert_eq!(rust_extract(source, "f"), "#[test]\nfn f() {}");
+        assert_eq!(rust_extract("// plain\nfn f() {}", "f"), "fn f() {}");
+    }
+
+    #[test]
+    fn rust_extraction_includes_doc_across_plain_comment() {
+        let source = "/// doc\n// plain\nfn f() {}";
+        assert_eq!(rust_extract(source, "f"), source);
+    }
+
+    #[test]
+    fn rust_extraction_includes_attribute_across_plain_comment() {
+        let source = "#[test]\n// note\nfn t() {}";
+        assert_eq!(rust_extract(source, "t"), source);
+    }
+
+    #[test]
+    fn rust_extraction_includes_attribute_across_blank_line() {
+        let source = "#[should_panic]\n\nfn t() {}";
+        assert_eq!(rust_extract(source, "t"), source);
+    }
+
+    #[test]
+    fn rust_extraction_trims_leading_plain_comments() {
+        let source = "// plain\n\n/// doc\n#[test]\nfn t() {}";
+        assert_eq!(rust_extract(source, "t"), "/// doc\n#[test]\nfn t() {}");
+    }
+
+    #[test]
+    fn rust_extraction_stops_at_preceding_item() {
+        let source = "fn a() {}\n#[test]\nfn b() {}";
+        assert_eq!(rust_extract(source, "b"), "#[test]\nfn b() {}");
+    }
+
+    #[test]
+    fn rust_extraction_includes_attributes_on_impl_methods() {
+        let source = "impl X {\n    /// Doc.\n    #[must_use]\n    fn m(&self) {}\n}";
+        assert_eq!(
+            rust_extract(source, "m"),
+            "/// Doc.\n    #[must_use]\n    fn m(&self) {}"
+        );
+    }
+
+    // STORY-298: Jest/Vitest test blocks
+    fn ts_extract(source: &str, symbol: &str) -> Option<String> {
+        TypeScriptSymbolExtractor::new().extract(source, symbol)
+    }
+
+    #[test]
+    fn ts_it_and_test_calls_resolve_to_whole_statement() {
+        let it = "it(\"does x\", () => {\n  expect(1).toBe(1);\n});";
+        assert_eq!(ts_extract(it, "does x").as_deref(), Some(it));
+        let test = "test('does y', async () => { await run(); });";
+        assert_eq!(ts_extract(test, "does y").as_deref(), Some(test));
+    }
+
+    #[test]
+    fn ts_describe_resolves_to_whole_block() {
+        let source = "describe(\"suite\", () => {\n  it(\"a\", () => {});\n});";
+        assert_eq!(ts_extract(source, "suite").as_deref(), Some(source));
+    }
+
+    #[test]
+    fn ts_nested_it_inside_describe_is_found() {
+        let source = "describe(\"suite\", () => {\n  it(\"inner\", () => {});\n});";
+        assert_eq!(
+            ts_extract(source, "inner").as_deref(),
+            Some("it(\"inner\", () => {});")
+        );
+    }
+
+    #[test]
+    fn ts_skip_and_only_modifiers_resolve_like_plain_form() {
+        for callee in [
+            "it.skip",
+            "it.only",
+            "test.skip",
+            "test.only",
+            "describe.skip",
+            "describe.only",
+        ] {
+            let source = format!("{callee}(\"title\", () => {{}});");
+            assert_eq!(
+                ts_extract(&source, "title").as_deref(),
+                Some(source.as_str()),
+                "{callee}"
+            );
+        }
+    }
+
+    #[test]
+    fn ts_substitution_free_template_literal_title_matches() {
+        let source = "it(`a`, () => {});";
+        assert_eq!(ts_extract(source, "a").as_deref(), Some(source));
+    }
+
+    #[test]
+    fn ts_template_literal_with_substitution_does_not_match() {
+        let source = "it(`a${x}`, () => {});";
+        assert_eq!(ts_extract(source, "a${x}"), None);
+        assert_eq!(ts_extract(source, "a"), None);
+    }
+
+    #[test]
+    fn ts_declarations_still_resolve_alongside_test_blocks() {
+        let source = "function helper() { return 1; }\nclass Widget {}\nit(\"x\", () => {});";
+        assert_eq!(
+            ts_extract(source, "helper").as_deref(),
+            Some("function helper() { return 1; }")
+        );
+        assert_eq!(
+            ts_extract(source, "Widget").as_deref(),
+            Some("class Widget {}")
+        );
+    }
+
+    #[test]
+    fn ts_duplicate_titles_return_first_in_document_order() {
+        let source = "it(\"dup\", () => { first(); });\nit(\"dup\", () => { second(); });";
+        assert_eq!(
+            ts_extract(source, "dup").as_deref(),
+            Some("it(\"dup\", () => { first(); });")
+        );
+    }
+
+    #[test]
+    fn ts_declaration_wins_over_an_earlier_test_block() {
+        let source = "it(\"setup\", () => {});\nfunction setup() {}";
+        assert_eq!(
+            ts_extract(source, "setup").as_deref(),
+            Some("function setup() {}")
+        );
+    }
+
+    #[test]
+    fn ts_escaped_title_matches_its_unescaped_value() {
+        let source = "it(\"says \\\"hi\\\"\\n\", () => {});";
+        assert_eq!(ts_extract(source, "says \"hi\"\n").as_deref(), Some(source));
+    }
+
+    #[test]
+    fn ts_non_test_callee_does_not_match() {
+        assert_eq!(ts_extract("foo(\"title\", () => {});", "title"), None);
+        assert_eq!(
+            ts_extract("it.each([1])(\"title\", () => {});", "title"),
+            None
+        );
+        assert_eq!(ts_extract("it.todo(\"title\");", "title"), None);
+    }
+
+    #[test]
+    fn rust_extractor_ignores_call_like_test_blocks() {
+        assert_eq!(
+            RustSymbolExtractor::new().extract("fn f() { it(\"x\"); }", "x"),
+            None
+        );
+    }
 
     // AC-1: TypeScript type alias extraction
     #[test]

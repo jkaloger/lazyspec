@@ -275,3 +275,22 @@ fn non_spec_documents_skip_orphan_ref_validation() {
         orphan_warnings
     );
 }
+
+#[test]
+fn quoted_symbol_ref_to_missing_file_produces_one_orphan_warning() {
+    let fixture = TestFixture::new();
+    let content = spec_index_with_refs(&[r#"src/gone.test.ts#"does a thing"@{blob:abc123}"#]);
+    fixture.write_doc("docs/specs/SPEC-011-quoted.md", &content);
+
+    let warnings = warning_messages(&fixture);
+    let orphans: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("orphan ref"))
+        .collect();
+    assert_eq!(orphans.len(), 1, "got: {:?}", warnings);
+    assert!(
+        orphans[0].contains("src/gone.test.ts"),
+        "got: {}",
+        orphans[0]
+    );
+}

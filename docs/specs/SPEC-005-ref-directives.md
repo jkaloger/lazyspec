@@ -31,12 +31,13 @@ Ref directives are parsed by a single regex defined as a module-level constant:
 
 @ref src/engine/refs.rs#REF_PATTERN
 
-The pattern decomposes each directive into three capture groups: a file path (required), a symbol or line number after `#` (optional), and a hex SHA after `@` (optional). This yields four practical forms:
+The pattern decomposes each directive into a file path (required), a symbol or line number after `#` (optional, bare or quoted), a blob hash after `@{blob:` (optional), and a hex SHA after `@` (optional). This yields these practical forms:
 
 - `@ref src/foo.rs` resolves the entire file.
 - `@ref src/foo.rs#MyStruct` resolves a named symbol within the file.
 - `@ref src/foo.rs#42` resolves line 42 of the file.
 - `@ref src/foo.rs#MyStruct@abc1234` resolves a symbol at a pinned git commit.
+- `@ref src/foo.test.ts#"does a thing"` resolves a symbol whose name contains spaces, such as a Jest or Vitest test title. The text between the quotes is passed to the extractor as-is; `\"` stands for a literal quote and `\\` for a literal backslash; any other backslash is kept as written. A blob or SHA suffix follows the closing quote, and `pin` re-emits the quotes. A quoted symbol cannot span lines: an opening quote with no closing quote on the same line falls back to a bare symbol.
 
 Path segments may not contain `#`, `@`, or whitespace. SHA fragments must be hexadecimal.
 

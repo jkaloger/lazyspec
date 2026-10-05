@@ -35,7 +35,7 @@ pub struct PinResult {
 }
 
 fn ref_target(r: &Ref) -> String {
-    match &r.symbol {
+    match r.symbol_text() {
         Some(sym) => format!("{}#{}", r.path, sym),
         None => r.path.clone(),
     }
@@ -60,11 +60,7 @@ pub fn pin_document(
         let target = ref_target(r);
         match compute_blob_hash_for_spec(root, config, spec_path, &r.path, r.symbol.as_deref()) {
             Ok(hash) => {
-                // Build the new ref string
-                let new_ref = match &r.symbol {
-                    Some(sym) => format!("@ref {}#{}@{{blob:{}}}", r.path, sym, hash),
-                    None => format!("@ref {}@{{blob:{}}}", r.path, hash),
-                };
+                let new_ref = format!("@ref {}@{{blob:{}}}", target, hash);
                 replacements.push((r.span.0, r.span.1, new_ref));
                 pinned.push(PinnedRef { target, hash });
             }
@@ -349,6 +345,58 @@ mod tests {
             result.new_body.contains(&expected_ref),
             "Expected body to contain '{}', got: {}",
             expected_ref,
+            result.new_body
+        );
+    }
+
+    #[test]
+    fn test_pin_keeps_quotes_on_quoted_symbol_and_is_stable() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        let config = Config::default();
+        fs::write(
+            root.join("a.test.ts"),
+            "it(\"does a thing\", () => {\n  run();\n});\n",
+        )
+        .unwrap();
+
+        let body = "Spec\n\n@ref a.test.ts#\"does a thing\"\n";
+        let first = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
+        assert_eq!(first.errors.len(), 0, "{:?}", first.errors);
+        assert_eq!(first.pinned[0].target, "a.test.ts#\"does a thing\"");
+        let expected = format!(
+            "@ref a.test.ts#\"does a thing\"@{{blob:{}}}",
+            first.pinned[0].hash
+        );
+        assert!(first.new_body.contains(&expected), "{}", first.new_body);
+
+        let second = pin_document(
+            root,
+            &config,
+            "docs/specs/SPEC-001",
+            &first.new_body,
+            FAKE_HEAD,
+        );
+        assert_eq!(second.new_body, first.new_body);
+    }
+
+    #[test]
+    fn test_pin_re_escapes_inner_quotes() {
+        let dir = setup_git_repo();
+        let root = dir.path();
+        let config = Config::default();
+        fs::write(
+            root.join("a.test.ts"),
+            "it('say \"hi\"', () => {\n  run();\n});\n",
+        )
+        .unwrap();
+
+        let body = "@ref a.test.ts#\"say \\\"hi\\\"\"\n";
+        let result = pin_document(root, &config, "docs/specs/SPEC-001", body, FAKE_HEAD);
+        assert_eq!(result.errors.len(), 0, "{:?}", result.errors);
+        assert!(
+            result.new_body.contains("#\"say \\\"hi\\\"\"@{blob:"),
+            "{}",
             result.new_body
         );
     }

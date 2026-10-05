@@ -14,7 +14,6 @@ related:
 - implements: STORY-056
 ---
 
-
 ## Summary
 
 Symbol extraction resolves `@ref` directives to concrete source code. Given a file path and symbol name, the system parses the file with tree-sitter, walks the concrete syntax tree, and returns the full text span of the matching definition. Two languages are supported: Rust and TypeScript.
@@ -29,7 +28,9 @@ The `SymbolExtractor` trait defines a single method, `extract(&self, source: &st
 
 @ref src/engine/symbols.rs#find_symbol_node
 
-Both extractors delegate to `find_symbol_node`, a recursive function that walks the tree-sitter CST using a `TreeCursor`. It accepts a list of node type strings to match against. For each node whose `kind()` matches one of those types, it checks the `name` field first, then falls back to the `type` field (which is how `impl_item` nodes are matched, since impl blocks expose their target type via the `type` field rather than `name`). When a match is found, the function returns the full byte span of the node as a `String`. The walk is depth-first: it descends into the first child, then iterates siblings, and backtracks to the parent.
+Both extractors delegate to `find_symbol_node`, a recursive function that walks the tree-sitter CST using a `TreeCursor`. Each extractor supplies a matcher: declaration node kinds, whether leading attributes and docs attach, and whether test blocks resolve. For a declaration node, it checks the `name` field first, then falls back to the `type` field (how `impl_item` is matched, since impl blocks expose their target type via `type`). On a match, the function returns the byte span of the node (extended per language, see below) as a `String`. The walk is depth-first: descend into the first child, iterate siblings, backtrack to the parent.
+
+The walk runs in two passes. The declaration pass runs first; the test-block pass runs only if it finds nothing. Declarations therefore win over test blocks wherever each sits in the tree.
 
 ## TypeScript Extractor
 
@@ -42,6 +43,12 @@ Both extractors delegate to `find_symbol_node`, a recursive function that walks 
 - `class_declaration` -- covers `class Foo { ... }` including inheritance via `extends`
 - `function_declaration` -- covers `function foo(...)` including `async function`
 - `enum_declaration` -- covers `enum Foo { ... }` including string-valued enums
+
+### Test blocks
+
+When no declaration matches, the extractor resolves Jest/Vitest call blocks by title. A call matches when its callee is `it`, `test` or `describe`, or one of those with `.skip` or `.only`, and its first argument is a string or a template string without substitutions. The symbol is compared to the title after unescaping (`\n`, `\t`, `\"`, `\'`, `\\` and `` \` ``; any other backslash is kept). Template strings with `${...}` never match.
+
+The result is the enclosing expression statement, including the trailing semicolon, not just the call. Calls nested in a `describe` callback resolve like top-level ones. The first match in document order wins.
 
 ## Rust Extractor
 
@@ -59,9 +66,13 @@ Both extractors delegate to `find_symbol_node`, a recursive function that walks 
 - `static_item` -- statics (`static FOO: T = ...`)
 - `macro_definition` -- `macro_rules!` definitions
 
+### Leading decorations
+
+A Rust range starts at the earliest outer doc comment (`///`, `/** */`) or attribute (`#[...]`) attached to the item. The walk goes backwards through preceding siblings and skips blank lines and plain comments (`//`, `/* */`) between decorations. It stops at the previous item, an inner attribute (`#![...]`) or an inner doc comment (`//!`, `/*! */`), since inner docs belong to the enclosing module. Plain comments before the earliest decoration, or directly before an undecorated item, are not part of the range.
+
 ## Name Resolution
 
-The extractor returns the first matching node encountered during the depth-first walk. When a source file contains both a `struct_item` and an `impl_item` for the same name, the struct is returned because it appears earlier in the tree. There is no mechanism to request a specific occurrence or to return multiple matches.
+The extractor returns the first match in document order within the winning pass. When a source file contains both a `struct_item` and an `impl_item` for the same name, the struct is returned because it appears earlier in the tree. There is no mechanism to request a specific occurrence or to return multiple matches.
 
 ## Parser Lifecycle
 

@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use code_fence::{find_fenced_code_ranges, is_inside_fence};
 
-pub const REF_PATTERN: &str =
-    r"@ref\s+([^#@\s]+)(?:#([^@\s]+))?(?:@\{blob:([a-fA-F0-9]+)\}|@([a-fA-F0-9]+))?";
+/// Groups: 1 path, 2 symbol (quotes included when quoted), 3 blob hash, 4 commit SHA.
+/// A quoted symbol stays on one line; an unterminated quote fails the quoted
+/// alternative and parses as a bare symbol.
+pub const REF_PATTERN: &str = r##"@ref\s+([^#@\s]+)(?:#("(?:[^"\\\n]|\\[^\n])*"|[^@\s]+))?(?:@\{blob:([a-fA-F0-9]+)\}|@([a-fA-F0-9]+))?"##;
 
 /// A parsed `@ref` directive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,12 +22,50 @@ pub struct Ref {
     pub path: String,
     /// The optional `#symbol` fragment.
     pub symbol: Option<String>,
+    /// Whether the symbol was written as `#"..."`.
+    pub quoted: bool,
     /// The optional `@{blob:<hex>}` pinning hash.
     pub blob_hash: Option<String>,
     /// The legacy optional `@<hex>` commit SHA.
     pub commit_sha: Option<String>,
     /// Byte offsets of the full match in the source text.
     pub span: (usize, usize),
+}
+
+impl Ref {
+    /// The symbol as written in source, re-quoted when it was quoted.
+    pub fn symbol_text(&self) -> Option<String> {
+        let sym = self.symbol.as_deref()?;
+        if !self.quoted {
+            return Some(sym.to_string());
+        }
+        let escaped = sym.replace('\\', "\\\\").replace('"', "\\\"");
+        Some(format!("\"{escaped}\""))
+    }
+}
+
+fn is_quoted(raw: &str) -> bool {
+    raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"')
+}
+
+fn unescape_quoted(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some(next @ ('\\' | '"')) => out.push(next),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Parse all `@ref` directives from `content`, skipping those inside fenced code blocks.
@@ -39,9 +79,15 @@ pub fn parse_refs(content: &str) -> Vec<Ref> {
         if is_inside_fence(&fenced_ranges, full_match.start()) {
             continue;
         }
+        let raw_symbol = cap.get(2).map(|m| m.as_str());
+        let quoted = raw_symbol.is_some_and(is_quoted);
         refs.push(Ref {
             path: cap.get(1).unwrap().as_str().to_string(),
-            symbol: cap.get(2).map(|m| m.as_str().to_string()),
+            symbol: raw_symbol.map(|raw| match quoted {
+                true => unescape_quoted(&raw[1..raw.len() - 1]),
+                false => raw.to_string(),
+            }),
+            quoted,
             blob_hash: cap.get(3).map(|m| m.as_str().to_string()),
             commit_sha: cap.get(4).map(|m| m.as_str().to_string()),
             span: (full_match.start(), full_match.end()),
@@ -456,5 +502,127 @@ mod tests {
             "Line-number ref should return exactly one line, got: {:?}",
             lines_in_block
         );
+    }
+
+    #[test]
+    fn test_parse_quoted_symbol_with_spaces() {
+        let refs = parse_refs(r#"@ref a.test.ts#"does a thing" tail"#);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, "a.test.ts");
+        assert_eq!(refs[0].symbol.as_deref(), Some("does a thing"));
+        assert!(refs[0].quoted);
+        assert_eq!(refs[0].span.1, r#"@ref a.test.ts#"does a thing""#.len());
+    }
+
+    #[test]
+    fn test_parse_quoted_symbol_unescapes_inner_quotes() {
+        let refs = parse_refs(r#"@ref a.test.ts#"says \"hi\" twice""#);
+        assert_eq!(refs[0].symbol.as_deref(), Some(r#"says "hi" twice"#));
+    }
+
+    #[test]
+    fn test_parse_quoted_symbol_with_blob_suffix() {
+        let refs = parse_refs(r#"@ref a.ts#"x y"@{blob:abc}"#);
+        assert_eq!(refs[0].symbol.as_deref(), Some("x y"));
+        assert_eq!(refs[0].blob_hash.as_deref(), Some("abc"));
+        assert_eq!(refs[0].commit_sha, None);
+    }
+
+    #[test]
+    fn test_parse_quoted_symbol_with_sha_suffix() {
+        let refs = parse_refs(r#"@ref a.ts#"x y"@abc123"#);
+        assert_eq!(refs[0].symbol.as_deref(), Some("x y"));
+        assert_eq!(refs[0].commit_sha.as_deref(), Some("abc123"));
+        assert_eq!(refs[0].blob_hash, None);
+    }
+
+    #[test]
+    fn test_parse_unquoted_symbol_is_not_flagged_quoted() {
+        let refs = parse_refs("@ref a.rs#Foo@abc123");
+        assert_eq!(refs[0].symbol.as_deref(), Some("Foo"));
+        assert!(!refs[0].quoted);
+    }
+
+    #[test]
+    fn test_parse_unterminated_quote_falls_back_to_unquoted_symbol() {
+        let refs = parse_refs(r#"@ref a.ts#"does a thing"#);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].symbol.as_deref(), Some(r#""does"#));
+        assert!(!refs[0].quoted);
+    }
+
+    #[test]
+    fn test_unterminated_quote_does_not_span_lines() {
+        let content = "@ref a.ts#\"does a thing\nprose with a \" quote\n@ref b.ts#Foo\n";
+        let refs = parse_refs(content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].symbol.as_deref(), Some("\"does"));
+        assert!(!refs[0].quoted);
+        assert_eq!(refs[1].path, "b.ts");
+        assert_eq!(refs[1].symbol.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn test_symbol_text_round_trips_backslashes_and_quotes() {
+        for title in [r#"a\"b"#, r"ends with \", r#"\"#, r#"mixed \\ and \" x"#] {
+            let text = format!(
+                "@ref a.ts#\"{}\"",
+                title.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let first = &parse_refs(&text)[0];
+            assert_eq!(first.symbol.as_deref(), Some(title), "parse of {text}");
+            let again = &parse_refs(&format!("@ref a.ts#{}", first.symbol_text().unwrap()))[0];
+            assert_eq!(again.symbol.as_deref(), Some(title));
+        }
+    }
+
+    #[test]
+    fn test_unknown_escape_is_kept_as_written() {
+        let refs = parse_refs(r#"@ref a.ts#"a\nb""#);
+        assert_eq!(refs[0].symbol.as_deref(), Some(r"a\nb"));
+    }
+
+    #[test]
+    fn test_symbol_text_requotes_and_escapes() {
+        let refs = parse_refs(r#"@ref a.ts#"say \"x\""@abc"#);
+        assert_eq!(refs[0].symbol_text().unwrap(), r#""say \"x\"""#);
+        let bare = parse_refs("@ref a.ts#Foo");
+        assert_eq!(bare[0].symbol_text().unwrap(), "Foo");
+        assert_eq!(parse_refs("@ref a.ts")[0].symbol_text(), None);
+    }
+
+    #[test]
+    fn test_quoted_ref_expands_to_typescript_test_block() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{:?}", out);
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(
+            root.join("x.test.ts"),
+            "describe(\"suite\", () => {\n  it(\"does a thing\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "init"]);
+
+        let body = "See:\n\n@ref x.test.ts#\"does a thing\"\n";
+        let refs = parse_refs(body);
+        assert_eq!(refs[0].symbol.as_deref(), Some("does a thing"));
+
+        let expanded = RefExpander::new(root.to_path_buf()).expand(body).unwrap();
+        assert!(expanded.contains("it(\"does a thing\""), "{expanded}");
+        assert!(expanded.contains("expect(1).toBe(1)"), "{expanded}");
+        assert!(!expanded.contains("unresolved"), "{expanded}");
+        assert!(!expanded.contains("describe("), "{expanded}");
     }
 }

@@ -153,3 +153,29 @@ fn cascade_no_references_returns_empty_vec() {
 
     assert!(updates.is_empty());
 }
+
+#[test]
+fn cascade_updates_quoted_symbol_ref_and_keeps_quotes() {
+    let fixture = TestFixture::new();
+    fixture.write_rfc("RFC-020-foo.md", "Foo", "accepted");
+
+    let body_content = "---\ntitle: \"Story\"\ntype: story\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nSee @ref docs/rfcs/RFC-020-foo.md#\"two words\" for details.\n";
+    fixture.write_doc("docs/stories/STORY-051-quoted.md", body_content);
+
+    let store = fixture.store();
+    cascade_references(
+        fixture.root(),
+        &store,
+        "docs/rfcs/RFC-020-foo.md",
+        "docs/rfcs/RFC-021-foo.md",
+        false,
+        &RealFileSystem,
+    );
+
+    let content =
+        fs::read_to_string(fixture.root().join("docs/stories/STORY-051-quoted.md")).unwrap();
+    assert!(
+        content.contains("@ref docs/rfcs/RFC-021-foo.md#\"two words\" for details."),
+        "got: {content}"
+    );
+}

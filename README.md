@@ -118,9 +118,12 @@ An `@ref` directive names committed source content. `show -e` expands it from Gi
 @ref <path>
 @ref <path>#<symbol>
 @ref <path>#<symbol>@<sha>
+@ref <path>#"<symbol with spaces>"
 @ref <path>#<line>
 @ref <path>#<line>@<sha>
 ```
+
+A bare symbol ends at whitespace. Wrap a symbol in double quotes when it contains spaces, such as a Jest or Vitest test title: `@ref src/a.test.ts#"resolves nested describe"`. Inside the quotes, `\"` stands for a quote and `\\` for a backslash; any other backslash is kept as written. A pin or SHA suffix follows the closing quote. `pin` keeps the quotes. A quote must close on the same line; an opening quote with no closing quote on its line is read as a bare symbol.
 
 ## Exit status
 
