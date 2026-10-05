@@ -1985,6 +1985,7 @@ mod attr_schema_tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         }
     }
 
@@ -2088,6 +2089,7 @@ mod attr_schema_tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         }
     }
 
@@ -2254,6 +2256,7 @@ mod unknown_relationship_tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         }
     }
 
@@ -2578,6 +2581,7 @@ mod edge_tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         }
     }
 

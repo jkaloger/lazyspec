@@ -4551,6 +4551,7 @@ mod tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         };
 
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -4895,6 +4896,7 @@ mod tests {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: PathBuf::from("."),
             governs_globs: HashMap::new(),
+            type_dirs: Vec::new(),
         };
 
         let meta_a = DocMeta {

@@ -29,6 +29,20 @@ pub fn compile_governs(meta: &DocMeta) -> Result<Vec<(String, GlobMatcher)>, Par
         .collect()
 }
 
+/// True iff `index_path` (relative to the store root) is the `index.md` of a
+/// bundle folder: a direct subdirectory of a type directory. An `index.md`
+/// sitting in the type directory itself is a plain document, exactly as
+/// [`load_type_directory`] treats it.
+pub fn is_bundle_index(type_dirs: &[PathBuf], index_path: &Path) -> bool {
+    if index_path.file_name().and_then(|f| f.to_str()) != Some("index.md") {
+        return false;
+    }
+    let Some(type_dir) = index_path.parent().and_then(Path::parent) else {
+        return false;
+    };
+    type_dirs.iter().any(|d| d == type_dir)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn load_type_directory(
     root: &Path,

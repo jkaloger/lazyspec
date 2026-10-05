@@ -634,6 +634,33 @@ mod tests {
         assert!(format!("{err:#}").contains("git commit failed"), "{err:#}");
     }
 
+    // BUG-036: a bundle delete in a `git` clone removes the whole folder before
+    // the commit, so the commit's `add -A` stages every removal.
+    #[test]
+    fn delete_removes_the_whole_bundle_before_committing() {
+        let td = rfc_type(Some("next"));
+        let (tmp, mut store, calls, _doc) = project(&td);
+        let bundle = tmp
+            .path()
+            .join(clone_dir(tmp.path(), &td))
+            .join("docs/rfcs/RFC-002-b");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(
+            bundle.join("index.md"),
+            "---\ntitle: \"B\"\ntype: rfc\nstatus: draft\nauthor: tester\ndate: 2026-04-01\ntags: []\n---\n\nB.\n",
+        )
+        .unwrap();
+        std::fs::write(bundle.join("design.md"), "design\n").unwrap();
+
+        store.delete(&td, "RFC-002").unwrap();
+
+        assert!(!bundle.exists());
+        assert_eq!(
+            *calls.borrow(),
+            vec![commit_call(tmp.path(), &td, "delete RFC-002")]
+        );
+    }
+
     #[test]
     fn delete_removes_the_clone_file_and_commits_locally() {
         let td = rfc_type(Some("next"));

@@ -63,6 +63,9 @@ pub struct Store {
     /// Each document's compiled `governs` globs, paired with the source text of
     /// the entry they came from. Documents with no pins are absent.
     pub(crate) governs_globs: HashMap<PathBuf, Vec<(String, GlobMatcher)>>,
+    /// Each loaded type directory, in the same path form as document paths, so
+    /// [`reload_file`](Store::reload_file) classifies bundles as the loader did.
+    pub(crate) type_dirs: Vec<PathBuf>,
 }
 
 /// Resolve `..` and `.` without touching the filesystem, so path arithmetic in
@@ -255,6 +258,7 @@ impl Store {
         let mut parent_of: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut parse_errors: Vec<ParseError> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
+        let mut type_dirs: Vec<PathBuf> = Vec::new();
 
         for type_def in &config.documents.types {
             let full_path = doc_root(config, root, type_def);
@@ -307,8 +311,16 @@ impl Store {
                 &type_def.name,
             );
 
+            let path_root = path_root_for_relativizing(config, root, type_def);
+            type_dirs.push(
+                full_path
+                    .strip_prefix(path_root)
+                    .unwrap_or(&full_path)
+                    .to_path_buf(),
+            );
+
             loader::load_type_directory(
-                path_root_for_relativizing(config, root, type_def),
+                path_root,
                 &full_path,
                 type_def,
                 &declared_parts,
@@ -345,6 +357,7 @@ impl Store {
             body_cache: std::sync::Mutex::new(HashMap::new()),
             governs_root: normalize(&root.join(&config.governs.root)),
             governs_globs,
+            type_dirs,
         };
         store.propagate_parent_links();
 
@@ -565,13 +578,12 @@ impl Store {
         relative_path: &Path,
         fs: &dyn FileSystem,
     ) -> Result<()> {
-        let file_name = relative_path.file_name().and_then(|f| f.to_str());
-        let index_path = if file_name == Some("index.md") {
-            Some(relative_path.to_path_buf())
-        } else {
-            relative_path.parent().map(|p| p.join("index.md"))
+        let index_path = match relative_path.file_name().and_then(|f| f.to_str()) {
+            Some("index.md") => Some(relative_path.to_path_buf()),
+            _ => relative_path.parent().map(|p| p.join("index.md")),
         };
-        if let Some(index_path) = index_path {
+        if let Some(index_path) = index_path.filter(|p| loader::is_bundle_index(&self.type_dirs, p))
+        {
             if fs.exists(&root.join(&index_path)) {
                 return self.reload_bundle(root, &index_path, fs);
             }

@@ -402,7 +402,29 @@ pub fn delete_document(root: &Path, store: &Store, doc_id: &str) -> Result<()> {
     if !full_path.exists() {
         return Err(anyhow!("file not found: {}", doc.path.display()));
     }
+    if doc.path.file_name().and_then(|f| f.to_str()) != Some("index.md") {
+        fs::remove_file(&full_path)?;
+        return Ok(());
+    }
+
+    let dir = root.join(doc.path.parent().unwrap_or(Path::new("")));
+    if dir == root {
+        fs::remove_file(&full_path)?;
+        return Ok(());
+    }
+
+    // Named files only, never a recursive delete: the folder may be the type
+    // directory itself, or hold child `.md` files that failed to parse and so
+    // are not in the store.
+    let owned = doc.parts.iter().map(|p| &p.path).chain(&doc.sidecars);
+    for path in owned {
+        match fs::remove_file(root.join(path)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
     fs::remove_file(&full_path)?;
+    let _ = fs::remove_dir(&dir);
     Ok(())
 }
 
@@ -978,6 +1000,132 @@ mod tests {
         let content = update_reviewed(tmp.path(), "", "abc123");
 
         assert!(content.contains("reviewed: abc123"), "got: {content}");
+    }
+
+    const BUNDLE_INDEX: &str = "---\ntitle: \"Change\"\ntype: rfc\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n\nparent\n";
+
+    // BUG-036: deleting a bundle removes the folder with its parts and
+    // sidecars, not just `index.md`.
+    #[test]
+    fn delete_document_removes_the_whole_bundle_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs/RFC-001-change");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.md"), BUNDLE_INDEX).unwrap();
+        fs::write(dir.join("design.md"), "design\n").unwrap();
+        fs::write(dir.join("notes.yaml"), "note: 1\n").unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        delete_document(tmp.path(), &store, "RFC-001").unwrap();
+
+        assert!(!dir.exists());
+        assert!(tmp.path().join("docs/rfcs").exists());
+    }
+
+    // An `index.md` directly in a type directory is a plain document, not a
+    // bundle: reloading a sibling must not adopt the directory's other files as
+    // its parts, or deleting it would delete them.
+    #[test]
+    fn deleting_a_plain_index_document_keeps_its_neighbours_after_reload() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.md"), BUNDLE_INDEX).unwrap();
+        fs::write(dir.join("README.md"), "no frontmatter\n").unwrap();
+        fs::write(dir.join(".gitkeep"), "").unwrap();
+        let sibling = dir.join("RFC-002-sibling.md");
+        fs::write(&sibling, BUNDLE_INDEX.replace("Change", "Sibling")).unwrap();
+        let mut store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        let sibling_rel = Path::new("docs/rfcs/RFC-002-sibling.md");
+        store
+            .reload_file(tmp.path(), sibling_rel, &crate::engine::fs::RealFileSystem)
+            .unwrap();
+        let index_rel = Path::new("docs/rfcs/index.md");
+        store
+            .reload_file(tmp.path(), index_rel, &crate::engine::fs::RealFileSystem)
+            .unwrap();
+
+        let index = store.get(index_rel).expect("index.md loads as a plain doc");
+        assert!(index.parts.is_empty(), "{:?}", index.parts);
+        assert!(index.sidecars.is_empty(), "{:?}", index.sidecars);
+
+        delete_document(tmp.path(), &store, "docs/rfcs/index.md").unwrap();
+
+        assert!(!dir.join("index.md").exists());
+        assert!(dir.join("README.md").exists());
+        assert!(dir.join(".gitkeep").exists());
+        assert!(sibling.exists());
+    }
+
+    // BUG-036: a folder that also holds child documents is shared, so only the
+    // parent's own files go; the children stay.
+    #[test]
+    fn delete_document_keeps_child_documents_of_a_parent_folder() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs/RFC-001-change");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.md"), BUNDLE_INDEX).unwrap();
+        fs::write(dir.join("design.md"), "design\n").unwrap();
+        let child = dir.join("01-ITERATION-001-child.md");
+        fs::write(
+            &child,
+            "---\ntitle: \"Child\"\ntype: iteration\nstatus: draft\nauthor: t\ndate: 2026-01-01\ntags: []\n---\n",
+        )
+        .unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        delete_document(tmp.path(), &store, "RFC-001").unwrap();
+
+        assert!(!dir.join("index.md").exists());
+        assert!(!dir.join("design.md").exists());
+        assert!(child.exists());
+    }
+
+    // BUG-036: `docs/rfcs/index.md` is a plain document in the type directory,
+    // so deleting it must leave its sibling documents alone.
+    #[test]
+    fn delete_document_of_a_type_directory_index_keeps_sibling_documents() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("index.md"),
+            BUNDLE_INDEX.replace("Change", "Index"),
+        )
+        .unwrap();
+        let sibling = dir.join("RFC-001-x.md");
+        fs::write(&sibling, BUNDLE_INDEX).unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+        let id = store
+            .all_docs()
+            .into_iter()
+            .find(|d| d.path.ends_with("index.md"))
+            .map(|d| d.path.to_string_lossy().into_owned())
+            .unwrap();
+
+        delete_document(tmp.path(), &store, &id).unwrap();
+
+        assert!(!dir.join("index.md").exists());
+        assert!(sibling.exists());
+    }
+
+    // BUG-036: a child that failed to parse is not in the store, but its file
+    // is still the user's.
+    #[test]
+    fn delete_document_keeps_an_unparseable_child_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("docs/rfcs/RFC-001-change");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.md"), BUNDLE_INDEX).unwrap();
+        let broken = dir.join("01-ITERATION-001-bad.md");
+        fs::write(&broken, "---\ntitle: [unclosed\n---\n").unwrap();
+        let store = Store::load(tmp.path(), &Config::default()).unwrap();
+
+        delete_document(tmp.path(), &store, "RFC-001").unwrap();
+
+        assert!(!dir.join("index.md").exists());
+        assert!(broken.exists());
     }
 
     // RFC-074 AC7: `write_part` overwrites an existing part's file byte for
