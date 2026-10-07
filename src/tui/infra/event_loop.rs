@@ -1,5 +1,5 @@
 use crate::engine::clickup::ClickupClient;
-use crate::engine::config::{Config, Extends, StoreBackend};
+use crate::engine::config::{Config, Extends, StoreBackend, TypeDef};
 use crate::engine::credentials::{CredentialStore, LayeredCredentialStore};
 use crate::engine::document::split_frontmatter;
 use crate::engine::gh::{GhCli, GhGraphql};
@@ -148,55 +148,69 @@ impl Drop for ClearOnDrop {
     }
 }
 
+/// The document an external-editor save belongs to (BUG-039): a bundle part
+/// carries no frontmatter and has no `store.docs` entry, so the edited path
+/// resolves to its bundle's `index.md` first. `is_part` lets single-body
+/// backends skip a part edit rather than overwrite the remote body with it.
+struct EditedDoc<'a> {
+    id: String,
+    type_def: &'a TypeDef,
+    is_part: bool,
+}
+
+fn resolve_edited_doc<'a>(
+    root: &Path,
+    relative: &Path,
+    config: &'a Config,
+) -> Result<EditedDoc<'a>, String> {
+    let store = Store::load(root, config).map_err(|e| e.to_string())?;
+    let doc_path = store.bundle_root(relative);
+    let doc = store
+        .get(&doc_path)
+        .ok_or_else(|| "document not found in store".to_string())?;
+    let type_name = doc.doc_type.as_str();
+    let type_def = config
+        .type_by_name(type_name)
+        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
+    Ok(EditedDoc {
+        id: doc.id.clone(),
+        type_def,
+        is_part: doc_path != relative,
+    })
+}
+
+fn read_edited_body(root: &Path, relative: &Path) -> Result<String, String> {
+    let content = std::fs::read_to_string(root.join(relative))
+        .map_err(|e| format!("failed to read edited file: {e}"))?;
+    let (_yaml, body) =
+        split_frontmatter(&content).map_err(|e| format!("failed to parse edited file: {e}"))?;
+    Ok(body.to_string())
+}
+
 fn try_push_gh_edit(
     root: &Path,
     relative: &Path,
     config: &Config,
     shared_store: &Arc<Mutex<GithubIssuesStore>>,
 ) -> Result<(), String> {
-    let content = std::fs::read_to_string(root.join(relative))
-        .map_err(|e| format!("failed to read edited file: {e}"))?;
-
-    let (_yaml, body) =
-        split_frontmatter(&content).map_err(|e| format!("failed to parse edited file: {e}"))?;
-
-    let store = Store::load(root, config).map_err(|e| e.to_string())?;
-    let doc = store
-        .get(relative)
-        .ok_or_else(|| "document not found in store".to_string())?;
-    let doc_id = doc.id.clone();
-    let type_name = doc.doc_type.as_str().to_string();
-
-    let type_def = config
-        .type_by_name(&type_name)
-        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
-
-    if type_def.store != StoreBackend::GithubIssues {
+    let doc = resolve_edited_doc(root, relative, config)?;
+    if doc.type_def.store != StoreBackend::GithubIssues || doc.is_part {
         return Ok(());
     }
+    let body = read_edited_body(root, relative)?;
 
     let mut gh_store = shared_store
         .lock()
         .map_err(|e| format!("lock poisoned: {e}"))?;
     gh_store
-        .update(type_def, &doc_id, &[("body", &body)])
+        .update(doc.type_def, &doc.id, &[("body", &body)])
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
 fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Result<(), String> {
-    let store = Store::load(root, config).map_err(|e| e.to_string())?;
-    let doc = store
-        .get(relative)
-        .ok_or_else(|| "document not found in store".to_string())?;
-    let doc_id = doc.id.clone();
-    let type_name = doc.doc_type.as_str().to_string();
-
-    let type_def = config
-        .type_by_name(&type_name)
-        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
-
-    if type_def.store != StoreBackend::GitRef {
+    let doc = resolve_edited_doc(root, relative, config)?;
+    if doc.type_def.store != StoreBackend::GitRef {
         return Ok(());
     }
 
@@ -208,7 +222,7 @@ fn try_push_git_ref_edit(root: &Path, relative: &Path, config: &Config) -> Resul
         reserved_number: None,
     };
     git_store
-        .recommit_cache(type_def, &doc_id)
+        .recommit_cache(doc.type_def, &doc.id)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -282,26 +296,11 @@ fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
     client_factory: impl FnOnce() -> C,
     token_loader: impl FnOnce() -> anyhow::Result<Option<crate::engine::credentials::Token>>,
 ) -> Result<(), String> {
-    let content = std::fs::read_to_string(root.join(relative))
-        .map_err(|e| format!("failed to read edited file: {e}"))?;
-
-    let (_yaml, body) =
-        split_frontmatter(&content).map_err(|e| format!("failed to parse edited file: {e}"))?;
-
-    let store = Store::load(root, config).map_err(|e| e.to_string())?;
-    let doc = store
-        .get(relative)
-        .ok_or_else(|| "document not found in store".to_string())?;
-    let doc_id = doc.id.clone();
-    let type_name = doc.doc_type.as_str().to_string();
-
-    let type_def = config
-        .type_by_name(&type_name)
-        .ok_or_else(|| format!("type '{}' not found in config", type_name))?;
-
-    if type_def.store != StoreBackend::ClickupTasks {
+    let doc = resolve_edited_doc(root, relative, config)?;
+    if doc.type_def.store != StoreBackend::ClickupTasks || doc.is_part {
         return Ok(());
     }
+    let body = read_edited_body(root, relative)?;
 
     let mut clickup_store = crate::engine::store_dispatch::clickup_write_store(
         root,
@@ -312,7 +311,7 @@ fn try_push_clickup_edit_with<C: ClickupClient + 'static>(
     )
     .map_err(|e| e.to_string())?;
     clickup_store
-        .update(type_def, &doc_id, &[("body", &body)])
+        .update(doc.type_def, &doc.id, &[("body", &body)])
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -1816,6 +1815,38 @@ mod tests {
         assert!(design_heading < design_body);
         assert!(design_body < tasks_heading);
         assert!(tasks_heading < tasks_body);
+    }
+
+    // BUG-039: an external-editor save on a part row hands the push spawns a
+    // part path. Parts have no frontmatter and no `store.docs` entry, so every
+    // backend arm must resolve the bundle root rather than surface a conflict.
+    #[test]
+    fn push_arms_are_noops_for_a_filesystem_bundle_part() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let dir = root.join("docs/type0/STORY-001-change");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(".lazyspec.toml"), valid_config_toml(1)).unwrap();
+        std::fs::write(
+            dir.join("index.md"),
+            "---\ntitle: \"Change\"\ntype: type0\nstatus: draft\nauthor: \"test\"\ndate: 2026-01-01\ntags: []\n---\nParent body.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("design.md"), "Design content.\n").unwrap();
+        let config = Config::load(root, &crate::engine::fs::RealFileSystem).unwrap();
+        let part = Path::new("docs/type0/STORY-001-change/design.md");
+        let gh_store = Arc::new(Mutex::new(GithubIssuesStore {
+            client: Box::new(GhCli::new()),
+            root: root.to_path_buf(),
+            repo: "owner/repo".to_string(),
+            config: config.clone(),
+            issue_map: IssueMap::load(root).unwrap(),
+            issue_cache: IssueCache::new(root),
+        }));
+
+        assert_eq!(try_push_gh_edit(root, part, &config, &gh_store), Ok(()));
+        assert_eq!(try_push_git_ref_edit(root, part, &config), Ok(()));
+        assert_eq!(try_push_clickup_edit(root, part, &config), Ok(()));
     }
 
     // STORY-294 AC3: a selected `Part` row expands to that part's own body
