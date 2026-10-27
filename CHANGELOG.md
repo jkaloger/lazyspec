@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/jkaloger/lazyspec/compare/v0.15.1...v0.16.0) - 2026-10-09
+
+### Added
+
+- *(symbols)* [**breaking**] Rust attributes in extraction, Jest/Vitest test blocks, quoted @ref titles
+
+### Fixed
+
+- *(tui)* resolve bundle parts before pushing an external edit (BUG-039)
+- *(cache)* gitignore the staleness cache before first write (BUG-037)
+- *(store)* delete whole bundle without recursive removal (BUG-036)
+
+### Other
+
+- stories and RFC for remaining hydra adoption asks
+- hydra interview, metaframework design settled
+
 ## [0.15.1](https://github.com/jkaloger/lazyspec/compare/v0.15.0...v0.15.1) - 2026-10-01
 
 ### Other
